@@ -23,6 +23,7 @@
 - [Authentication](#authentication)
 - [Branding: Logo & Favicon](#branding-logo--favicon)
 - [Integrations](#integrations)
+- [Progressive Web App & Push Notifications](#progressive-web-app--push-notifications)
 - [API Documentation](#api-documentation)
 - [Demo Data & ETL Collection](#demo-data--etl-collection)
 - [Further Documentation](#further-documentation)
@@ -82,7 +83,7 @@ The application follows a **containerized 3-tier architecture** orchestrated via
 | **Cache** | Redis 7 | KPI caching, rate-limit counters, Celery broker, alert pub/sub |
 | **Proxy** | NGINX | TLS termination, HTTP→HTTPS redirect, reverse proxy (`/api`, `/ws`) |
 | **ETL** | Python + Celery | Polls the configured Zabbix/Nagios/NetXMS/Centreon APIs (5-min batch); nightly KPI refresh (02:00); end-of-month report archive |
-| **Notifications** | Twilio + SMTP | SMS + email to the NOC on critical incidents (off by default) |
+| **Notifications** | Twilio + SMTP + Web Push | SMS + email (off by default) and browser push (PWA) to the NOC on critical incidents |
 
 ---
 
@@ -97,7 +98,8 @@ The application follows a **containerized 3-tier architecture** orchestrated via
 - **[fpdf2](https://pypi.org/project/fpdf2/)** `2.7.9` — Monthly report PDF export
 - **[python-docx](https://pypi.org/project/python-docx/)** `1.1.2` — Monthly report DOCX export
 - **[websockets](https://pypi.org/project/websockets/)** `12.0` — WebSocket support for the `/ws/alerts` stream
-- **[Requests](https://pypi.org/project/requests/)** `2.32.3` — Outbound HTTP (Twilio SMS API)
+- **[Requests](https://pypi.org/project/requests/)** `2.32.3` — Outbound HTTP (Twilio SMS API, iTop REST)
+- **[pywebpush](https://pypi.org/project/pywebpush/)** `2.0.3` — VAPID-signed Web Push delivery to browser/PWA subscriptions
 - **[Python-dotenv](https://pypi.org/project/python-dotenv/)** `1.0.0` — Environment variable management
 - **[pytest](https://pytest.org/) + [httpx](https://www.python-httpx.org/)** *(dev)* — Backend test suite (`backend/tests/`)
 
@@ -113,6 +115,7 @@ The application follows a **containerized 3-tier architecture** orchestrated via
 - **[React Router DOM](https://reactrouter.com/)** `7` — Client-side routing
 - **[Lucide React](https://lucide.dev/)** — Icon library
 - **[date-fns](https://date-fns.org/)** — Date utility library
+- **[vite-plugin-pwa](https://vite-pwa-org.netlify.app/)** `1.3.0` + **workbox-precaching** `7.4.1` — PWA build (installable, offline-capable) with a custom service worker (`src/sw.js`) handling Web Push and notification clicks
 
 ---
 
@@ -177,10 +180,10 @@ noc/
 │       ├── main.py               # FastAPI entry point, CORS + router wiring
 │       ├── core/                 # Config/constants, security (JWT + RBAC + webhook API key), rate limiting
 │       ├── db/                   # SQLAlchemy session & Redis client
-│       ├── models/               # SQLAlchemy ORM models (dimensions, fact_incident, dim_user)
+│       ├── models/               # SQLAlchemy ORM models (dimensions, fact_incident, dim_user, push_subscription)
 │       ├── schemas/               # Pydantic request/response schemas
-│       ├── routes/               # REST routers (/api/kpi, /api/sla, /api/alerts, /api/incidents, /api/auth, /api/report) + /ws/alerts WebSocket
-│       └── services/             # Business logic (KPI queries, incident lifecycle, cache, auth, iTop stub, PDF/DOCX report, notifications, alert broadcast)
+│       ├── routes/               # REST routers (/api/kpi, /api/sla, /api/alerts, /api/incidents, /api/auth, /api/report, /api/notifications) + /ws/alerts WebSocket
+│       └── services/             # Business logic (KPI queries, incident lifecycle, cache, auth, iTop REST client, PDF/DOCX report, SMS/email + Web Push notifications, alert broadcast)
 │
 ├── frontend/                     # React application (Vite)
 │   ├── Dockerfile
@@ -196,12 +199,13 @@ noc/
 │       ├── index.css             # Design tokens (CSS vars per theme) + Leaflet theming
 │       ├── theme/colors.js       # Chart/map color constants (validated palette, mirrors index.css)
 │       ├── assets/images/        # Brand assets (master logo + generated sizes)
-│       ├── api/                  # Axios HTTP clients (kpi, sla, alerts, auth) + auth interceptor
+│       ├── sw.js                 # Custom service worker (injectManifest strategy): precache + push/notificationclick handlers
+│       ├── api/                  # Axios HTTP clients (kpi, sla, alerts, auth, notifications) + auth interceptor
 │       ├── components/           # Reusable UI components
 │       │   ├── charts/           # Chart.js-based chart components (theme-aware)
 │       │   ├── map/              # BurkinaFasoMap (Leaflet/OSM) + LocalityBulletList
-│       │   └── layout/           # Header, TabNav
-│       ├── hooks/                # useKPI, useRealtime, useChartTheme, useClock
+│       │   └── layout/           # Header (incl. push-notification bell toggle), TabNav
+│       ├── hooks/                # useKPI, useRealtime, useChartTheme, useClock, usePushNotifications
 │       ├── pages/                # Login + dashboard views (Global, Localities, SLA, Interop, Data Model)
 │       └── store/                # Zustand stores: period, theme, auth (persisted)
 │
@@ -269,6 +273,7 @@ ZABBIX_PASSWORD=zabbix
 ITOP_URL=http://itop/webservices/rest.php
 ITOP_USER=admin
 ITOP_PASS=your_itop_password             # Set after running the iTop setup wizard
+ITOP_ORG_ID=1                            # org_id tickets are created under ("My Company/Department" on a fresh install)
 
 NAGIOS_API_URL=http://nagios
 NAGIOS_USER=nagiosadmin                  # Also the Nagios container's web login
@@ -296,6 +301,13 @@ SMTP_USER=
 SMTP_PASSWORD=
 SMTP_FROM=noc@anptic.bf
 NOC_EMAIL_RECIPIENTS=noc@anptic.bf       # Comma-separated
+
+# ── Web Push (browser/PWA push on critical incidents) ────
+# Generate a keypair per environment — never reuse the demo one in production
+# (see docs/integrations.md).
+VAPID_PUBLIC_KEY=
+VAPID_PRIVATE_KEY=
+VAPID_CLAIMS_EMAIL=noc@anptic.bf
 
 # ── Rate limiting (per IP, per minute — spec §10.1) ──────
 RATE_LIMIT_ENABLED=true
@@ -550,9 +562,34 @@ The dashboard integrates with the following monitoring systems via API or webhoo
 | **Centreon** | REST API | IT monitoring events & alerts |
 | **Nagios** | REST API | Host/service availability data |
 | **NetXMS** | — | Network performance monitoring |
-| **iTop** | REST API | Incident management & ITSM (CMDB) |
+| **iTop** | REST API (`core/create`) | Incident management & ITSM (CMDB) — creates a real `Incident` ticket per critical/high-severity incident when `itop_auto_ticket: true` |
 
-Configure integration URLs and credentials in the `.env` file as described in the [Environment Variables](#2-configure-environment-variables) section.
+Configure integration URLs and credentials in the `.env` file as described in the [Environment Variables](#2-configure-environment-variables) section. See [docs/integrations.md](docs/integrations.md) for the iTop setup wizard walkthrough and the `REST Services User` profile grant it requires.
+
+---
+
+## Progressive Web App & Push Notifications
+
+The frontend builds as an installable PWA (`vite-plugin-pwa`, `injectManifest`
+strategy — `frontend/src/sw.js`, registered from `main.jsx`): it precaches the
+app shell for offline use and also carries a real **Web Push** implementation,
+not just an in-app toast.
+
+- **Bell toggle** in the header (next to the theme switch) requests
+  `Notification` permission and subscribes via the browser's Push API
+  (`usePushNotifications.js`); the subscription (`endpoint` + encryption keys)
+  is registered with the backend at `POST /api/notifications/subscribe`.
+- On a **critical** incident, `backend/app/services/push_service.py` sends a
+  VAPID-signed push to every subscribed device, alongside the existing
+  SMS/email notifications — same fail-safe pattern (delivery failures are
+  logged, never block ingestion; a `404`/`410` response means the browser
+  dropped the subscription, so it's pruned automatically).
+- Requires a **VAPID keypair** (`VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY` in
+  `.env`) — see [docs/integrations.md](docs/integrations.md#web-push-browserpwa)
+  for how to generate one. The demo keypair shipped in `.env` is for local use
+  only; generate a fresh one per real deployment.
+- Clicking a delivered notification (`sw.js`'s `notificationclick` handler)
+  focuses an already-open dashboard tab or opens a new one.
 
 ---
 
@@ -587,14 +624,20 @@ require a JWT; see [Authentication](#authentication) for roles and rate limits):
 | POST | `/api/auth/login` | Username/password login → JWT |
 | POST | `/api/auth/pin-login` | 4-digit PIN quick login → JWT |
 | GET | `/api/auth/me` | Current user (session restore) |
+| GET | `/api/notifications/vapid-public-key` | The server's VAPID public key (frontend uses it as `applicationServerKey`) |
+| POST | `/api/notifications/subscribe` | Register this device's Web Push subscription for the current user |
+| DELETE | `/api/notifications/subscribe` | Remove a Web Push subscription (by `endpoint`) |
 | WS | `/ws/alerts?token=<JWT>` | Real-time incident stream (Redis pub/sub behind the scenes) |
 
 New incidents are also **pushed live** to the dashboard: ingest publishes to
 Redis, `/ws/alerts` forwards to every connected browser, and the frontend
 (`useRealtime.js`) refreshes its alert/KPI queries on each message — with 15s
 polling kept as a fallback. Critical-severity incidents additionally trigger
-SMS + email to the NOC (see `backend/app/services/notification_service.py`),
-when `NOTIFICATIONS_ENABLED=true`.
+SMS + email (`backend/app/services/notification_service.py`, when
+`NOTIFICATIONS_ENABLED=true`) and a real browser Web Push notification to every
+subscribed device (`backend/app/services/push_service.py`, when
+`VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY` are set — see
+[Progressive Web App & Push Notifications](#progressive-web-app--push-notifications)).
 
 ---
 
@@ -614,7 +657,7 @@ The database ships with a generated demo dataset so the dashboard is fully inter
 - The same Celery beat also runs two **scheduled jobs** (cahier des charges §2.2 and §1.2):
   - `etl.refresh_kpi_view` — nightly at **02:00**, `REFRESH MATERIALIZED VIEW CONCURRENTLY mv_kpi_node_monthly`.
   - `etl.generate_monthly_report` — on the **1st of each month at 02:30**, downloads the previous month's report (PDF + DOCX) and archives it in the `reports` Docker volume (`/reports` inside `etl-worker`).
-- iTop ticket creation is similarly stubbed (`backend/app/services/itop_service.py`): it mints a `TKT-<year>-<id>` reference in the same shape the real iTop REST webservice would return.
+- iTop ticket creation (`backend/app/services/itop_service.py`) makes a real REST call to `core/create` on the `Incident` class whenever an ingest payload sets `itop_auto_ticket: true`, and degrades gracefully (logs, returns `null`) if iTop is unreachable or misconfigured — see [docs/integrations.md](docs/integrations.md#itop-itsm--cmdb).
 
 ---
 
@@ -629,7 +672,7 @@ reference, see [`docs/`](docs/):
 | [docs/api-reference.md](docs/api-reference.md) | Every endpoint: auth, params, request/response shapes, error codes |
 | [docs/database-schema.md](docs/database-schema.md) | Tables, columns, relationships, the `mv_kpi_node_monthly` materialized view, indexes |
 | [docs/deployment.md](docs/deployment.md) | Services, env vars, `deployment.sh`, TLS, backups, production hardening checklist |
-| [docs/integrations.md](docs/integrations.md) | Zabbix/Nagios/Centreon/NetXMS/iTop integration contracts and what to swap for real ones |
+| [docs/integrations.md](docs/integrations.md) | Zabbix/Nagios/Centreon/NetXMS/iTop integration contracts, the iTop setup wizard walkthrough, and Web Push/VAPID setup |
 
 ---
 

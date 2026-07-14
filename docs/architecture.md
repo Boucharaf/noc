@@ -10,7 +10,7 @@ quick overview and getting-started steps, see the [README](../README.md).
 - [Request flow](#request-flow)
 - [Incident ingestion & KPI refresh flow](#incident-ingestion--kpi-refresh-flow)
 - [Real-time alerts (WebSocket)](#real-time-alerts-websocket)
-- [Notifications (SMS/email)](#notifications-smsemail)
+- [Notifications (SMS/email/push)](#notifications-smsemailpush)
 - [Scheduled jobs](#scheduled-jobs)
 - [Security: RBAC & rate limiting](#security-rbac--rate-limiting)
 - [Caching strategy](#caching-strategy)
@@ -59,7 +59,7 @@ quick overview and getting-started steps, see the [README](../README.md).
 |---|---|---|
 | `nginx` | `nginx/Dockerfile` | TLS termination, HTTP→HTTPS redirect, reverse proxy to frontend and backend |
 | `frontend` | `frontend/Dockerfile` | Static React (Vite) build served by nginx-in-container on port 80 |
-| `backend` | `backend/Dockerfile` | FastAPI app (Uvicorn), REST API, JWT auth + RBAC, rate limiting, KPI computation, PDF/DOCX reports, `/ws/alerts` WebSocket, SMS/email notifications |
+| `backend` | `backend/Dockerfile` | FastAPI app (Uvicorn), REST API, JWT auth + RBAC, rate limiting, KPI computation, PDF/DOCX reports, `/ws/alerts` WebSocket, iTop ticket creation, SMS/email + Web Push notifications |
 | `postgres` | `postgres:15-alpine` | System of record — dimensions, incidents, users; runs `database/*.sql` on first boot |
 | `redis` | `redis:7` | Four roles on one instance: KPI response cache + rate-limit counters + `noc:alerts` pub/sub channel (DB 0), and Celery broker (DB 1) |
 | `etl-worker` | `etl/Dockerfile` | Celery worker executing `etl.collect_incident`, `etl.refresh_kpi_view`, and `etl.generate_monthly_report`; mounts the `reports` volume at `/reports` |
@@ -113,8 +113,10 @@ This is the path that keeps the dashboard feeling "live":
      already-open incident returns that incident (HTTP 200, no side effects) —
      status pollers legitimately re-report active problems every pass.
    - Inserts the `fact_incident` row.
-   - Optionally mints an iTop ticket reference (`itop_service.create_ticket` — currently
-     stubbed, see [integrations.md](integrations.md)).
+   - When the payload sets `itop_auto_ticket: true`, creates a real iTop
+     `Incident` ticket via REST (`itop_service.create_ticket`, see
+     [integrations.md](integrations.md#itop-itsm--cmdb)) and stores its
+     reference in `itop_ticket_id`.
    - Refreshes `mv_kpi_node_monthly` synchronously **when `SYNC_MV_REFRESH=true`**
      (the default, fine for the small demo dataset). In production set it to
      `false` and rely on the nightly `etl.refresh_kpi_view` batch (spec §2.2) —
@@ -123,8 +125,8 @@ This is the path that keeps the dashboard feeling "live":
 4. The ingest **route** then publishes the incident to the `noc:alerts` Redis
    channel (pushed to browsers — see
    [Real-time alerts](#real-time-alerts-websocket)) and, for `critical`
-   severity, schedules SMS/email notifications as a FastAPI background task
-   (see [Notifications](#notifications-smsemail)).
+   severity, schedules **two independent** FastAPI background tasks: SMS/email
+   and Web Push (see [Notifications](#notifications-smsemailpush)).
 5. Acknowledge/resolve actions (JWT + role-gated, dashboard-driven) follow the same
    commit → (refresh view for resolve) → cache-invalidate pattern.
 
@@ -151,20 +153,29 @@ POST /api/incidents/ingest ──▶ redis PUBLISH noc:alerts ──▶ WS /ws/a
   `kpi` caches on every incident frame; 15s polling stays on as a fallback
   when the socket can't connect (blocked upgrade, old proxy…).
 
-## Notifications (SMS/email)
+## Notifications (SMS/email/push)
 
-`backend/app/services/notification_service.py` implements the spec's §7 step 6:
-when a **critical** incident is ingested, the NOC lead gets an SMS (Twilio REST
-API, plain `requests` call — no SDK) and the permanence list gets an email
-(stdlib `smtplib`, STARTTLS). Design points:
+Two independent services react to a **critical** incident, both as FastAPI
+**background tasks** scheduled after the webhook response is sent (the
+supervision tool never waits on either):
 
-- Runs as a FastAPI **background task** after the webhook response is sent —
-  the supervision tool never waits on Twilio/SMTP.
-- **Fail-safe**: disabled by default (`NOTIFICATIONS_ENABLED=false`), no-ops
-  per-channel when credentials are missing, and catches every exception — an
-  alerting-provider outage must never break the incident pipeline.
-- Config is all env vars: `TWILIO_*`, `NOC_SMS_RECIPIENTS`, `SMTP_*`,
-  `NOC_EMAIL_RECIPIENTS` (comma-separated lists).
+**SMS/email** — `backend/app/services/notification_service.py` implements the
+spec's §7 step 6: the NOC lead gets an SMS (Twilio REST API, plain `requests`
+call — no SDK) and the permanence list gets an email (stdlib `smtplib`,
+STARTTLS). Disabled by default (`NOTIFICATIONS_ENABLED=false`); config is
+`TWILIO_*`, `NOC_SMS_RECIPIENTS`, `SMTP_*`, `NOC_EMAIL_RECIPIENTS`.
+
+**Web Push** — `backend/app/services/push_service.py` sends a VAPID-signed
+push notification to every browser/PWA subscribed via
+`POST /api/notifications/subscribe` (see
+[integrations.md](integrations.md#web-push-browserpwa) for the full flow and
+[database-schema.md](database-schema.md) for the `push_subscription` table).
+No-ops if `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY` aren't set; a `404`/`410`
+delivery response prunes the stale subscription automatically.
+
+Both are **fail-safe**: each no-ops per-channel when unconfigured and catches
+every exception — an alerting-provider outage must never break the incident
+pipeline. Neither's failure affects the other, or the webhook caller.
 
 ## Scheduled jobs
 

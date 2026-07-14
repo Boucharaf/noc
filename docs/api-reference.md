@@ -18,6 +18,7 @@ aren't always obvious from the OpenAPI schema alone.
 - [Alerts endpoint](#alerts-endpoint)
 - [Incidents endpoints](#incidents-endpoints)
 - [Auth endpoints](#auth-endpoints)
+- [Notifications endpoints](#notifications-endpoints)
 - [Report endpoint](#report-endpoint)
 - [WebSocket: real-time alerts](#websocket-real-time-alerts)
 - [Error responses](#error-responses)
@@ -258,7 +259,9 @@ longest surface first) — **not cached**, to stay near-real-time.
 Query: `limit` (default 20, max 100)
 
 Returns `{id, node_code, node_name, locality, severity, status, description,
-detected_at, age_minutes}[]`.
+detected_at, age_minutes, itop_ticket_id}[]`. `itop_ticket_id` is `null` until
+an iTop ticket has been created for that incident (see
+[`POST /api/incidents/ingest`](#post-apiincidentsingest)).
 
 ---
 
@@ -296,17 +299,24 @@ an existing `dim_node.code` or the request 404s.
 Response (`201 Created`):
 
 ```json
-{ "incident_id": 5821, "node_id": 12, "itop_ticket_id": "TKT-2026-05821", "shift": "noc", "created_at": "2026-07-07T09:14:03" }
+{ "incident_id": 5821, "node_id": 12, "itop_ticket_id": "I-000042", "shift": "noc", "created_at": "2026-07-07T09:14:03" }
 ```
 
-Side effects: creates the cause dimension row if new, optionally mints an
-iTop ticket reference, refreshes `mv_kpi_node_monthly` (when
+Side effects: creates the cause dimension row if new, and — when
+`itop_auto_ticket: true` — creates a real iTop `Incident` ticket via REST
+(`backend/app/services/itop_service.py`, see
+[integrations.md](integrations.md#itop-itsm--cmdb)) and stores its reference
+in `itop_ticket_id`. Also refreshes `mv_kpi_node_monthly` (when
 `SYNC_MV_REFRESH=true`), invalidates all `kpi:*` cache keys, **publishes the
 incident to the `/ws/alerts` WebSocket stream** (via Redis pub/sub), and — for
-`critical` severity with `NOTIFICATIONS_ENABLED=true` — fires SMS (Twilio) +
-email (SMTP) to the NOC as a background task
-(`backend/app/services/notification_service.py`). Notification failures are
-logged, never surfaced to the webhook caller.
+`critical` severity — fires two independent background tasks: SMS (Twilio) +
+email (SMTP) to the NOC when `NOTIFICATIONS_ENABLED=true`
+(`backend/app/services/notification_service.py`), and a Web Push notification
+to every subscribed browser/PWA when `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY`
+are set (`backend/app/services/push_service.py`, see
+[integrations.md](integrations.md#web-push-browserpwa)). All three
+(ticket/SMS-email/push) fail independently and silently from the webhook
+caller's perspective — failures are logged, never surfaced or retried inline.
 
 ### `PATCH /api/incidents/{incident_id}/resolve`
 
@@ -356,6 +366,45 @@ on no match.
 
 **Auth**: JWT bearer. Returns the current user (session-restore on frontend
 reload). `401` if the token is missing/invalid/expired or the user is inactive.
+
+---
+
+## Notifications endpoints
+
+All under `/api/notifications`. See
+[integrations.md#web-push-browserpwa](integrations.md#web-push-browserpwa) for
+the full Web Push flow and how to generate a VAPID keypair.
+
+### `GET /api/notifications/vapid-public-key`
+
+No auth required (it's a public key). Returns
+`{ "public_key": "<base64url>" }` — the frontend passes this to
+`PushManager.subscribe()` as `applicationServerKey`. Empty string if
+`VAPID_PUBLIC_KEY` isn't configured.
+
+### `POST /api/notifications/subscribe`
+
+**Auth**: JWT bearer (any role)
+
+Body — the `PushSubscription` object's own JSON shape:
+
+```json
+{
+  "endpoint": "https://fcm.googleapis.com/fcm/send/...",
+  "keys": { "p256dh": "...", "auth": "..." }
+}
+```
+
+Upserts by `endpoint` (re-subscribing the same device updates its row rather
+than duplicating it) and associates it with the caller's user id. Returns
+`204 No Content`.
+
+### `DELETE /api/notifications/subscribe`
+
+**Auth**: JWT bearer (any role)
+
+Same body shape as subscribe; only `endpoint` is used to find and delete the
+row. Returns `204 No Content` whether or not a matching subscription existed.
 
 ---
 

@@ -38,6 +38,7 @@ accordingly.
 - [Deduplication](#deduplication)
 - [Centreon webhooks (push)](#centreon-webhooks-push)
 - [iTop (ITSM / CMDB)](#itop-itsm--cmdb)
+- [Web Push (browser/PWA)](#web-push-browserpwa)
 - [Webhook authentication](#webhook-authentication)
 
 ---
@@ -50,9 +51,10 @@ accordingly.
 | **Nagios** | `statusjson.cgi?query=hostlist` (§6.2) | **Implemented** (`etl/extract/nagios.py`) | `NAGIOS_API_URL`, `NAGIOS_USER`/`NAGIOS_PASSWORD` and/or `NAGIOS_API_KEY` |
 | **NetXMS** | REST `/alarms` (web API daemon) | **Implemented** (`etl/extract/netxms.py`) | `NETXMS_API_URL`, `NETXMS_USER`, `NETXMS_PASSWORD` |
 | **Centreon** | REST v2 `/monitoring/resources` (§6.3) + inbound webhook | **Implemented** (`etl/extract/centreon.py`) | `CENTREON_API_URL`, `CENTREON_USER`/`CENTREON_PASSWORD` or `CENTREON_API_KEY` |
-| **iTop** | REST webservice (`core/create`) | Stubbed (`backend/app/services/itop_service.py`) | `ITOP_URL`, `ITOP_USER`, `ITOP_PASS` |
+| **iTop** | REST webservice (`core/create` on class `Incident`) | **Implemented** (`backend/app/services/itop_service.py`) | `ITOP_URL`, `ITOP_USER`, `ITOP_PASS`, `ITOP_ORG_ID` |
 | **Twilio (SMS)** | REST API (`Messages.json`) | **Implemented** (`backend/app/services/notification_service.py`) | `NOTIFICATIONS_ENABLED`, `TWILIO_*`, `NOC_SMS_RECIPIENTS` |
 | **SMTP (email)** | SMTP + STARTTLS | **Implemented** (same service) | `SMTP_*`, `NOC_EMAIL_RECIPIENTS` |
+| **Web Push (browser/PWA)** | Web Push protocol, VAPID-signed | **Implemented** (`backend/app/services/push_service.py`) | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_CLAIMS_EMAIL` |
 
 ## How collection works
 
@@ -141,17 +143,87 @@ batch-collected alerts coexist safely thanks to the deduplication above.
 
 ## iTop (ITSM / CMDB)
 
-`backend/app/services/itop_service.py` is still a stub: it deterministically
-mints a `TKT-{year}-{id}` reference in exactly the shape the real iTop REST
-webservice (`core/create` on class `Incident`) would return, so the rest of
-the app already exercises the real data shape — only the network call is
-missing. Swap the stub for a `requests.post(ITOP_URL, ...)` using
-`ITOP_USER`/`ITOP_PASS` when an iTop instance is reachable. It's invoked
-whenever an ingest payload sets `itop_auto_ticket: true` (the ETL sets this
-for `critical`/`high` events in `transform/normalize.py`).
+`backend/app/services/itop_service.py` makes a real REST call —
+`core/create` on class `Incident` — whenever an ingest payload sets
+`itop_auto_ticket: true` (the ETL sets this for `critical`/`high` events in
+`transform/normalize.py`). It maps the incident's `severity` onto iTop's
+`urgency` enum (`critical→1`, `high→2`, `medium→3`, `low→4`) and returns the
+created ticket's reference (e.g. `I-000042`), stored in
+`fact_incident.itop_ticket_id`. Like the SMS/email notifier, it **degrades
+gracefully**: any failure (iTop unreachable, rejected fields, timeout) is
+logged and the call returns `null` rather than blocking incident ingestion.
+
+**One-time setup required before this works:**
+
+1. **Run the setup wizard** — first visit to `http://localhost:8082` (the
+   bundled iTop container) redirects there. Use DB server `localhost`, login
+   `admin`, password `$ITOP_DB_PASSWORD`; create an admin account matching
+   `ITOP_USER`/`ITOP_PASS` in `.env`. (Pointing `ITOP_URL` at an external iTop
+   instance instead just needs an existing admin account there.)
+2. **Grant the `REST Services User` profile** to that account. iTop separates
+   "can use the web UI" (the `Administrator` profile, granted by the wizard)
+   from "can call the REST webservice" — without this second profile,
+   `core/create` returns `Error: This user is not authorized to use the web
+   services.` even with correct credentials. In the iTop UI: *Administration →
+   Users*, open the account, add the `REST Services User` profile.
+3. Set `ITOP_ORG_ID` in `.env` to the `id` of the Organization tickets should
+   be created under (a fresh install has exactly one: `1`, "My
+   Company/Department"). `org_id` is a mandatory field on `Incident` — ticket
+   creation fails without it.
 
 `dim_node.itop_ci_id` exists in the schema for linking a node to its iTop CMDB
 CI record, but nothing currently populates or reads it outside seed data.
+
+## Web Push (browser/PWA)
+
+`backend/app/services/push_service.py` sends real Web Push notifications
+(VAPID-signed, RFC 8291/8292) to every subscribed browser/PWA when a
+**critical** incident is ingested — alongside, not instead of, the SMS/email
+notifications.
+
+**Generating a VAPID keypair** — the format `pywebpush`/`py_vapid` expect is a
+raw, base64url-encoded EC (P-256) key pair, not PEM:
+
+```bash
+docker compose exec backend python3 -c "
+from py_vapid import Vapid
+import base64
+from cryptography.hazmat.primitives import serialization
+
+v = Vapid()
+v.generate_keys()
+
+priv_val = v.private_key.private_numbers().private_value
+private_b64url = base64.urlsafe_b64encode(priv_val.to_bytes(32, 'big')).decode().rstrip('=')
+
+raw_pub = v.public_key.public_bytes(
+    encoding=serialization.Encoding.X962,
+    format=serialization.PublicFormat.UncompressedPoint,
+)
+public_b64url = base64.urlsafe_b64encode(raw_pub).decode().rstrip('=')
+
+print('VAPID_PUBLIC_KEY=' + public_b64url)
+print('VAPID_PRIVATE_KEY=' + private_b64url)
+"
+```
+
+Paste the output into `.env` (`VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`) and set
+`VAPID_CLAIMS_EMAIL` to a contact address (sent as the push protocol's `sub`
+claim). **Generate a fresh keypair per environment** — the one shipped in this
+repo's `.env` is for local/demo use only; a production deployment reusing it
+would let anyone with the repo forge push messages to real subscribers.
+
+**Flow**: the frontend's bell toggle (`Header.jsx` /
+`usePushNotifications.js`) requests `Notification` permission, subscribes via
+`PushManager.subscribe()` using `VAPID_PUBLIC_KEY` (fetched from
+`GET /api/notifications/vapid-public-key`) as the `applicationServerKey`, then
+registers the subscription (`endpoint` + `p256dh`/`auth` keys) with
+`POST /api/notifications/subscribe`, stored in the `push_subscription` table
+(one row per user per device/browser — see
+[database-schema.md](database-schema.md)). On a critical incident,
+`push_service.notify_critical_incident_push` sends to every stored
+subscription; a `404`/`410` response (the browser dropped the subscription —
+uninstalled, permission revoked) prunes that row automatically.
 
 ## Webhook authentication
 

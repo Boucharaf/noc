@@ -84,7 +84,9 @@ is set — see [integrations.md](integrations.md))
 `NAGIOS_API_URL` + `NAGIOS_USER`/`NAGIOS_PASSWORD` and/or `NAGIOS_API_KEY`,
 `NETXMS_API_URL` + `NETXMS_USER`/`NETXMS_PASSWORD`,
 `CENTREON_API_URL` + `CENTREON_USER`/`CENTREON_PASSWORD` or `CENTREON_API_KEY`,
-`ITOP_URL/USER/PASS` (backend-side iTop stub)
+`ITOP_URL`/`ITOP_USER`/`ITOP_PASS`/`ITOP_ORG_ID` (real REST ticket creation —
+see [integrations.md](integrations.md#itop-itsm--cmdb) for the one-time setup
+wizard + `REST Services User` profile grant it requires)
 
 **Bundled supervision servers**
 `ZABBIX_DB_USER`/`ZABBIX_DB_PASSWORD`/`ZABBIX_DB_NAME` (the `zabbix-db`
@@ -93,12 +95,19 @@ container), `ITOP_DB_PASSWORD` (iTop's embedded MariaDB `admin` user).
 web credentials.
 
 **Notifications** (SMS + email on critical incidents — see
-[architecture.md#notifications-smsemail](architecture.md#notifications-smsemail))
+[architecture.md#notifications-smsemailpush](architecture.md#notifications-smsemailpush))
 `NOTIFICATIONS_ENABLED` (default `false`), `TWILIO_ACCOUNT_SID`,
 `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`, `NOC_SMS_RECIPIENTS`
 (comma-separated), `SMTP_HOST`, `SMTP_PORT` (default 587), `SMTP_USER`,
 `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_USE_TLS`, `NOC_EMAIL_RECIPIENTS`
 (comma-separated)
+
+**Web Push** (browser/PWA push on critical incidents — see
+[integrations.md](integrations.md#web-push-browserpwa) for how to generate a
+keypair)
+`VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_CLAIMS_EMAIL` — generate a
+fresh keypair per environment; never reuse the demo one shipped in this repo's
+`.env` in production.
 
 **Rate limiting**
 `RATE_LIMIT_ENABLED` (default `true`), `RATE_LIMIT_READ_PER_MIN` (default 100),
@@ -226,7 +235,10 @@ docker compose logs -f backend        # one service
 docker compose logs -f etl-worker etl-beat   # ETL pipeline only
 ```
 
-`LOG_LEVEL` (default `INFO`) controls both Celery services' verbosity.
+`LOG_LEVEL` (default `INFO`) controls both Celery services' verbosity, and
+also the backend's root logger (`logging.basicConfig` in `app/main.py`) — app
+loggers like `notification_service`/`push_service`/`itop_service` only emit at
+or above this level.
 
 ## Production hardening checklist
 
@@ -234,9 +246,15 @@ Before pointing this at real traffic / real supervision tools:
 
 - [ ] Replace `SECRET_KEY` and `NOC_API_KEY` with strong, unique values.
 - [ ] Replace the self-signed TLS cert with a CA-issued one (see above).
-- [ ] Set real `ZABBIX_*` / `CENTREON_*` / `NAGIOS_*` / `ITOP_*` credentials
-      so the collectors poll the real supervision APIs, and swap the iTop stub
-      for the real REST call (see [integrations.md](integrations.md)).
+- [ ] Set real `ZABBIX_*` / `CENTREON_*` / `NAGIOS_*` credentials so the
+      collectors poll the real supervision APIs.
+- [ ] Set real `ITOP_*` credentials and complete the setup wizard + grant the
+      `REST Services User` profile to the API account (ticket creation fails
+      silently — logged, not surfaced — without it; see
+      [integrations.md](integrations.md#itop-itsm--cmdb)).
+- [ ] Generate a **fresh** `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY` pair for Web
+      Push — do not reuse the demo keypair shipped in this repo's `.env` (see
+      [integrations.md](integrations.md#web-push-browserpwa)).
 - [ ] Set `SYNC_MV_REFRESH=false` so the nightly 02:00 `etl.refresh_kpi_view`
       job owns the materialized-view refresh (per-write refresh gets expensive
       at production incident volume).

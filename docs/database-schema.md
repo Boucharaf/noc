@@ -21,9 +21,10 @@ volume only.
 ```
 dim_region ──< dim_locality ──< dim_node ──< fact_incident >── dim_cause
                                                   │
-                                            dim_user (independent —
-                                            dashboard accounts, not
-                                            referenced by incidents)
+                                            dim_user ──< push_subscription
+                                            (dashboard accounts; each can
+                                            have N push subscriptions, one
+                                            per device/browser)
 
 mv_kpi_node_monthly  (materialized view, aggregates fact_incident
                        joined through dim_node/dim_locality/dim_region,
@@ -33,8 +34,9 @@ mv_kpi_node_monthly  (materialized view, aggregates fact_incident
 - `dim_region` 1—N `dim_locality` 1—N `dim_node` 1—N `fact_incident`
 - `dim_cause` 1—N `fact_incident` (nullable — an incident may have no
   categorized cause yet)
-- `dim_user` is standalone: dashboard login accounts, unrelated to the
-  incident/network hierarchy.
+- `dim_user` is standalone with respect to the incident/network hierarchy
+  (dashboard login accounts), but is the parent of `push_subscription`
+  (one row per browser/device a user has granted push permission on).
 
 ## Dimension tables
 
@@ -111,6 +113,25 @@ Dashboard login accounts (cahier des charges §10.1: admin / analyst / noc_agent
 > adaptive hashing anyway, so a fast deterministic hash is the right tradeoff
 > here — the primary password still uses bcrypt.
 
+### `push_subscription`
+
+Web Push subscriptions (one row per browser/device a `dim_user` has granted
+notification permission on) — see
+[integrations.md#web-push-browserpwa](integrations.md#web-push-browserpwa).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `SERIAL PK` | |
+| `user_id` | `INTEGER FK → dim_user` | |
+| `endpoint` | `TEXT` | unique — the push service URL for this subscription (e.g. an `fcm.googleapis.com/...` URL); re-subscribing the same device upserts by this column |
+| `p256dh` | `TEXT` | subscription's public key, for message encryption |
+| `auth` | `TEXT` | subscription's auth secret, for message encryption |
+| `created_at` | `TIMESTAMP` | default `NOW()` |
+
+Pruned automatically by `push_service.py` when a delivery attempt gets a
+`404`/`410` back (the browser dropped the subscription — uninstalled,
+permission revoked).
+
 ## Fact table
 
 ### `fact_incident`
@@ -184,7 +205,9 @@ Unique index on `(month, node_id)`.
 | `idx_incident_month` | `fact_incident(DATE_TRUNC('month', detected_at), node_id)` | monthly aggregation support |
 | `idx_node_locality` | `dim_node(locality_id)` | join to locality |
 | `idx_locality_region` | `dim_locality(region_id)` | join to region |
+| `idx_push_subscription_user` | `push_subscription(user_id)` | look up a user's subscriptions |
 | (unique) | `mv_kpi_node_monthly(month, node_id)` | supports `REFRESH ... CONCURRENTLY`-style uniqueness and fast point lookups |
+| (unique) | `push_subscription(endpoint)` | upsert-by-endpoint on re-subscribe |
 
 ## Regenerating the dataset
 
