@@ -118,3 +118,16 @@ GROUP BY 1,2,3,4,5,6,7,8
 WITH DATA;
 
 CREATE UNIQUE INDEX ON mv_kpi_node_monthly(month, node_id);
+
+-- Browser/PWA Web Push subscriptions (one row per device/browser a user has
+-- granted notification permission on).
+CREATE TABLE push_subscription (
+  id          SERIAL PRIMARY KEY,
+  user_id     INTEGER NOT NULL REFERENCES dim_user(id),
+  endpoint    TEXT UNIQUE NOT NULL,
+  p256dh      TEXT NOT NULL,
+  auth        TEXT NOT NULL,
+  created_at  TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_push_subscription_user ON push_subscription(user_id);

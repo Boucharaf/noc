@@ -7,8 +7,17 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: "autoUpdate",
+      strategies: "injectManifest",
+      srcDir: "src",
+      filename: "sw.js",
+      injectManifest: {
+        // App code changes far more often than the manifest needs
+        // recompiling; keep the precache list from ballooning.
+        globPatterns: ["**/*.{js,css,html,ico,png,svg}"],
+      },
       devOptions: {
         enabled: true,
+        type: "module",
       },
       manifest: {
         name: "Network Operations Center",

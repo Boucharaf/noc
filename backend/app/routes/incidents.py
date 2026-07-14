@@ -16,6 +16,7 @@ from app.services import (
     cache_service,
     incident_service,
     notification_service,
+    push_service,
 )
 
 router = APIRouter(prefix="/api/incidents", tags=["incidents"])
@@ -70,6 +71,14 @@ def ingest_incident(
             str(incident.detected_at),
             incident.description,
             incident.itop_ticket_id,
+        )
+        background_tasks.add_task(
+            push_service.notify_critical_incident_push,
+            incident.id,
+            node.code,
+            node.name,
+            incident.severity,
+            incident.description,
         )
 
     return IncidentIngestResponse(

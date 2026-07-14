@@ -58,6 +58,11 @@ NOC_EMAIL_RECIPIENTS = [
     e.strip() for e in os.getenv("NOC_EMAIL_RECIPIENTS", "").split(",") if e.strip()
 ]
 
+# Web Push (browser/PWA push notifications on critical incidents)
+VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "")
+VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "")
+VAPID_CLAIMS_EMAIL = os.getenv("VAPID_CLAIMS_EMAIL", "noc@anptic.bf")
+
 # Rate limiting (spec §10.1 — per-IP, per-minute)
 RATE_LIMIT_READ_PER_MIN = int(os.getenv("RATE_LIMIT_READ_PER_MIN", 100))
 RATE_LIMIT_INGEST_PER_MIN = int(os.getenv("RATE_LIMIT_INGEST_PER_MIN", 10))
