@@ -34,13 +34,14 @@ const IncidentTable = ({
               <th className={th} style={thStyle}>Statut</th>
               <th className={th} style={thStyle}>Description</th>
               <th className={th} style={thStyle}>Détection</th>
+              <th className={th} style={thStyle}>Ticket iTop</th>
             </tr>
           </thead>
           <tbody className="divide-y">
             {loading && (
               <tr>
                 <td
-                  colSpan={6}
+                  colSpan={7}
                   className="px-4 py-6 text-center text-sm"
                   style={{ color: "var(--color-text-muted)" }}
                 >
@@ -51,7 +52,7 @@ const IncidentTable = ({
             {!loading && incidents.length === 0 && (
               <tr>
                 <td
-                  colSpan={6}
+                  colSpan={7}
                   className="px-4 py-6 text-center text-sm"
                   style={{ color: "var(--color-text-muted)" }}
                 >
@@ -91,6 +92,9 @@ const IncidentTable = ({
                 </td>
                 <td className={td} style={{ color: "var(--color-text-muted)" }}>
                   {formatAge(inc.age_minutes)}
+                </td>
+                <td className={`${td} font-mono text-xs`} style={{ color: "var(--color-text-secondary)" }}>
+                  {inc.itop_ticket_id ?? "—"}
                 </td>
               </tr>
             ))}

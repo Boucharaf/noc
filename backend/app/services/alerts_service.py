@@ -19,6 +19,7 @@ def get_open_alerts(db: Session, limit: int = 20) -> list[dict]:
                 Incident.status,
                 Incident.description,
                 Incident.detected_at,
+                Incident.itop_ticket_id,
             )
             .join(Node, Incident.node_id == Node.id)
             .join(Locality, Node.locality_id == Locality.id)
@@ -51,6 +52,7 @@ def get_open_alerts(db: Session, limit: int = 20) -> list[dict]:
                 "description": r["description"],
                 "detected_at": detected_at,
                 "age_minutes": max(age_minutes, 0),
+                "itop_ticket_id": r["itop_ticket_id"],
             }
         )
     return result

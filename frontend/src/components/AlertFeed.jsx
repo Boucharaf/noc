@@ -1,5 +1,5 @@
 import React from "react";
-import { Bell, Check } from "lucide-react";
+import { Bell, Check, Ticket } from "lucide-react";
 import Card from "./Card";
 import { useAcknowledgeIncident, useOpenAlerts } from "../hooks/useRealtime";
 import { useAuthStore } from "../store/auth";
@@ -78,6 +78,18 @@ const AlertFeed = () => {
                   style={{ color: "var(--color-text-secondary)" }}
                 >
                   {alert.locality} — {formatAge(alert.age_minutes)}
+                  {alert.itop_ticket_id && (
+                    <span
+                      className="ml-2 inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono"
+                      style={{
+                        background: "var(--color-accent-soft)",
+                        color: "var(--color-accent)",
+                      }}
+                    >
+                      <Ticket className="h-3 w-3" />
+                      {alert.itop_ticket_id}
+                    </span>
+                  )}
                 </p>
               </div>
               {canAcknowledge && alert.status === "open" && (
