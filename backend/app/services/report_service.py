@@ -23,17 +23,44 @@ def build_report_data(db: Session, month: int, year: int) -> dict:
 def render_pdf(report: dict) -> bytes:
     from fpdf import FPDF
 
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(0, 10, "Rapport Mensuel NOC - ANPTIC", ln=True)
-    pdf.set_font("Helvetica", "", 12)
-    pdf.cell(0, 8, f"Periode: {report['period']['label']}", ln=True)
-    pdf.ln(4)
+    class PDF(FPDF):
+        def header(self):
+            # En-tete bleu ANPTIC
+            self.set_fill_color(0, 82, 155)
+            self.rect(0, 0, 210, 20, "F")
+            self.set_font("Helvetica", "B", 15)
+            self.set_text_color(255, 255, 255)
+            self.cell(0, 10, "Tableau de Bord NOC - Rapport Mensuel", border=0, ln=True, align="C")
+            self.ln(10)
 
-    pdf.set_font("Helvetica", "B", 13)
-    pdf.cell(0, 8, "Indicateurs cles", ln=True)
+        def footer(self):
+            self.set_y(-15)
+            self.set_font("Helvetica", "I", 8)
+            self.set_text_color(128, 128, 128)
+            self.cell(0, 10, f"Page {self.page_no()}", align="C")
+
+    pdf = PDF()
+    pdf.add_page()
+    
+    # Titre et periode
+    pdf.set_font("Helvetica", "B", 24)
+    pdf.set_text_color(0, 51, 102)
+    pdf.cell(0, 15, "Rapport d'Activite NOC", ln=True, align="C")
+    
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(0, 10, f"Periode : {report['period']['label']}", ln=True, align="C")
+    pdf.ln(10)
+
+    # Tableau KPI
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.set_text_color(0, 51, 102)
+    pdf.cell(0, 10, "1. Indicateurs Cles de Performance (KPI)", ln=True)
+    pdf.set_fill_color(240, 248, 255)
+    pdf.set_draw_color(200, 200, 200)
     pdf.set_font("Helvetica", "", 11)
+    pdf.set_text_color(0, 0, 0)
+    
     kpi = report["kpi"]
     labels = {
         "total_incidents": "Total incidents",
@@ -46,36 +73,59 @@ def render_pdf(report: dict) -> bytes:
         "recurrent_nodes": "Noeuds recurrents",
         "off_hours_detected": "Incidents hors heures ouvrees",
     }
+    
     for key, label in labels.items():
-        pdf.cell(0, 7, f"- {label}: {kpi[key]}", ln=True)
+        # Ligne de tableau
+        pdf.cell(110, 8, label, border=1, fill=True)
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.cell(40, 8, str(kpi[key]), border=1, ln=True, align="C")
+        pdf.set_font("Helvetica", "", 11)
 
-    pdf.ln(4)
-    pdf.set_font("Helvetica", "B", 13)
-    pdf.cell(0, 8, "Top localites", ln=True)
+    pdf.ln(10)
+
+    # Tableau Top Localites
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.set_text_color(0, 51, 102)
+    pdf.cell(0, 10, "2. Top Localites Affectees", ln=True)
+    
+    # En-tete du tableau
+    pdf.set_fill_color(0, 82, 155)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(70, 8, "Localite (Region)", border=1, fill=True)
+    pdf.cell(40, 8, "Incidents", border=1, fill=True, align="C")
+    pdf.cell(40, 8, "Disponibilite (%)", border=1, ln=True, fill=True, align="C")
+    
+    pdf.set_text_color(0, 0, 0)
     pdf.set_font("Helvetica", "", 11)
+    fill = False
     for loc in report["top_localities"]:
-        pdf.cell(
-            0,
-            7,
-            f"- {loc['locality']} ({loc['region']}): {loc['total_incidents']} incidents, "
-            f"dispo {loc['availability_pct']}%",
-            ln=True,
-        )
+        pdf.set_fill_color(245, 245, 245) if fill else pdf.set_fill_color(255, 255, 255)
+        pdf.cell(70, 8, f"{loc['locality']} ({loc['region']})", border=1, fill=fill)
+        pdf.cell(40, 8, str(loc['total_incidents']), border=1, fill=fill, align="C")
+        pdf.cell(40, 8, f"{loc['availability_pct']}%", border=1, ln=True, fill=fill, align="C")
+        fill = not fill
 
-    pdf.ln(4)
-    pdf.set_font("Helvetica", "B", 13)
-    pdf.cell(0, 8, "Noeuds recurrents (>= 3 incidents)", ln=True)
+    pdf.ln(10)
+
+    # Noeuds Recurrents
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.set_text_color(0, 51, 102)
+    pdf.cell(0, 10, "3. Noeuds Recurrents (>= 3 incidents)", ln=True)
+    
     pdf.set_font("Helvetica", "", 11)
+    pdf.set_text_color(0, 0, 0)
     if report["recurrent_nodes"]:
         for node in report["recurrent_nodes"]:
-            pdf.cell(
-                0,
-                7,
-                f"- {node['code']} {node['name']}: {node['total_incidents']} incidents",
-                ln=True,
-            )
+            pdf.cell(5, 7, "-", ln=False)
+            pdf.set_font("Helvetica", "B", 11)
+            pdf.cell(30, 7, node['code'], ln=False)
+            pdf.set_font("Helvetica", "", 11)
+            pdf.cell(0, 7, f"{node['name']} : {node['total_incidents']} incidents", ln=True)
     else:
-        pdf.cell(0, 7, "Aucun noeud recurrent ce mois-ci.", ln=True)
+        pdf.set_font("Helvetica", "I", 11)
+        pdf.set_text_color(100, 100, 100)
+        pdf.cell(0, 7, "Aucun noeud recurrent enregistre ce mois-ci.", ln=True)
 
     buffer = io.BytesIO()
     pdf.output(buffer)
@@ -97,37 +147,76 @@ KPI_LABELS = {
 
 def render_docx(report: dict) -> bytes:
     from docx import Document
+    from docx.shared import Pt, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
 
     doc = Document()
-    doc.add_heading("Rapport Mensuel NOC — ANPTIC", level=0)
-    doc.add_paragraph(f"Période : {report['period']['label']}")
+    
+    # Titre stylisé
+    title = doc.add_heading(level=0)
+    title_run = title.add_run("Rapport Mensuel NOC — ANPTIC")
+    title_run.font.color.rgb = RGBColor(0, 51, 102)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    doc.add_heading("Indicateurs clés", level=1)
+    subtitle = doc.add_paragraph()
+    sub_run = subtitle.add_run(f"Période : {report['period']['label']}")
+    sub_run.font.size = Pt(14)
+    sub_run.font.color.rgb = RGBColor(100, 100, 100)
+    sub_run.italic = True
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # Tableau des KPIs
+    doc.add_heading("1. Indicateurs clés de performance", level=1)
     kpi = report["kpi"]
-    table = doc.add_table(rows=0, cols=2)
-    table.style = "Light Grid Accent 1"
+    table = doc.add_table(rows=1, cols=2)
+    table.style = "Medium Shading 1 Accent 1"
+    
+    hdr_cells = table.rows[0].cells
+    hdr_cells[0].text = "Indicateur"
+    hdr_cells[1].text = "Valeur"
+    
     for key, label in KPI_LABELS.items():
-        row = table.add_row().cells
-        row[0].text = label
-        row[1].text = str(kpi[key])
+        row_cells = table.add_row().cells
+        row_cells[0].text = label
+        row_cells[1].text = str(kpi[key])
 
-    doc.add_heading("Top localités", level=1)
+    doc.add_paragraph() # Espacement
+
+    # Tableau Top Localités
+    doc.add_heading("2. Top localités affectées", level=1)
+    loc_table = doc.add_table(rows=1, cols=3)
+    loc_table.style = "Medium Shading 1 Accent 1"
+    
+    hdr_cells = loc_table.rows[0].cells
+    hdr_cells[0].text = "Localité (Région)"
+    hdr_cells[1].text = "Incidents"
+    hdr_cells[2].text = "Disponibilité (%)"
+
     for loc in report["top_localities"]:
-        doc.add_paragraph(
-            f"{loc['locality']} ({loc['region']}) : {loc['total_incidents']} incidents, "
-            f"disponibilité {loc['availability_pct']}%",
-            style="List Bullet",
-        )
+        row_cells = loc_table.add_row().cells
+        row_cells[0].text = f"{loc['locality']} ({loc['region']})"
+        row_cells[1].text = str(loc['total_incidents'])
+        row_cells[2].text = f"{loc['availability_pct']}%"
 
-    doc.add_heading("Nœuds récurrents (≥ 3 incidents)", level=1)
+    doc.add_paragraph() # Espacement
+
+    # Nœuds Récurrents
+    doc.add_heading("3. Nœuds récurrents (≥ 3 incidents)", level=1)
     if report["recurrent_nodes"]:
         for node in report["recurrent_nodes"]:
-            doc.add_paragraph(
-                f"{node['code']} {node['name']} : {node['total_incidents']} incidents",
-                style="List Bullet",
-            )
+            p = doc.add_paragraph(style="List Bullet")
+            p.add_run(f"{node['code']} ").bold = True
+            p.add_run(f"({node['name']}) : {node['total_incidents']} incidents")
     else:
-        doc.add_paragraph("Aucun nœud récurrent ce mois-ci.")
+        p = doc.add_paragraph("Aucun nœud récurrent enregistré ce mois-ci.")
+        p.italic = True
+
+    # Pied de page
+    section = doc.sections[0]
+    footer = section.footer
+    footer_para = footer.paragraphs[0]
+    footer_para.text = "Généré automatiquement par le tableau de bord NOC ANPTIC"
+    footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     buffer = io.BytesIO()
     doc.save(buffer)
