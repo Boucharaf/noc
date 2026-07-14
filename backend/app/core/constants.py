@@ -1,5 +1,8 @@
 import os
 
+# Logging
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
 # Redis Cache Constants
 CACHE_TTL = int(os.getenv("CACHE_TTL", 300))  # 5 minutes
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")

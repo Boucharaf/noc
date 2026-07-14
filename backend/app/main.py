@@ -1,8 +1,15 @@
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.constants import CACHE_TTL, CORS_ORIGINS
+from app.core.constants import CACHE_TTL, CORS_ORIGINS, LOG_LEVEL
 from app.routes import all_routers
+
+# Without this, the root logger sits at WARNING with no handler, so every
+# app-level logger.info/error call (notification_service, push_service, ...)
+# is silently dropped — only uvicorn's own access logs show up.
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 app = FastAPI(title="NOC Dashboard API", version="1.0.0")
 
