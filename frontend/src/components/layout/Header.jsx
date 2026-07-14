@@ -229,16 +229,22 @@ const Header = () => {
             disabled={push.loading || push.permission === "denied"}
             className="rounded-lg border p-2 transition-colors hover:bg-[var(--color-surface-2)] disabled:opacity-50"
             style={{
-              borderColor: "var(--color-border)",
-              color: push.subscribed ? "var(--color-accent)" : undefined,
+              borderColor: push.error ? "var(--color-critical, #d03b3b)" : "var(--color-border)",
+              color: push.error
+                ? "var(--color-critical, #d03b3b)"
+                : push.subscribed
+                  ? "var(--color-accent)"
+                  : undefined,
             }}
             aria-label="Notifications push"
             title={
-              push.permission === "denied"
-                ? "Notifications bloquées — autorisez-les dans les réglages du navigateur"
-                : push.subscribed
-                  ? "Désactiver les notifications push"
-                  : "Activer les notifications push pour les incidents critiques"
+              push.error
+                ? `Échec de l'activation : ${push.error}`
+                : push.permission === "denied"
+                  ? "Notifications bloquées — autorisez-les dans les réglages du navigateur"
+                  : push.subscribed
+                    ? "Désactiver les notifications push"
+                    : "Activer les notifications push pour les incidents critiques"
             }
           >
             {push.permission === "denied" ? (

@@ -22,6 +22,7 @@ export const usePushNotifications = () => {
   );
   const [subscribed, setSubscribed] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
     if (!isSupported()) return;
@@ -33,6 +34,7 @@ export const usePushNotifications = () => {
 
   const enable = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const perm = await Notification.requestPermission();
       setPermission(perm);
@@ -42,6 +44,9 @@ export const usePushNotifications = () => {
       let sub = await registration.pushManager.getSubscription();
       if (!sub) {
         const publicKey = await getVapidPublicKey();
+        if (!publicKey) {
+          throw new Error("Server has no VAPID public key configured (VAPID_PUBLIC_KEY unset)");
+        }
         sub = await registration.pushManager.subscribe({
           userVisibleOnly: true,
           applicationServerKey: urlBase64ToUint8Array(publicKey),
@@ -50,6 +55,12 @@ export const usePushNotifications = () => {
       const json = sub.toJSON();
       await subscribePush({ endpoint: json.endpoint, keys: json.keys });
       setSubscribed(true);
+    } catch (err) {
+      // pushManager.subscribe() commonly fails here when the browser can't
+      // reach the push service (e.g. fcm.googleapis.com) to register the
+      // subscription — a network/firewall issue, not a bug in this flow.
+      console.error("Push notification subscribe failed:", err);
+      setError(err.message || String(err));
     } finally {
       setLoading(false);
     }
@@ -57,6 +68,7 @@ export const usePushNotifications = () => {
 
   const disable = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const registration = await navigator.serviceWorker.ready;
       const sub = await registration.pushManager.getSubscription();
@@ -65,6 +77,9 @@ export const usePushNotifications = () => {
         await sub.unsubscribe();
       }
       setSubscribed(false);
+    } catch (err) {
+      console.error("Push notification unsubscribe failed:", err);
+      setError(err.message || String(err));
     } finally {
       setLoading(false);
     }
@@ -75,5 +90,5 @@ export const usePushNotifications = () => {
     [subscribed, enable, disable],
   );
 
-  return { supported: isSupported(), permission, subscribed, loading, toggle };
+  return { supported: isSupported(), permission, subscribed, loading, error, toggle };
 };

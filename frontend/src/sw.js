@@ -2,6 +2,15 @@ import { precacheAndRoute } from "workbox-precaching";
 
 precacheAndRoute(self.__WB_MANIFEST);
 
+// registerType: "autoUpdate" (main.jsx's registerSW) posts this message once
+// a new service worker has installed and is waiting to activate. Without
+// this listener the new worker sits idle indefinitely — every open tab keeps
+// running the OLD worker (and its stale cached JS) until every tab for this
+// origin is closed, which reads as "my fix didn't do anything."
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") self.skipWaiting();
+});
+
 self.addEventListener("push", (event) => {
   let payload = { title: "NOC Dashboard", body: "Nouvel incident" };
   try {
