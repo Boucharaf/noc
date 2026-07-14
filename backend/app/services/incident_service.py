@@ -104,7 +104,7 @@ def ingest_incident(db: Session, payload: IncidentIngestPayload) -> tuple[Incide
 
     if payload.itop_auto_ticket:
         incident.itop_ticket_id = itop_service.create_ticket(
-            incident.id, payload.node_code, payload.description
+            incident.id, payload.node_code, payload.description, payload.severity
         )
         db.commit()
         db.refresh(incident)

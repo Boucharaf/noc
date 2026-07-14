@@ -33,6 +33,9 @@ CORS_ORIGINS = [
 ITOP_URL = os.getenv("ITOP_URL", "https://itop.anptic.bf/webservices/rest.php")
 ITOP_USER = os.getenv("ITOP_USER", "api_user")
 ITOP_PASS = os.getenv("ITOP_PASS", "api_password")
+# Organization (org_id) tickets are created under — "My Company/Department" (id 1)
+# on a fresh iTop install.
+ITOP_ORG_ID = os.getenv("ITOP_ORG_ID", "1")
 
 # Notifications (spec §7 step 6 — SMS + email on critical incidents)
 NOTIFICATIONS_ENABLED = os.getenv("NOTIFICATIONS_ENABLED", "false").lower() == "true"
