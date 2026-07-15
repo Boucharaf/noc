@@ -16,3 +16,8 @@ router = APIRouter(
 @router.get("/open")
 def open_alerts(limit: int = Query(20, ge=1, le=100), db: Session = Depends(get_db)):
     return alerts_service.get_open_alerts(db, limit)
+
+
+@router.get("/recent")
+def recent_notifications(limit: int = Query(10, ge=1, le=50), db: Session = Depends(get_db)):
+    return alerts_service.get_recent_notifications(db, limit)

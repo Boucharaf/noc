@@ -1,8 +1,5 @@
 import React, { useState } from "react";
 import {
-  Bell,
-  BellOff,
-  BellRing,
   ChevronLeft,
   ChevronRight,
   FileDown,
@@ -14,8 +11,8 @@ import { usePeriodStore } from "../../store";
 import { useThemeStore } from "../../store/theme";
 import { useAuthStore } from "../../store/auth";
 import { useClock } from "../../hooks/useClock";
-import { usePushNotifications } from "../../hooks/usePushNotifications";
 import { downloadMonthlyReport } from "../../api/report";
+import NotificationsBell from "../NotificationsBell";
 import logo from "../../assets/images/noc-logo-256.png";
 
 const MONTH_LABELS = [
@@ -67,7 +64,6 @@ const Header = () => {
   const { month, year, goToPreviousMonth, goToNextMonth } = usePeriodStore();
   const { theme, toggleTheme } = useThemeStore();
   const { user, logout } = useAuthStore();
-  const push = usePushNotifications();
   const [menuOpen, setMenuOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -223,39 +219,7 @@ const Header = () => {
           )}
         </div>
 
-        {push.supported && (
-          <button
-            onClick={push.toggle}
-            disabled={push.loading || push.permission === "denied"}
-            className="rounded-lg border p-2 transition-colors hover:bg-[var(--color-surface-2)] disabled:opacity-50"
-            style={{
-              borderColor: push.error ? "var(--color-critical, #d03b3b)" : "var(--color-border)",
-              color: push.error
-                ? "var(--color-critical, #d03b3b)"
-                : push.subscribed
-                  ? "var(--color-accent)"
-                  : undefined,
-            }}
-            aria-label="Notifications push"
-            title={
-              push.error
-                ? `Échec de l'activation : ${push.error}`
-                : push.permission === "denied"
-                  ? "Notifications bloquées — autorisez-les dans les réglages du navigateur"
-                  : push.subscribed
-                    ? "Désactiver les notifications push"
-                    : "Activer les notifications push pour les incidents critiques"
-            }
-          >
-            {push.permission === "denied" ? (
-              <BellOff className="h-4 w-4" />
-            ) : push.subscribed ? (
-              <BellRing className="h-4 w-4" />
-            ) : (
-              <Bell className="h-4 w-4" />
-            )}
-          </button>
-        )}
+        <NotificationsBell />
 
         <button
           onClick={toggleTheme}

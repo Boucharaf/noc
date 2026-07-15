@@ -58,6 +58,18 @@ export const useOpenAlerts = (limit = 20) => {
   });
 };
 
+// Notification bell dropdown: last N critical/high incidents, newest first,
+// regardless of status. Shares the same WebSocket invalidation as
+// useOpenAlerts (both queries live under the ['alerts', ...] key prefix).
+export const useRecentNotifications = (limit = 10) => {
+  useAlertSocket();
+  return useQuery({
+    queryKey: ['alerts', 'recent', limit],
+    queryFn: () => alertsApi.getRecentNotifications(limit),
+    refetchInterval: POLL_INTERVAL_MS,
+  });
+};
+
 export const useAcknowledgeIncident = () => {
   const queryClient = useQueryClient();
   return useMutation({

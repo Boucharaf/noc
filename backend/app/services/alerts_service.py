@@ -6,31 +6,20 @@ from sqlalchemy.orm import Session
 from app.models.dimension import Locality, Node
 from app.models.incident import Incident
 
+_ALERT_COLUMNS = (
+    Incident.id,
+    Node.code.label("node_code"),
+    Node.name.label("node_name"),
+    Locality.name.label("locality"),
+    Incident.severity,
+    Incident.status,
+    Incident.description,
+    Incident.detected_at,
+    Incident.itop_ticket_id,
+)
 
-def get_open_alerts(db: Session, limit: int = 20) -> list[dict]:
-    rows = (
-        db.execute(
-            select(
-                Incident.id,
-                Node.code.label("node_code"),
-                Node.name.label("node_name"),
-                Locality.name.label("locality"),
-                Incident.severity,
-                Incident.status,
-                Incident.description,
-                Incident.detected_at,
-                Incident.itop_ticket_id,
-            )
-            .join(Node, Incident.node_id == Node.id)
-            .join(Locality, Node.locality_id == Locality.id)
-            .where(Incident.status.in_(("open", "acknowledged")))
-            .order_by(Incident.detected_at.asc())
-            .limit(limit)
-        )
-        .mappings()
-        .all()
-    )
 
+def _rows_to_alerts(rows) -> list[dict]:
     now = datetime.now(timezone.utc)
     result = []
     for r in rows:
@@ -56,3 +45,39 @@ def get_open_alerts(db: Session, limit: int = 20) -> list[dict]:
             }
         )
     return result
+
+
+def get_open_alerts(db: Session, limit: int = 20) -> list[dict]:
+    rows = (
+        db.execute(
+            select(*_ALERT_COLUMNS)
+            .join(Node, Incident.node_id == Node.id)
+            .join(Locality, Node.locality_id == Locality.id)
+            .where(Incident.status.in_(("open", "acknowledged")))
+            .order_by(Incident.detected_at.asc())
+            .limit(limit)
+        )
+        .mappings()
+        .all()
+    )
+    return _rows_to_alerts(rows)
+
+
+def get_recent_notifications(db: Session, limit: int = 10) -> list[dict]:
+    """Most recent critical/high-severity incidents, newest first — the
+    notification bell's dropdown. Unlike get_open_alerts, this ignores status
+    (a resolved incident is still a notification that fired) and isn't
+    limited to open/acknowledged."""
+    rows = (
+        db.execute(
+            select(*_ALERT_COLUMNS)
+            .join(Node, Incident.node_id == Node.id)
+            .join(Locality, Node.locality_id == Locality.id)
+            .where(Incident.severity.in_(("critical", "high")))
+            .order_by(Incident.detected_at.desc())
+            .limit(limit)
+        )
+        .mappings()
+        .all()
+    )
+    return _rows_to_alerts(rows)
