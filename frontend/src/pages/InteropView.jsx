@@ -36,8 +36,8 @@ const InteropView = () => {
   }, {});
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center gap-2">
+    <div className="flex min-h-full flex-col gap-4">
+      <div className="flex shrink-0 items-center gap-2">
         <Zap className="h-5 w-5" style={{ color: "var(--color-accent)" }} />
         <div>
           <h2
@@ -55,7 +55,7 @@ const InteropView = () => {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+      <div className="grid shrink-0 grid-cols-1 gap-4 md:grid-cols-3">
         {TOOLS.map((tool) => (
           <Card key={tool.key} icon={tool.icon} title={tool.name}>
             <p
@@ -86,8 +86,13 @@ const InteropView = () => {
         ))}
       </div>
 
-      <Card title="Disponibilité globale agrégée" subtitle="6 derniers mois">
-        <div className="h-64">
+      <Card
+        title="Disponibilité globale agrégée"
+        subtitle="6 derniers mois"
+        className="flex min-h-[240px] flex-1 flex-col"
+        bodyClassName="flex min-h-0 flex-1 flex-col"
+      >
+        <div className="h-full min-h-0 flex-1">
           <TrendLine points={trend} />
         </div>
       </Card>

@@ -90,13 +90,13 @@ const PeriodComparison = () => {
                   style={{ borderColor: "var(--color-border)" }}
                 >
                   <td
-                    className="whitespace-nowrap py-2.5 pr-4 font-medium"
+                    className="whitespace-nowrap py-1.5 pr-4 font-medium"
                     style={{ color: "var(--color-text-primary)" }}
                   >
                     {label}
                   </td>
                   <td
-                    className="py-2.5 pr-4 font-bold tabular-nums"
+                    className="py-1.5 pr-4 font-bold tabular-nums"
                     style={{ color: "var(--color-text-primary)" }}
                   >
                     {data?.kpi[key]}
@@ -105,7 +105,7 @@ const PeriodComparison = () => {
                   {comparisons.map((c) => (
                     <td
                       key={c.offset_months}
-                      className="whitespace-nowrap py-2.5 pr-4"
+                      className="whitespace-nowrap py-1.5 pr-4"
                     >
                       <span
                         className="mr-2 tabular-nums"

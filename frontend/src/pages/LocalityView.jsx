@@ -38,8 +38,8 @@ const LocalityView = () => {
     : [];
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center gap-2">
+    <div className="flex min-h-full flex-col gap-4">
+      <div className="flex shrink-0 items-center gap-2">
         <MapPin className="h-5 w-5" style={{ color: "var(--color-accent)" }} />
         <div>
           <h2
@@ -58,46 +58,52 @@ const LocalityView = () => {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-5">
-        <Card title="Sélection" className="md:col-span-2 lg:col-span-2">
+      <div className="grid min-h-[320px] flex-1 auto-rows-fr grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-5">
+        <Card
+          title="Sélection"
+          className="flex h-full flex-col md:col-span-2 lg:col-span-2"
+          bodyClassName="flex min-h-0 flex-1 flex-col"
+        >
           {localitiesLoading ? (
             <div
-              className="flex h-64 items-center justify-center text-sm"
+              className="flex h-full min-h-32 items-center justify-center text-sm"
               style={{ color: "var(--color-text-muted)" }}
             >
               Chargement…
             </div>
           ) : (
             <>
-              <BurkinaFasoMap
-                localities={localities}
-                selectedLocalityId={localityId}
-                onSelect={setLocalityId}
-                height="clamp(240px, calc(100vh - 620px), 420px)"
-              />
+              <div className="min-h-0 flex-[3]">
+                <BurkinaFasoMap
+                  localities={localities}
+                  selectedLocalityId={localityId}
+                  onSelect={setLocalityId}
+                  height="100%"
+                />
+              </div>
               <div
-                className="mt-4 border-t pt-3"
+                className="mt-4 flex min-h-0 flex-[2] flex-col border-t pt-3"
                 style={{ borderColor: "var(--color-border)" }}
               >
                 <LocalityBulletList
                   localities={localities}
                   selectedLocalityId={localityId}
                   onSelect={setLocalityId}
-                  maxHeight="clamp(140px, calc(100vh - 740px), 260px)"
+                  maxHeight="100%"
                 />
               </div>
             </>
           )}
         </Card>
 
-        <div className="md:col-span-1 lg:col-span-1">
+        <div className="h-full md:col-span-1 lg:col-span-1">
           <NodeList
             nodes={localityDetail?.nodes ?? []}
             loading={nodesLoading}
           />
         </div>
 
-        <div className="md:col-span-1 lg:col-span-2">
+        <div className="h-full md:col-span-1 lg:col-span-2">
           <IncidentTable
             title={`Alertes ouvertes — ${selectedLocalityName ?? ""}`}
             incidents={localityIncidents}

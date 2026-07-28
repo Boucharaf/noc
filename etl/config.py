@@ -55,7 +55,7 @@ NAGIOS_API_KEY = os.getenv(
 
 NETXMS_API_URL = os.getenv(
     "NETXMS_API_URL", ""
-).strip()  # e.g. https://netxms.anptic.bf/rest
+).strip()  # e.g. http://netxms.anptic.bf:8000 — base URL, no trailing /v1
 NETXMS_USER = os.getenv("NETXMS_USER", "")
 NETXMS_PASSWORD = os.getenv("NETXMS_PASSWORD", "")
 

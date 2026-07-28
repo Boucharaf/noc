@@ -89,12 +89,12 @@ const BurkinaFasoMap = ({
   );
 
   return (
-    <div className="w-full">
+    <div className="flex h-full w-full flex-col">
       {/* `isolate z-0` traps Leaflet's internal z-indexes (panes go up to 1000)
           inside this box, so the map can't paint over the sticky header (z-20)
           when the page scrolls. */}
       <div
-        className={`relative isolate z-0 w-full overflow-hidden rounded-lg border ${theme === "dark" ? "leaflet-dark-map" : ""}`}
+        className={`relative isolate z-0 w-full flex-1 min-h-0 overflow-hidden rounded-lg border ${theme === "dark" ? "leaflet-dark-map" : ""}`}
         style={{ height, borderColor: "var(--color-border)" }}
       >
         <MapContainer
@@ -166,7 +166,7 @@ const BurkinaFasoMap = ({
       </div>
 
       <div
-        className="mt-3 flex flex-wrap items-center gap-4 text-xs"
+        className="mt-3 flex shrink-0 flex-wrap items-center gap-4 text-xs"
         style={{ color: "var(--color-text-secondary)" }}
       >
         <span className="flex items-center gap-1.5">

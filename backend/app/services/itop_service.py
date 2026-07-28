@@ -46,9 +46,12 @@ def create_ticket(incident_id: int, node_code: str, description: str | None, sev
     }
 
     try:
+        # ITOP_URL may already carry its own ?version=... (some deployments
+        # pin a specific REST version); only default it here when absent.
+        params = None if "version=" in ITOP_URL else {"version": "1.3"}
         response = requests.post(
             ITOP_URL,
-            params={"version": "1.3"},
+            params=params,
             data={
                 "auth_user": ITOP_USER,
                 "auth_pwd": ITOP_PASS,

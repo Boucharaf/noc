@@ -19,11 +19,12 @@ const NodeList = ({ nodes = [], loading }) => (
   <Card
     title="Nœuds du réseau"
     subtitle={`${nodes.length} nœud(s)`}
-    bodyClassName="p-0"
+    bodyClassName="flex min-h-0 flex-1 flex-col p-0"
+    className="flex h-full flex-col"
   >
     <ul
-      className="divide-y overflow-y-auto"
-      style={{ borderColor: "var(--color-border)", maxHeight: "clamp(280px, calc(100vh - 480px), 640px)" }}
+      className="h-full divide-y overflow-y-auto"
+      style={{ borderColor: "var(--color-border)" }}
     >
       {loading && (
         <li

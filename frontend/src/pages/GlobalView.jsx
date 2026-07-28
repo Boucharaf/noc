@@ -17,7 +17,7 @@ import {
 
 const ChartLoading = () => (
   <div
-    className="flex h-64 items-center justify-center text-sm"
+    className="flex h-full min-h-32 items-center justify-center text-sm"
     style={{ color: "var(--color-text-muted)" }}
   >
     Chargement…
@@ -39,8 +39,8 @@ const GlobalView = () => {
     navigate("/locality", { state: { localityId } });
 
   return (
-    <div className="space-y-6">
-      <div>
+    <div className="flex min-h-full flex-col gap-4">
+      <div className="shrink-0">
         <h2
           className="text-xl font-bold"
           style={{ color: "var(--color-text-primary)" }}
@@ -53,7 +53,7 @@ const GlobalView = () => {
         </p>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid shrink-0 grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <KPICard
           title="Total Incidents"
           value={kpi?.total_incidents}
@@ -102,53 +102,63 @@ const GlobalView = () => {
         />
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
-        <Card
-          title="Carte de Supervision"
-          subtitle="Cliquez une localité pour la retrouver dans Vue par Localité"
-          className="lg:col-span-3"
-        >
-          {mapLoading ? (
-            <ChartLoading />
-          ) : (
-            <BurkinaFasoMap
-              localities={localities}
-              onSelect={goToLocality}
-              height="clamp(360px, calc(100vh - 480px), 680px)"
-            />
-          )}
-        </Card>
-        <Card
-          title="Localités"
-          subtitle="Triées par volume d'incidents"
-          className="lg:col-span-2"
-        >
-          {mapLoading ? (
-            <ChartLoading />
-          ) : (
-            <LocalityBulletList
-              localities={localities}
-              onSelect={goToLocality}
-              maxHeight="clamp(300px, calc(100vh - 480px), 640px)"
-            />
-          )}
-        </Card>
-      </div>
+      {/* Below the KPI row, content shares whatever space remains on tall
+          screens (no page scroll — the main content area exactly fits). If a
+          screen is too short, `main` scrolls as the fallback and the map/list
+          row keeps a usable floor instead of collapsing to nothing. */}
+      <div className="flex min-h-0 flex-1 flex-col gap-4">
+        <div className="grid min-h-[260px] flex-1 auto-rows-fr grid-cols-1 gap-4 lg:grid-cols-5">
+          <Card
+            title="Carte de Supervision"
+            subtitle="Cliquez une localité pour la retrouver dans Vue par Localité"
+            className="flex h-full flex-col lg:col-span-3"
+            bodyClassName="flex min-h-0 flex-1 flex-col"
+          >
+            {mapLoading ? (
+              <ChartLoading />
+            ) : (
+              <BurkinaFasoMap
+                localities={localities}
+                onSelect={goToLocality}
+                height="100%"
+              />
+            )}
+          </Card>
+          <Card
+            title="Localités"
+            subtitle="Triées par volume d'incidents"
+            className="flex h-full flex-col lg:col-span-2"
+            bodyClassName="flex min-h-0 flex-1 flex-col"
+          >
+            {mapLoading ? (
+              <ChartLoading />
+            ) : (
+              <LocalityBulletList
+                localities={localities}
+                onSelect={goToLocality}
+                maxHeight="100%"
+              />
+            )}
+          </Card>
+        </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Card title="Évolution Mensuelle" subtitle="6 derniers mois">
-          <div className="h-64">
-            {trendLoading ? <ChartLoading /> : <WeeklyBar points={trend} />}
-          </div>
-        </Card>
-        <Card title="Répartition des incidents par cause">
-          <div className="h-64">
-            {causesLoading ? <ChartLoading /> : <MTTRDonut causes={causes} />}
-          </div>
-        </Card>
-      </div>
+        <div className="grid shrink-0 grid-cols-1 gap-4 lg:grid-cols-2">
+          <Card title="Évolution Mensuelle" subtitle="6 derniers mois">
+            <div className="h-20">
+              {trendLoading ? <ChartLoading /> : <WeeklyBar points={trend} />}
+            </div>
+          </Card>
+          <Card title="Répartition des incidents par cause">
+            <div className="h-20">
+              {causesLoading ? <ChartLoading /> : <MTTRDonut causes={causes} />}
+            </div>
+          </Card>
+        </div>
 
-      <PeriodComparison />
+        <div className="shrink-0">
+          <PeriodComparison />
+        </div>
+      </div>
     </div>
   );
 };

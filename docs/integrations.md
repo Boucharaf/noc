@@ -49,7 +49,7 @@ accordingly.
 |---|---|---|---|
 | **Zabbix** | JSON-RPC `event.get` (§6.1) | **Implemented** (`etl/extract/zabbix.py`) | `ZABBIX_API_URL`, `ZABBIX_USER`/`ZABBIX_PASSWORD` or `ZABBIX_API_TOKEN` |
 | **Nagios** | `statusjson.cgi?query=hostlist` (§6.2) | **Implemented** (`etl/extract/nagios.py`) | `NAGIOS_API_URL`, `NAGIOS_USER`/`NAGIOS_PASSWORD` and/or `NAGIOS_API_KEY` |
-| **NetXMS** | REST `/alarms` (web API daemon) | **Implemented** (`etl/extract/netxms.py`) | `NETXMS_API_URL`, `NETXMS_USER`, `NETXMS_PASSWORD` |
+| **NetXMS** | REST API v1: `POST /v1/login` → bearer token, then `/v1/alarms` + `/v1/objects` | **Implemented** (`etl/extract/netxms.py`) | `NETXMS_API_URL`, `NETXMS_USER`, `NETXMS_PASSWORD` |
 | **Centreon** | REST v2 `/monitoring/resources` (§6.3) + inbound webhook | **Implemented** (`etl/extract/centreon.py`) | `CENTREON_API_URL`, `CENTREON_USER`/`CENTREON_PASSWORD` or `CENTREON_API_KEY` |
 | **iTop** | REST webservice (`core/create` on class `Incident`) | **Implemented** (`backend/app/services/itop_service.py`) | `ITOP_URL`, `ITOP_USER`, `ITOP_PASS`, `ITOP_ORG_ID` |
 | **Twilio (SMS)** | REST API (`Messages.json`) | **Implemented** (`backend/app/services/notification_service.py`) | `NOTIFICATIONS_ENABLED`, `TWILIO_*`, `NOC_SMS_RECIPIENTS` |
@@ -95,11 +95,21 @@ Because status (not an event log) is polled, a host that stays down is
 re-reported each pass with the stable id `nagios-{host}-down` — deduplicated
 by the backend.
 
-**NetXMS** — set `NETXMS_API_URL` to the web API daemon base
-(e.g. `https://netxms.anptic.bf/rest`; the collector calls `/alarms` with
-Basic auth). Active alarms map severity 0–4 (NORMAL…CRITICAL) →
-`low, medium, medium, high, critical`; NORMAL alarms are ignored. Alarm ids
-are stable → deduplicated while active.
+**NetXMS** — set `NETXMS_API_URL` to the REST API v1 base
+(e.g. `http://netxms.anptic.bf:8000`, no trailing `/v1`). Auth is token-based,
+not Basic: the collector `POST`s `{"username": NETXMS_USER, "password":
+NETXMS_PASSWORD}` to `/v1/login`, gets back a bearer token (short-lived, so it
+logs in on every poll — same approach as Zabbix/Centreon), then calls
+`/v1/alarms` (a flat list of `{id, severity, state, source, message,
+lastChangeTime}`) and `/v1/objects` with `Authorization: Bearer <token>`.
+`/v1/objects` is used, best-effort, to resolve an alarm's numeric `source` id
+to an object name for node matching — it may not enumerate every Node
+depending on the server's object tree, in which case that alarm's host falls
+back to the raw numeric id (normally unmatched, logged, and skipped like any
+other unprovisioned host). Alarm `state` 2 (terminated/resolved) is dropped;
+severity 0–4 (NORMAL…CRITICAL) maps to `low, medium, medium, high, critical`,
+with NORMAL alarms also ignored. Alarm ids are stable → deduplicated while
+active.
 
 **Centreon** — set `CENTREON_API_URL` to the v2 API base
 (e.g. `https://centreon.anptic.bf/centreon/api/latest`). Auth: static

@@ -35,8 +35,8 @@ const AlertFeed = () => {
           {alerts.length} ouverte(s)
         </span>
       }
-      bodyClassName="p-3 overflow-y-auto"
-      bodyStyle={{ maxHeight: "clamp(280px, calc(100vh - 480px), 640px)" }}
+      bodyClassName="min-h-0 flex-1 p-3 overflow-y-auto"
+      className="flex h-full flex-col"
     >
       <div className="space-y-1">
         {isLoading && (

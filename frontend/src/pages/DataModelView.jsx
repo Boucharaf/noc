@@ -18,13 +18,13 @@ const DataModelView = () => {
   const { data: recurrent = [], isLoading: recurrentLoading } = useKpiRecurrent(3);
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center gap-2">
+    <div className="flex min-h-full flex-col gap-4">
+      <div className="flex shrink-0 items-center gap-2">
         <Database className="h-5 w-5" style={{ color: 'var(--color-accent)' }} />
         <h2 className="text-xl font-bold" style={{ color: 'var(--color-text-primary)' }}>Modèle de Données & Analytics</h2>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      <div className="grid shrink-0 grid-cols-1 gap-4 lg:grid-cols-2">
         <Card title="Architecture de la Base de Données">
           <ul className="space-y-3">
             {SCHEMA.map(([table, desc]) => (
@@ -52,13 +52,18 @@ const DataModelView = () => {
         </Card>
       </div>
 
-      <Card title="Nœuds récurrents" subtitle="≥ 3 incidents ce mois" bodyClassName={recurrent.length ? 'p-0' : 'p-5'}>
+      <Card
+        title="Nœuds récurrents"
+        subtitle="≥ 3 incidents ce mois"
+        bodyClassName={`flex min-h-0 flex-1 flex-col ${recurrent.length ? 'p-0' : 'p-5'}`}
+        className="flex min-h-[220px] flex-1 flex-col"
+      >
         {recurrentLoading && <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>Chargement…</p>}
         {!recurrentLoading && recurrent.length === 0 && (
           <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>Aucun nœud récurrent ce mois-ci.</p>
         )}
         {recurrent.length > 0 && (
-          <div className="overflow-auto" style={{ maxHeight: 'clamp(240px, calc(100vh - 560px), 480px)' }}>
+          <div className="h-full overflow-auto">
             <table className="w-full">
               <thead>
                 <tr style={{ color: 'var(--color-text-secondary)' }}>

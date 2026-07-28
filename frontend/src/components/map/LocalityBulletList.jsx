@@ -15,7 +15,7 @@ const LocalityBulletList = ({
   );
 
   return (
-    <ul className="space-y-1 overflow-y-auto pr-1" style={{ maxHeight }}>
+    <ul className="h-full space-y-1 overflow-y-auto pr-1" style={{ maxHeight }}>
       {sorted.map((l) => {
         const isSelected = l.locality_id === selectedLocalityId;
         return (

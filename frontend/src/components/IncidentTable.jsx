@@ -13,18 +13,17 @@ const IncidentTable = ({
   title = "Liste des Incidents",
   incidents = [],
   loading = false,
-  maxHeight = "clamp(280px, calc(100vh - 480px), 640px)",
 }) => {
   const th = "sticky top-0 z-10 px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wide border-b";
   const td = "px-4 py-3 text-sm whitespace-nowrap";
   const thStyle = { background: "var(--color-surface)", borderColor: "var(--color-border)" };
 
   return (
-    <Card title={title} bodyClassName="p-0 ">
+    <Card title={title} bodyClassName="flex min-h-0 flex-1 flex-col p-0" className="flex h-full flex-col">
       {/* The scroll container must own both axes — a sticky <thead> only
           stays put relative to *this* element's scrolling, not the page's,
           and `overflow` set on <tbody> is a no-op (table-row-group ignores it). */}
-      <div className="overflow-auto" style={{ maxHeight }}>
+      <div className="h-full overflow-auto">
         <table className="w-full">
           <thead>
             <tr style={{ color: "var(--color-text-secondary)" }}>

@@ -33,14 +33,14 @@ const KPICard = ({
 
   return (
     <div
-      className="flex flex-col rounded-xl border p-5 transition-transform hover:-translate-y-0.5"
+      className="flex flex-col rounded-xl border p-4 transition-transform hover:-translate-y-0.5"
       style={{
         background: "var(--color-surface)",
         borderColor: "var(--color-border)",
         boxShadow: "var(--shadow-elevate)",
       }}
     >
-      <div className="mb-2 flex items-center justify-between">
+      <div className="mb-1.5 flex items-center justify-between">
         <h3
           className="text-xs font-semibold uppercase tracking-wide"
           style={{ color: "var(--color-text-secondary)" }}
@@ -60,7 +60,7 @@ const KPICard = ({
         )}
       </div>
       <div
-        className="text-3xl font-bold tabular-nums"
+        className="text-2xl font-bold tabular-nums"
         style={{
           color: loading
             ? "var(--color-text-muted)"
@@ -71,7 +71,7 @@ const KPICard = ({
       </div>
       {trend != null && (
         <div
-          className="mt-2 flex items-center gap-1 text-sm font-medium"
+          className="mt-1.5 flex items-center gap-1 text-sm font-medium"
           style={{ color }}
         >
           <TrendIcon className="h-4 w-4" />
