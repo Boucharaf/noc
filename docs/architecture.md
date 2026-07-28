@@ -59,7 +59,7 @@ quick overview and getting-started steps, see the [README](../README.md).
 |---|---|---|
 | `nginx` | `nginx/Dockerfile` | TLS termination, HTTP→HTTPS redirect, reverse proxy to frontend and backend |
 | `frontend` | `frontend/Dockerfile` | Static React (Vite) build served by nginx-in-container on port 80 |
-| `backend` | `backend/Dockerfile` | FastAPI app (Uvicorn), REST API, JWT auth + RBAC, rate limiting, KPI computation, PDF/DOCX reports, `/ws/alerts` WebSocket, iTop ticket creation, SMS/email + Web Push notifications |
+| `backend` | `backend/Dockerfile` | FastAPI app (Uvicorn), REST API, JWT auth + RBAC, rate limiting, KPI computation, PDF/DOCX reports, `/ws/alerts` WebSocket, SMS/email + Web Push notifications |
 | `postgres` | `postgres:15-alpine` | System of record — dimensions, incidents, users; runs `database/*.sql` on first boot |
 | `redis` | `redis:7` | Four roles on one instance: KPI response cache + rate-limit counters + `noc:alerts` pub/sub channel (DB 0), and Celery broker (DB 1) |
 | `etl-worker` | `etl/Dockerfile` | Celery worker executing `etl.collect_incident`, `etl.refresh_kpi_view`, and `etl.generate_monthly_report`; mounts the `reports` volume at `/reports` |
@@ -113,10 +113,6 @@ This is the path that keeps the dashboard feeling "live":
      already-open incident returns that incident (HTTP 200, no side effects) —
      status pollers legitimately re-report active problems every pass.
    - Inserts the `fact_incident` row.
-   - When the payload sets `itop_auto_ticket: true`, creates a real iTop
-     `Incident` ticket via REST (`itop_service.create_ticket`, see
-     [integrations.md](integrations.md#itop-itsm--cmdb)) and stores its
-     reference in `itop_ticket_id`.
    - Refreshes `mv_kpi_node_monthly` synchronously **when `SYNC_MV_REFRESH=true`**
      (the default, fine for the small demo dataset). In production set it to
      `false` and rely on the nightly `etl.refresh_kpi_view` batch (spec §2.2) —

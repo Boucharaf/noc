@@ -14,7 +14,6 @@ class IncidentIngestPayload(BaseModel):
     description: Optional[str] = None
     cause_category: Optional[str] = None
     cause_label: Optional[str] = None
-    itop_auto_ticket: bool = False
 
 
 class IncidentIngestResponse(BaseModel):

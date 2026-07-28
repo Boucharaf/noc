@@ -259,9 +259,9 @@ longest surface first) — **not cached**, to stay near-real-time.
 Query: `limit` (default 20, max 100)
 
 Returns `{id, node_code, node_name, locality, severity, status, description,
-detected_at, age_minutes, itop_ticket_id}[]`. `itop_ticket_id` is `null` until
-an iTop ticket has been created for that incident (see
-[`POST /api/incidents/ingest`](#post-apiincidentsingest)).
+detected_at, age_minutes, itop_ticket_id}[]`. `itop_ticket_id` is currently
+always `null` — kept in the response shape for future use, but nothing
+populates it today.
 
 ---
 
@@ -286,8 +286,7 @@ Request body:
   "detected_at": "2026-07-07T09:14:00Z",
   "description": "Batterie onduleur déchargée",
   "cause_category": "Énergie",
-  "cause_label": "Batterie onduleur déchargée",
-  "itop_auto_ticket": true
+  "cause_label": "Batterie onduleur déchargée"
 }
 ```
 
@@ -299,14 +298,10 @@ an existing `dim_node.code` or the request 404s.
 Response (`201 Created`):
 
 ```json
-{ "incident_id": 5821, "node_id": 12, "itop_ticket_id": "I-000042", "shift": "noc", "created_at": "2026-07-07T09:14:03" }
+{ "incident_id": 5821, "node_id": 12, "itop_ticket_id": null, "shift": "noc", "created_at": "2026-07-07T09:14:03" }
 ```
 
-Side effects: creates the cause dimension row if new, and — when
-`itop_auto_ticket: true` — creates a real iTop `Incident` ticket via REST
-(`backend/app/services/itop_service.py`, see
-[integrations.md](integrations.md#itop-itsm--cmdb)) and stores its reference
-in `itop_ticket_id`. Also refreshes `mv_kpi_node_monthly` (when
+Side effects: creates the cause dimension row if new. Also refreshes `mv_kpi_node_monthly` (when
 `SYNC_MV_REFRESH=true`), invalidates all `kpi:*` cache keys, **publishes the
 incident to the `/ws/alerts` WebSocket stream** (via Redis pub/sub), and — for
 `critical` severity — fires two independent background tasks: SMS (Twilio) +

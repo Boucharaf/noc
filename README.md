@@ -98,7 +98,7 @@ The application follows a **containerized 3-tier architecture** orchestrated via
 - **[fpdf2](https://pypi.org/project/fpdf2/)** `2.7.9` — Monthly report PDF export
 - **[python-docx](https://pypi.org/project/python-docx/)** `1.1.2` — Monthly report DOCX export
 - **[websockets](https://pypi.org/project/websockets/)** `12.0` — WebSocket support for the `/ws/alerts` stream
-- **[Requests](https://pypi.org/project/requests/)** `2.32.3` — Outbound HTTP (Twilio SMS API, iTop REST)
+- **[Requests](https://pypi.org/project/requests/)** `2.32.3` — Outbound HTTP (Twilio SMS API)
 - **[pywebpush](https://pypi.org/project/pywebpush/)** `2.0.3` — VAPID-signed Web Push delivery to browser/PWA subscriptions
 - **[Python-dotenv](https://pypi.org/project/python-dotenv/)** `1.0.0` — Environment variable management
 - **[pytest](https://pytest.org/) + [httpx](https://www.python-httpx.org/)** *(dev)* — Backend test suite (`backend/tests/`)
@@ -183,7 +183,7 @@ noc/
 │       ├── models/               # SQLAlchemy ORM models (dimensions, fact_incident, dim_user, push_subscription)
 │       ├── schemas/               # Pydantic request/response schemas
 │       ├── routes/               # REST routers (/api/kpi, /api/sla, /api/alerts, /api/incidents, /api/auth, /api/report, /api/notifications) + /ws/alerts WebSocket
-│       └── services/             # Business logic (KPI queries, incident lifecycle, cache, auth, iTop REST client, PDF/DOCX report, SMS/email + Web Push notifications, alert broadcast)
+│       └── services/             # Business logic (KPI queries, incident lifecycle, cache, auth, PDF/DOCX report, SMS/email + Web Push notifications, alert broadcast)
 │
 ├── frontend/                     # React application (Vite)
 │   ├── Dockerfile
@@ -266,14 +266,11 @@ ACCESS_TOKEN_EXPIRE_MINUTES=30
 # Zabbix, Nagios and iTop run as containers in this same compose stack —
 # these defaults point at them over the compose network. Swap in external
 # hosts (e.g. https://zabbix.anptic.bf/...) to poll real servers instead.
+# (iTop ships as a standalone ITSM/CMDB tool — the backend does not integrate
+# with it.)
 ZABBIX_API_URL=http://zabbix-web:8080/api_jsonrpc.php
 ZABBIX_USER=Admin
 ZABBIX_PASSWORD=zabbix
-
-ITOP_URL=http://itop/webservices/rest.php
-ITOP_USER=admin
-ITOP_PASS=your_itop_password             # Set after running the iTop setup wizard
-ITOP_ORG_ID=1                            # org_id tickets are created under ("My Company/Department" on a fresh install)
 
 NAGIOS_API_URL=http://nagios
 NAGIOS_USER=nagiosadmin                  # Also the Nagios container's web login
@@ -562,9 +559,9 @@ The dashboard integrates with the following monitoring systems via API or webhoo
 | **Centreon** | REST API | IT monitoring events & alerts |
 | **Nagios** | REST API | Host/service availability data |
 | **NetXMS** | — | Network performance monitoring |
-| **iTop** | REST API (`core/create`) | Incident management & ITSM (CMDB) — creates a real `Incident` ticket per critical/high-severity incident when `itop_auto_ticket: true` |
+| **iTop** | — | ITSM/CMDB — bundled as a standalone tool; the backend does not integrate with it |
 
-Configure integration URLs and credentials in the `.env` file as described in the [Environment Variables](#2-configure-environment-variables) section. See [docs/integrations.md](docs/integrations.md) for the iTop setup wizard walkthrough and the `REST Services User` profile grant it requires.
+Configure integration URLs and credentials in the `.env` file as described in the [Environment Variables](#2-configure-environment-variables) section. See [docs/integrations.md](docs/integrations.md) for details.
 
 ---
 
@@ -657,7 +654,6 @@ The database ships with a generated demo dataset so the dashboard is fully inter
 - The same Celery beat also runs two **scheduled jobs** (cahier des charges §2.2 and §1.2):
   - `etl.refresh_kpi_view` — nightly at **02:00**, `REFRESH MATERIALIZED VIEW CONCURRENTLY mv_kpi_node_monthly`.
   - `etl.generate_monthly_report` — on the **1st of each month at 02:30**, downloads the previous month's report (PDF + DOCX) and archives it in the `reports` Docker volume (`/reports` inside `etl-worker`).
-- iTop ticket creation (`backend/app/services/itop_service.py`) makes a real REST call to `core/create` on the `Incident` class whenever an ingest payload sets `itop_auto_ticket: true`, and degrades gracefully (logs, returns `null`) if iTop is unreachable or misconfigured — see [docs/integrations.md](docs/integrations.md#itop-itsm--cmdb).
 
 ---
 
@@ -672,7 +668,7 @@ reference, see [`docs/`](docs/):
 | [docs/api-reference.md](docs/api-reference.md) | Every endpoint: auth, params, request/response shapes, error codes |
 | [docs/database-schema.md](docs/database-schema.md) | Tables, columns, relationships, the `mv_kpi_node_monthly` materialized view, indexes |
 | [docs/deployment.md](docs/deployment.md) | Services, env vars, `deployment.sh`, TLS, backups, production hardening checklist |
-| [docs/integrations.md](docs/integrations.md) | Zabbix/Nagios/Centreon/NetXMS/iTop integration contracts, the iTop setup wizard walkthrough, and Web Push/VAPID setup |
+| [docs/integrations.md](docs/integrations.md) | Zabbix/Nagios/Centreon/NetXMS collector contracts and Web Push/VAPID setup |
 
 ---
 

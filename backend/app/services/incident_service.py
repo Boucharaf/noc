@@ -8,7 +8,6 @@ from app.core.constants import SYNC_MV_REFRESH
 from app.models.dimension import Cause, Node
 from app.models.incident import Incident
 from app.schemas.incidents import IncidentIngestPayload
-from app.services import itop_service
 
 
 def _to_naive_utc(dt: datetime | None) -> datetime | None:
@@ -101,13 +100,6 @@ def ingest_incident(db: Session, payload: IncidentIngestPayload) -> tuple[Incide
     db.add(incident)
     db.commit()
     db.refresh(incident)
-
-    if payload.itop_auto_ticket:
-        incident.itop_ticket_id = itop_service.create_ticket(
-            incident.id, payload.node_code, payload.description, payload.severity
-        )
-        db.commit()
-        db.refresh(incident)
 
     refresh_kpi_view(db)
     return incident, True

@@ -141,7 +141,7 @@ permission revoked).
 | `id` | `BIGSERIAL PK` | |
 | `node_id` | `INTEGER FK → dim_node` | required |
 | `cause_id` | `INTEGER FK → dim_cause` | nullable |
-| `itop_ticket_id` | `VARCHAR(50)` | nullable — set if `itop_auto_ticket=true` on ingest |
+| `itop_ticket_id` | `VARCHAR(50)` | nullable — not currently populated (no backend/iTop integration); kept for future use and manual/seed data |
 | `external_id` | `VARCHAR(100)` | the supervision tool's own event/alert ID |
 | `status` | `VARCHAR(20)` | `CHECK IN ('open','acknowledged','resolved','closed')`, default `open` |
 | `severity` | `VARCHAR(20)` | `CHECK IN ('critical','high','medium','low')`, default `medium` |

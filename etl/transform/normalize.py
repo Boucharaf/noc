@@ -12,5 +12,4 @@ def to_ingest_payload(event: dict) -> dict:
         "description": event.get("description"),
         "cause_category": event.get("cause_category"),
         "cause_label": event.get("cause_label"),
-        "itop_auto_ticket": event["severity"] in ("critical", "high"),
     }

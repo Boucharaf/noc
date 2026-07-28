@@ -15,13 +15,14 @@ MariaDB) alongside the dashboard, pre-wired to the collectors via `.env`:
 |---|---|---|---|
 | Zabbix | http://localhost:8081 | `http://zabbix-web:8080/api_jsonrpc.php` | `Admin` / `zabbix` |
 | Nagios | http://localhost:8083 | `http://nagios/cgi-bin/statusjson.cgi` | `$NAGIOS_USER` / `$NAGIOS_PASSWORD` |
-| iTop | http://localhost:8082 | `http://itop/webservices/rest.php` | created in setup wizard |
+| iTop | http://localhost:8082 | — (standalone ITSM/CMDB tool, no backend integration) | created in setup wizard |
 
 iTop requires a **one-time setup wizard** on first start (DB server
-`localhost`, login `admin`, password `$ITOP_DB_PASSWORD`). Centreon and NetXMS
-have no vendor-supported Docker images — their collectors stay disabled until
-you point their `*_API_URL` at an external server (Centreon can also push
-webhooks, see below).
+`localhost`, login `admin`, password `$ITOP_DB_PASSWORD`); it ships purely as
+a standalone tool in the stack. Centreon and NetXMS have no vendor-supported
+Docker images — their collectors stay disabled until you point their
+`*_API_URL` at an external server (Centreon can also push webhooks, see
+below).
 
 For incidents to flow from Zabbix/Nagios into the dashboard, the hosts you
 create in those tools must match a `dim_node` (see
@@ -37,7 +38,6 @@ accordingly.
 - [Host → node matching](#host--node-matching)
 - [Deduplication](#deduplication)
 - [Centreon webhooks (push)](#centreon-webhooks-push)
-- [iTop (ITSM / CMDB)](#itop-itsm--cmdb)
 - [Web Push (browser/PWA)](#web-push-browserpwa)
 - [Webhook authentication](#webhook-authentication)
 
@@ -51,7 +51,6 @@ accordingly.
 | **Nagios** | `statusjson.cgi?query=hostlist` (§6.2) | **Implemented** (`etl/extract/nagios.py`) | `NAGIOS_API_URL`, `NAGIOS_USER`/`NAGIOS_PASSWORD` and/or `NAGIOS_API_KEY` |
 | **NetXMS** | REST API v1: `POST /v1/login` → bearer token, then `/v1/alarms` + `/v1/objects` | **Implemented** (`etl/extract/netxms.py`) | `NETXMS_API_URL`, `NETXMS_USER`, `NETXMS_PASSWORD` |
 | **Centreon** | REST v2 `/monitoring/resources` (§6.3) + inbound webhook | **Implemented** (`etl/extract/centreon.py`) | `CENTREON_API_URL`, `CENTREON_USER`/`CENTREON_PASSWORD` or `CENTREON_API_KEY` |
-| **iTop** | REST webservice (`core/create` on class `Incident`) | **Implemented** (`backend/app/services/itop_service.py`) | `ITOP_URL`, `ITOP_USER`, `ITOP_PASS`, `ITOP_ORG_ID` |
 | **Twilio (SMS)** | REST API (`Messages.json`) | **Implemented** (`backend/app/services/notification_service.py`) | `NOTIFICATIONS_ENABLED`, `TWILIO_*`, `NOC_SMS_RECIPIENTS` |
 | **SMTP (email)** | SMTP + STARTTLS | **Implemented** (same service) | `SMTP_*`, `NOC_EMAIL_RECIPIENTS` |
 | **Web Push (browser/PWA)** | Web Push protocol, VAPID-signed | **Implemented** (`backend/app/services/push_service.py`) | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_CLAIMS_EMAIL` |
@@ -150,39 +149,6 @@ real time by POSTing directly to `/api/incidents/ingest` with
 [api-reference.md](api-reference.md#post-apiincidentsingest) and the broker
 configuration example in the cahier des charges §6.3. Webhook-pushed and
 batch-collected alerts coexist safely thanks to the deduplication above.
-
-## iTop (ITSM / CMDB)
-
-`backend/app/services/itop_service.py` makes a real REST call —
-`core/create` on class `Incident` — whenever an ingest payload sets
-`itop_auto_ticket: true` (the ETL sets this for `critical`/`high` events in
-`transform/normalize.py`). It maps the incident's `severity` onto iTop's
-`urgency` enum (`critical→1`, `high→2`, `medium→3`, `low→4`) and returns the
-created ticket's reference (e.g. `I-000042`), stored in
-`fact_incident.itop_ticket_id`. Like the SMS/email notifier, it **degrades
-gracefully**: any failure (iTop unreachable, rejected fields, timeout) is
-logged and the call returns `null` rather than blocking incident ingestion.
-
-**One-time setup required before this works:**
-
-1. **Run the setup wizard** — first visit to `http://localhost:8082` (the
-   bundled iTop container) redirects there. Use DB server `localhost`, login
-   `admin`, password `$ITOP_DB_PASSWORD`; create an admin account matching
-   `ITOP_USER`/`ITOP_PASS` in `.env`. (Pointing `ITOP_URL` at an external iTop
-   instance instead just needs an existing admin account there.)
-2. **Grant the `REST Services User` profile** to that account. iTop separates
-   "can use the web UI" (the `Administrator` profile, granted by the wizard)
-   from "can call the REST webservice" — without this second profile,
-   `core/create` returns `Error: This user is not authorized to use the web
-   services.` even with correct credentials. In the iTop UI: *Administration →
-   Users*, open the account, add the `REST Services User` profile.
-3. Set `ITOP_ORG_ID` in `.env` to the `id` of the Organization tickets should
-   be created under (a fresh install has exactly one: `1`, "My
-   Company/Department"). `org_id` is a mandatory field on `Incident` — ticket
-   creation fails without it.
-
-`dim_node.itop_ci_id` exists in the schema for linking a node to its iTop CMDB
-CI record, but nothing currently populates or reads it outside seed data.
 
 ## Web Push (browser/PWA)
 

@@ -42,7 +42,7 @@ Plus the **bundled supervision/ITSM servers** the collectors poll (see
 | `zabbix-agent` | `zabbix/zabbix-agent2:alpine-7.0-latest` | — | monitors the Zabbix host itself |
 | `zabbix-db` | `postgres:15-alpine` | — | Zabbix's own database |
 | `nagios` | `jasonrivers/nagios:latest` | `8083:80` | `$NAGIOS_USER`/`$NAGIOS_PASSWORD` |
-| `itop` | `vbkunin/itop:3.2.2` | `8082:80` | embedded MariaDB; one-time setup wizard |
+| `itop` | `vbkunin/itop:3.2.2` | `8082:80` | embedded MariaDB; one-time setup wizard; standalone tool, no backend integration |
 
 `etl-worker` and `etl-beat` share the same image/Dockerfile but run different
 Celery commands (`worker` vs `beat`) — see [architecture.md](architecture.md#components).
@@ -83,10 +83,7 @@ is set — see [integrations.md](integrations.md))
 `ZABBIX_API_URL` + `ZABBIX_USER`/`ZABBIX_PASSWORD` or `ZABBIX_API_TOKEN`,
 `NAGIOS_API_URL` + `NAGIOS_USER`/`NAGIOS_PASSWORD` and/or `NAGIOS_API_KEY`,
 `NETXMS_API_URL` + `NETXMS_USER`/`NETXMS_PASSWORD`,
-`CENTREON_API_URL` + `CENTREON_USER`/`CENTREON_PASSWORD` or `CENTREON_API_KEY`,
-`ITOP_URL`/`ITOP_USER`/`ITOP_PASS`/`ITOP_ORG_ID` (real REST ticket creation —
-see [integrations.md](integrations.md#itop-itsm--cmdb) for the one-time setup
-wizard + `REST Services User` profile grant it requires)
+`CENTREON_API_URL` + `CENTREON_USER`/`CENTREON_PASSWORD` or `CENTREON_API_KEY`
 
 **Bundled supervision servers**
 `ZABBIX_DB_USER`/`ZABBIX_DB_PASSWORD`/`ZABBIX_DB_NAME` (the `zabbix-db`
@@ -237,8 +234,8 @@ docker compose logs -f etl-worker etl-beat   # ETL pipeline only
 
 `LOG_LEVEL` (default `INFO`) controls both Celery services' verbosity, and
 also the backend's root logger (`logging.basicConfig` in `app/main.py`) — app
-loggers like `notification_service`/`push_service`/`itop_service` only emit at
-or above this level.
+loggers like `notification_service`/`push_service` only emit at or above this
+level.
 
 ## Production hardening checklist
 
@@ -248,10 +245,6 @@ Before pointing this at real traffic / real supervision tools:
 - [ ] Replace the self-signed TLS cert with a CA-issued one (see above).
 - [ ] Set real `ZABBIX_*` / `CENTREON_*` / `NAGIOS_*` credentials so the
       collectors poll the real supervision APIs.
-- [ ] Set real `ITOP_*` credentials and complete the setup wizard + grant the
-      `REST Services User` profile to the API account (ticket creation fails
-      silently — logged, not surfaced — without it; see
-      [integrations.md](integrations.md#itop-itsm--cmdb)).
 - [ ] Generate a **fresh** `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY` pair for Web
       Push — do not reuse the demo keypair shipped in this repo's `.env` (see
       [integrations.md](integrations.md#web-push-browserpwa)).

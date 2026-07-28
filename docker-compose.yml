@@ -17,10 +17,6 @@ services:
       - SECRET_KEY=${SECRET_KEY}
       - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES}
       - NOC_API_KEY=${NOC_API_KEY}
-      - ITOP_URL=${ITOP_URL}
-      - ITOP_USER=${ITOP_USER}
-      - ITOP_PASS=${ITOP_PASS}
-      - ITOP_ORG_ID=${ITOP_ORG_ID:-1}
       - VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
       - VAPID_PRIVATE_KEY=${VAPID_PRIVATE_KEY:-}
       - VAPID_CLAIMS_EMAIL=${VAPID_CLAIMS_EMAIL:-noc@anptic.bf}
@@ -270,11 +266,10 @@ services:
       timeout: 10s
       retries: 5
 
-  # iTop (ITSM / CMDB) — all-in-one image with an embedded MariaDB.
-  # UI http://localhost:8082. First start: run the setup wizard with DB server
-  # "localhost", login "admin", password $ITOP_DB_PASSWORD — then set
-  # ITOP_USER/ITOP_PASS in .env to the iTop admin account you create.
-  # The backend calls http://itop/webservices/rest.php once the wizard is done.
+  # iTop (ITSM / CMDB) — all-in-one image with an embedded MariaDB, provided as a
+  # standalone tool in the stack. UI http://localhost:8082. First start: run the
+  # setup wizard with DB server "localhost", login "admin", password
+  # $ITOP_DB_PASSWORD. The backend does not integrate with it.
   itop:
     image: vbkunin/itop:3.2.2
     environment:
