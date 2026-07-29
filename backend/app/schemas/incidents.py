@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 class IncidentIngestPayload(BaseModel):
     external_id: str
-    source_tool: str = Field(pattern="^(zabbix|nagios|netxms|centreon)$")
+    source_tool: str = Field(pattern="^(zabbix|nagios|netxms|centreon|itop)$")
     node_code: str
     severity: str = Field(default="medium", pattern="^(critical|high|medium|low)$")
     status: str = Field(default="open", pattern="^(open|acknowledged|resolved|closed)$")
@@ -14,6 +14,7 @@ class IncidentIngestPayload(BaseModel):
     description: Optional[str] = None
     cause_category: Optional[str] = None
     cause_label: Optional[str] = None
+    itop_ticket_id: Optional[str] = None
 
 
 class IncidentIngestResponse(BaseModel):

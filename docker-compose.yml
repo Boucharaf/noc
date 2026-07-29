@@ -82,6 +82,9 @@ services:
       - CENTREON_USER=${CENTREON_USER:-}
       - CENTREON_PASSWORD=${CENTREON_PASSWORD:-}
       - CENTREON_API_KEY=${CENTREON_API_KEY:-}
+      - ITOP_API_URL=${ITOP_API_URL:-}
+      - ITOP_USER=${ITOP_USER:-}
+      - ITOP_PASSWORD=${ITOP_PASSWORD:-}
     volumes:
       - reports:/reports
     depends_on:

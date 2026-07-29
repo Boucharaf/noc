@@ -7,7 +7,7 @@ collector is enabled iff its endpoint env var is configured — see
 """
 
 import config
-from extract import centreon, nagios, netxms, zabbix
+from extract import centreon, itop, nagios, netxms, zabbix
 
 
 def enabled_collectors() -> dict:
@@ -21,4 +21,6 @@ def enabled_collectors() -> dict:
         collectors["netxms"] = netxms.fetch_events
     if config.CENTREON_API_URL:
         collectors["centreon"] = centreon.fetch_events
+    if config.ITOP_API_URL:
+        collectors["itop"] = itop.fetch_events
     return collectors

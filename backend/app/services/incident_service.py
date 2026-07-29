@@ -96,6 +96,7 @@ def ingest_incident(db: Session, payload: IncidentIngestPayload) -> tuple[Incide
         status=payload.status,
         detected_at=_to_naive_utc(payload.detected_at),
         description=payload.description,
+        itop_ticket_id=payload.itop_ticket_id,
     )
     db.add(incident)
     db.commit()

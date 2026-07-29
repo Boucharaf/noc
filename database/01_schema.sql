@@ -27,7 +27,7 @@ CREATE TABLE dim_node (
   node_type    VARCHAR(50)  NOT NULL,
   ip_address   INET,
   source_tool  VARCHAR(20)  NOT NULL
-                 CHECK (source_tool IN ('zabbix','nagios','netxms','centreon')),
+                 CHECK (source_tool IN ('zabbix','nagios','netxms','centreon','itop')),
   itop_ci_id   VARCHAR(50),
   is_active    BOOLEAN DEFAULT TRUE,
   created_at   TIMESTAMP DEFAULT NOW()

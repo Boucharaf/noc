@@ -67,3 +67,9 @@ CENTREON_PASSWORD = os.getenv("CENTREON_PASSWORD", "")
 CENTREON_API_KEY = os.getenv(
     "CENTREON_API_KEY", ""
 )  # static X-AUTH-TOKEN, alternative to user/password login
+
+ITOP_API_URL = os.getenv(
+    "ITOP_API_URL", ""
+).strip()  # e.g. https://itop.anptic.bf/webservices/rest.php?version=1.0
+ITOP_USER = os.getenv("ITOP_USER", "")
+ITOP_PASSWORD = os.getenv("ITOP_PASSWORD", "")

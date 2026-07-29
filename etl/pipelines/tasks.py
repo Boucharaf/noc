@@ -74,7 +74,12 @@ def collect_supervision(self):
     all_nodes = load_active_nodes(build_dsn())
     stats = {}
     for tool, fetch_events in collectors.items():
-        nodes = [n for n in all_nodes if n["source_tool"] == tool]
+        # iTop tickets reference CIs across every monitored node, not one
+        # source_tool's subset — unlike the monitoring-tool collectors it
+        # needs the full active-node list to match on.
+        nodes = all_nodes if tool == "itop" else [
+            n for n in all_nodes if n["source_tool"] == tool
+        ]
         started_at = datetime.now(timezone.utc)
         try:
             events = fetch_events(nodes, since=_last_poll(tool))
