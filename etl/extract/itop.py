@@ -124,7 +124,9 @@ def fetch_events(nodes: list[dict], since: datetime) -> list[dict]:
                 "source_tool": "itop",
                 "external_id": f"itop-incident-{obj.get('key')}",
                 "itop_ticket_id": fields.get("ref"),
-                "severity": PRIORITY_SEVERITY.get(str(fields.get("priority")), "medium"),
+                "severity": PRIORITY_SEVERITY.get(
+                    str(fields.get("priority")), "medium"
+                ),
                 "detected_at": detected.isoformat(),
                 "description": fields.get("title") or "Ticket iTop",
                 "cause_category": None,
