@@ -21,7 +21,7 @@ JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 30))
 
 # Static bearer key used by supervision tools (Centreon/Zabbix webhooks) to call /api/incidents/ingest
-NOC_API_KEY = os.getenv("NOC_API_KEY", "dev-noc-api-key")
+NOC_API_KEY = os.getenv("NOC_API_KEY")
 
 # CORS
 CORS_ORIGINS = [
@@ -32,7 +32,7 @@ CORS_ORIGINS = [
     if origin.strip()
 ]
 
-# Notifications (spec §7 step 6 — SMS + email on critical incidents)
+# Notifications (MS + email on critical incidents)
 NOTIFICATIONS_ENABLED = os.getenv("NOTIFICATIONS_ENABLED", "false").lower() == "true"
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
@@ -55,12 +55,12 @@ VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "")
 VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "")
 VAPID_CLAIMS_EMAIL = os.getenv("VAPID_CLAIMS_EMAIL", "noc@anptic.bf")
 
-# Rate limiting (spec §10.1 — per-IP, per-minute)
+# Rate limiting (per-IP, per-minute)
 RATE_LIMIT_READ_PER_MIN = int(os.getenv("RATE_LIMIT_READ_PER_MIN", 100))
 RATE_LIMIT_INGEST_PER_MIN = int(os.getenv("RATE_LIMIT_INGEST_PER_MIN", 10))
 RATE_LIMIT_ENABLED = os.getenv("RATE_LIMIT_ENABLED", "true").lower() == "true"
 
-# Materialized view refresh: the spec (§2.2/§10.2) refreshes nightly at 02:00 via
+# Materialized view refresh, refreshes nightly at 02:00 via
 # the ETL beat task; the synchronous refresh-on-write below keeps small demo
 # datasets interactive. Disable in production.
 SYNC_MV_REFRESH = os.getenv("SYNC_MV_REFRESH", "true").lower() == "true"

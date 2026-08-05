@@ -8,21 +8,29 @@ tool. To integrate a tool, set its URL + credentials in `.env` and restart
 `etl-worker`.
 
 **Local server instances** — `docker-compose.yml` now ships Zabbix 7.0 LTS
-(server + web + agent + its own PostgreSQL), Nagios Core and iTop (embedded
-MariaDB) alongside the dashboard, pre-wired to the collectors via `.env`:
+(server + web + agent + its own PostgreSQL), Nagios Core, NetXMS (server +
+Web API + its own PostgreSQL) and iTop (embedded MariaDB) alongside the
+dashboard, pre-wired to the collectors via `.env`:
 
 | Tool | UI (host) | In-network endpoint the ETL/backend uses | Default login |
 |---|---|---|---|
 | Zabbix | http://localhost:8081 | `http://zabbix-web:8080/api_jsonrpc.php` | `Admin` / `zabbix` |
 | Nagios | http://localhost:8083 | `http://nagios/cgi-bin/statusjson.cgi` | `$NAGIOS_USER` / `$NAGIOS_PASSWORD` |
+| NetXMS | http://localhost:8086 (nxmc web console) | `http://netxms:8000` (REST v1) | `admin` / `$NETXMS_PASSWORD` |
 | iTop | http://localhost:8082 | — (standalone ITSM/CMDB tool, no backend integration) | created in setup wizard |
 
 iTop requires a **one-time setup wizard** on first start (DB server
 `localhost`, login `admin`, password `$ITOP_DB_PASSWORD`); it ships purely as
-a standalone tool in the stack. Centreon and NetXMS have no vendor-supported
-Docker images — their collectors stay disabled until you point their
-`*_API_URL` at an external server (Centreon can also push webhooks, see
-below).
+a standalone tool in the stack. NetXMS publishes no official Docker image, so
+its image is built from `backend/docker-images/netxms` (see the README there);
+`$NETXMS_PASSWORD` is applied to the built-in `admin` account the first time
+the schema is created, and the Web API is also exposed on
+http://localhost:8085. Its console is a separate component, built from
+`backend/docker-images/netxms-webui` (Tomcat + `nxmc.war`) and served on
+http://localhost:8086 — it reaches the server over NXCP on port 4701, which is
+a binary protocol, not HTTP. Centreon has no vendor-supported Docker image — its
+collector stays disabled until you point `CENTREON_API_URL` at an external
+server (Centreon can also push webhooks, see below).
 
 For incidents to flow from Zabbix/Nagios into the dashboard, the hosts you
 create in those tools must match a `dim_node` (see
@@ -94,8 +102,9 @@ Because status (not an event log) is polled, a host that stays down is
 re-reported each pass with the stable id `nagios-{host}-down` — deduplicated
 by the backend.
 
-**NetXMS** — set `NETXMS_API_URL` to the REST API v1 base
-(e.g. `http://netxms.anptic.bf:8000`, no trailing `/v1`). Auth is token-based,
+**NetXMS** — set `NETXMS_API_URL` to the REST API v1 base (`http://netxms:8000`
+for the container in this stack, or e.g. `http://netxms.anptic.bf:8000` for an
+external server; no trailing `/v1`). Auth is token-based,
 not Basic: the collector `POST`s `{"username": NETXMS_USER, "password":
 NETXMS_PASSWORD}` to `/v1/login`, gets back a bearer token (short-lived, so it
 logs in on every poll — same approach as Zabbix/Centreon), then calls
@@ -103,9 +112,10 @@ logs in on every poll — same approach as Zabbix/Centreon), then calls
 lastChangeTime}`) and `/v1/objects` with `Authorization: Bearer <token>`.
 `/v1/objects` is used, best-effort, to resolve an alarm's numeric `source` id
 to an object name for node matching — it may not enumerate every Node
-depending on the server's object tree, in which case that alarm's host falls
-back to the raw numeric id (normally unmatched, logged, and skipped like any
-other unprovisioned host). Alarm `state` 2 (terminated/resolved) is dropped;
+depending on the server's object tree (NetXMS 6.2 returns only the root
+objects there; nodes live under `/v1/objects/2/children`), in which case that
+alarm's host falls back to the raw numeric id (normally unmatched, logged, and
+skipped like any other unprovisioned host). Alarm `state` 2 (terminated/resolved) is dropped;
 severity 0–4 (NORMAL…CRITICAL) maps to `low, medium, medium, high, critical`,
 with NORMAL alarms also ignored. Alarm ids are stable → deduplicated while
 active.

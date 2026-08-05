@@ -58,7 +58,7 @@ const ScrollZoomGate = ({ onFocus }) => {
 // Scales with the viewport instead of a fixed px box, so the map actually
 // uses the extra room on a tall monitor instead of leaving dead space below
 // it — clamped so it never collapses (short viewports) or runs away (ultrawide).
-const DEFAULT_HEIGHT = 'clamp(320px, calc(100vh - 460px), 640px)';
+const DEFAULT_HEIGHT = "clamp(320px, calc(100vh - 460px), 640px)";
 
 const BurkinaFasoMap = ({
   localities = [],

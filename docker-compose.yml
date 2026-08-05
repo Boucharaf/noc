@@ -140,7 +140,7 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=${POSTGRES_DB}
     ports:
-      - "5432"
+      - "5436:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./database:/docker-entrypoint-initdb.d
@@ -185,9 +185,9 @@ services:
   zabbix-db:
     image: postgres:15-alpine
     environment:
-      - POSTGRES_USER=${ZABBIX_DB_USER:-zabbix}
-      - POSTGRES_PASSWORD=${ZABBIX_DB_PASSWORD:-zabbix_db_pass}
-      - POSTGRES_DB=${ZABBIX_DB_NAME:-zabbix}
+      - POSTGRES_USER=${ZABBIX_DB_USER}
+      - POSTGRES_PASSWORD=${ZABBIX_DB_PASSWORD}
+      - POSTGRES_DB=${ZABBIX_DB_NAME}
     volumes:
       - zbx_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -220,9 +220,9 @@ services:
     environment:
       - ZBX_SERVER_HOST=zabbix-server
       - DB_SERVER_HOST=zabbix-db
-      - POSTGRES_USER=${ZABBIX_DB_USER:-zabbix}
-      - POSTGRES_PASSWORD=${ZABBIX_DB_PASSWORD:-zabbix_db_pass}
-      - POSTGRES_DB=${ZABBIX_DB_NAME:-zabbix}
+      - POSTGRES_USER=${ZABBIX_DB_USER}
+      - POSTGRES_PASSWORD=${ZABBIX_DB_PASSWORD}
+      - POSTGRES_DB=${ZABBIX_DB_NAME}
       - PHP_TZ=${TZ:-Africa/Ouagadougou}
     ports:
       - "8081:8080"
@@ -269,6 +269,65 @@ services:
       timeout: 10s
       retries: 5
 
+  # NetXMS — dedicated PostgreSQL.
+  netxms-db:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=${NETXMS_DB_USER}
+      - POSTGRES_PASSWORD=${NETXMS_DB_PASSWORD}
+      - POSTGRES_DB=${NETXMS_DB_NAME}
+    volumes:
+      - netxms_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${NETXMS_DB_USER:-netxms} -d ${NETXMS_DB_NAME:-netxms}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # NetXMS server + its built-in Web API (REST v1) — built from
+  # backend/docker-images/netxms, because NetXMS publishes no official image.
+  # Web API http://localhost:8085, console (nxmc) on 4701. The ETL polls
+  # http://netxms:8000 on the compose network. NETXMS_PASSWORD is the password
+  # set for the built-in "admin" account when the schema is first created, so
+  # NETXMS_USER must be "admin" for the local instance.
+  netxms:
+    build: ./backend/docker-images/netxms
+    hostname: netxms # names the server's own management node
+    environment:
+      - NETXMS_DB_HOST=netxms-db
+      - NETXMS_DB_NAME=${NETXMS_DB_NAME}
+      - NETXMS_DB_LOGIN=${NETXMS_DB_USER}
+      - NETXMS_DB_PASSWORD=${NETXMS_DB_PASSWORD}
+      - NETXMS_ADMIN_PASSWORD=${NETXMS_PASSWORD}
+    ports:
+      - "8085:8000" # Web API (REST v1)
+      - "4701:4701" # NetXMS console / nxmc
+    volumes:
+      - netxms_data:/var/lib/netxms # compiled MIBs, agent packages
+    depends_on:
+      netxms-db:
+        condition: service_healthy
+    # Healthcheck ships with the image: it performs the collector's own
+    # POST /v1/login and requires a token back.
+
+  # NetXMS web console (nxmc) — http://localhost:8086, login admin /
+  # $NETXMS_PASSWORD. NetXMS ships the console separately from the server, as a
+  # WAR for a servlet container; the image drops it into Tomcat and connects to
+  # netxmsd over NXCP (4701), not over the REST API.
+  netxms-webui:
+    build: ./backend/docker-images/netxms-webui
+    environment:
+      - NETXMS_SERVER=netxms
+    ports:
+      - "8086:8080"
+    depends_on:
+      netxms:
+        condition: service_healthy
+
   # iTop (ITSM / CMDB) — all-in-one image with an embedded MariaDB, provided as a
   # standalone tool in the stack. UI http://localhost:8082. First start: run the
   # setup wizard with DB server "localhost", login "admin", password
@@ -292,6 +351,8 @@ volumes:
   pgdata:
   reports:
   zbx_pgdata:
+  netxms_pgdata:
+  netxms_data:
   nagios_etc:
   itop_mysql:
   itop_html:
