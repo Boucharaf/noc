@@ -34,9 +34,18 @@ CORS_ORIGINS = [
 
 # Notifications (MS + email on critical incidents)
 NOTIFICATIONS_ENABLED = os.getenv("NOTIFICATIONS_ENABLED", "false").lower() == "true"
+# Twilio auth comes in two shapes. Either the account's own SID + auth token,
+# or an API key (SK…) + secret — but even then the account SID (AC…) is still
+# required, because it is what goes in the request URL.
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
+TWILIO_API_KEY_SID = os.getenv("TWILIO_API_KEY_SID", "")
+TWILIO_API_KEY_SECRET = os.getenv("TWILIO_API_KEY_SECRET", "")
 TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER", "")
+# Content template (HX…) used to send SMS. A trial account rejects every
+# free-form body with 400/572006 and can only send predefined templates, so one
+# is required until the account is upgraded — see notification_service.send_sms.
+TWILIO_CONTENT_SID = os.getenv("TWILIO_CONTENT_SID", "")
 NOC_SMS_RECIPIENTS = [
     n.strip() for n in os.getenv("NOC_SMS_RECIPIENTS", "").split(",") if n.strip()
 ]
@@ -49,6 +58,9 @@ SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
 NOC_EMAIL_RECIPIENTS = [
     e.strip() for e in os.getenv("NOC_EMAIL_RECIPIENTS", "").split(",") if e.strip()
 ]
+# Public URL of the dashboard, used for the "open the incident" button in alert
+# emails. Left empty, the button is simply not rendered.
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", "").rstrip("/")
 
 # Web Push (browser/PWA push notifications on critical incidents)
 VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "")
