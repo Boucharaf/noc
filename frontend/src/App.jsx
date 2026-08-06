@@ -14,9 +14,11 @@ import InteropView from "./pages/InteropView";
 import DataModelView from "./pages/DataModelView";
 import Login from "./pages/Login";
 import { useAuthStore } from "./store/auth";
+import { usePeriodAutoSync } from "./hooks/usePeriodAutoSync";
 
 const DashboardShell = () => {
   const token = useAuthStore((s) => s.token);
+  usePeriodAutoSync();
 
   if (!token) return <Navigate to="/login" replace />;
 
