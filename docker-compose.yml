@@ -328,6 +328,58 @@ services:
       netxms:
         condition: service_healthy
 
+  # Centreon — dedicated MariaDB. The two settings below are prerequisites the
+  # Centreon installer checks before it will create its schemas.
+  centreon-db:
+    image: mariadb:10.11
+    command:
+      - --innodb-file-per-table=1
+      - --open-files-limit=32000
+    environment:
+      - MARIADB_ROOT_PASSWORD=${CENTREON_DB_ROOT_PASSWORD}
+    ulimits:
+      nofile:
+        soft: 40000
+        hard: 40000
+    volumes:
+      - centreon_dbdata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Centreon central (web UI + REST API v2 + engine + broker + gorgone) — built
+  # from backend/docker-images/centreon, because Centreon publishes no supported
+  # Docker image. UI http://localhost:8084/centreon, login admin /
+  # $CENTREON_PASSWORD; the ETL polls http://centreon/centreon/api/latest on the
+  # compose network. The install runs by itself on first start and takes a few
+  # minutes — the container only reports healthy once the API answers a login.
+  centreon:
+    build: ./backend/docker-images/centreon
+    hostname: centreon # names the host the central creates for itself
+    environment:
+      - CENTREON_DB_HOST=centreon-db
+      - CENTREON_DB_ROOT_PASSWORD=${CENTREON_DB_ROOT_PASSWORD}
+      - CENTREON_DB_USER=${CENTREON_DB_USER}
+      - CENTREON_DB_PASSWORD=${CENTREON_DB_PASSWORD}
+      - CENTREON_ADMIN_PASSWORD=${CENTREON_PASSWORD}
+      - TZ=${TZ:-Africa/Ouagadougou}
+    ports:
+      - "8084:80"
+    volumes:
+      # Everything the install writes outside the database, so a recreated
+      # container skips the wizard instead of failing on a populated schema.
+      - centreon_etc:/etc/centreon
+      - centreon_gorgone_etc:/etc/centreon-gorgone
+      - centreon_engine_etc:/etc/centreon-engine
+      - centreon_broker_etc:/etc/centreon-broker
+      - centreon_varlib:/var/lib/centreon
+      - centreon_broker_varlib:/var/lib/centreon-broker
+    depends_on:
+      centreon-db:
+        condition: service_healthy
+
   # iTop (ITSM / CMDB) — all-in-one image with an embedded MariaDB, provided as a
   # standalone tool in the stack. UI http://localhost:8082. First start: run the
   # setup wizard with DB server "localhost", login "admin", password
@@ -354,5 +406,12 @@ volumes:
   netxms_pgdata:
   netxms_data:
   nagios_etc:
+  centreon_dbdata:
+  centreon_etc:
+  centreon_gorgone_etc:
+  centreon_engine_etc:
+  centreon_broker_etc:
+  centreon_varlib:
+  centreon_broker_varlib:
   itop_mysql:
   itop_html:

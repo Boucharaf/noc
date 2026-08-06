@@ -276,9 +276,12 @@ NAGIOS_API_URL=http://nagios
 NAGIOS_USER=nagiosadmin                  # Also the Nagios container's web login
 NAGIOS_PASSWORD=your_nagios_password
 
-# Centreon has no supported Docker image — leave empty (collector disabled)
-# until an external server exists, or use its webhook push instead.
-CENTREON_API_URL=
+# Local Centreon central (UI http://localhost:8084/centreon). CENTREON_PASSWORD
+# is applied to its "admin" account on first start and must satisfy Centreon's
+# password policy (12+ chars, lower/upper/digit and one of @$!%*?&).
+CENTREON_API_URL=http://centreon/centreon/api/latest
+CENTREON_USER=admin
+CENTREON_PASSWORD=your_centreon_password
 CENTREON_API_KEY=
 
 # ── Webhook auth ─────────────────────────────────────────

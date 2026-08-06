@@ -9,14 +9,16 @@ tool. To integrate a tool, set its URL + credentials in `.env` and restart
 
 **Local server instances** — `docker-compose.yml` now ships Zabbix 7.0 LTS
 (server + web + agent + its own PostgreSQL), Nagios Core, NetXMS (server +
-Web API + its own PostgreSQL) and iTop (embedded MariaDB) alongside the
-dashboard, pre-wired to the collectors via `.env`:
+Web API + its own PostgreSQL), Centreon 24.10 (central + its own MariaDB) and
+iTop (embedded MariaDB) alongside the dashboard, pre-wired to the collectors
+via `.env`:
 
 | Tool | UI (host) | In-network endpoint the ETL/backend uses | Default login |
 |---|---|---|---|
 | Zabbix | http://localhost:8081 | `http://zabbix-web:8080/api_jsonrpc.php` | `Admin` / `zabbix` |
 | Nagios | http://localhost:8083 | `http://nagios/cgi-bin/statusjson.cgi` | `$NAGIOS_USER` / `$NAGIOS_PASSWORD` |
 | NetXMS | http://localhost:8086 (nxmc web console) | `http://netxms:8000` (REST v1) | `admin` / `$NETXMS_PASSWORD` |
+| Centreon | http://localhost:8084/centreon | `http://centreon/centreon/api/latest` (REST v2) | `admin` / `$CENTREON_PASSWORD` |
 | iTop | http://localhost:8082 | — (standalone ITSM/CMDB tool, no backend integration) | created in setup wizard |
 
 iTop requires a **one-time setup wizard** on first start (DB server
@@ -28,9 +30,15 @@ the schema is created, and the Web API is also exposed on
 http://localhost:8085. Its console is a separate component, built from
 `backend/docker-images/netxms-webui` (Tomcat + `nxmc.war`) and served on
 http://localhost:8086 — it reaches the server over NXCP on port 4701, which is
-a binary protocol, not HTTP. Centreon has no vendor-supported Docker image — its
-collector stays disabled until you point `CENTREON_API_URL` at an external
-server (Centreon can also push webhooks, see below).
+a binary protocol, not HTTP. Centreon has no vendor-supported Docker image
+either, so its image is built from `backend/docker-images/centreon`: the
+container installs a full central (web + REST API v2 + engine + broker +
+gorgone) against the `centreon-db` MariaDB and runs Centreon's install wizard
+**unattended** on first start, which takes a few minutes — it only reports
+healthy once the API answers a login. `$CENTREON_PASSWORD` becomes the `admin`
+password and must satisfy Centreon's policy (12+ characters, a lower case, an
+upper case, a digit and one of `@$!%*?&`, nothing else). Centreon can also push
+webhooks instead of, or alongside, being polled (see below).
 
 For incidents to flow from Zabbix/Nagios into the dashboard, the hosts you
 create in those tools must match a `dim_node` (see
@@ -121,11 +129,20 @@ with NORMAL alarms also ignored. Alarm ids are stable → deduplicated while
 active.
 
 **Centreon** — set `CENTREON_API_URL` to the v2 API base
-(e.g. `https://centreon.anptic.bf/centreon/api/latest`). Auth: static
-`CENTREON_API_KEY` (sent as `X-AUTH-TOKEN`) or `CENTREON_USER`/`CENTREON_PASSWORD`
-(a `/login` call per poll). Fetches unhandled `CRITICAL`/`UNKNOWN`/`DOWN`
-resources (§6.3's `status IN (2,3)` filter). For service resources the
-**parent host** name is used for node matching.
+(`http://centreon/centreon/api/latest` for the container in this stack, or
+e.g. `https://centreon.anptic.bf/centreon/api/latest` for an external server).
+Auth: static `CENTREON_API_KEY` (sent as `X-AUTH-TOKEN`) or
+`CENTREON_USER`/`CENTREON_PASSWORD` (a `/login` call per poll). Fetches
+unhandled `CRITICAL`/`UNKNOWN`/`DOWN` resources (§6.3's `status IN (2,3)`
+filter). For service resources the **parent host** name is used for node
+matching.
+
+The local container starts with a single host — the central monitoring itself
+by ping — because a fresh Centreon has no host templates: those come from
+plugin packs, imported from Centreon's repository under a licence. Hosts
+created by hand with an explicit check command need none of that; see the
+recipe in `backend/docker-images/centreon/README.md` for adding a host named
+after a node code and watching it go DOWN into the dashboard.
 
 ## Host → node matching
 
