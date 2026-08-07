@@ -63,7 +63,7 @@ accordingly.
 
 | System | Protocol | Status | Config vars |
 |---|---|---|---|
-| **Zabbix** | JSON-RPC `event.get` (§6.1) | **Implemented** (`etl/extract/zabbix.py`) | `ZABBIX_API_URL`, `ZABBIX_USER`/`ZABBIX_PASSWORD` or `ZABBIX_API_TOKEN` |
+| **Zabbix** | JSON-RPC `problem.get` (§6.1) | **Implemented** (`etl/extract/zabbix.py`) | `ZABBIX_API_URL`, `ZABBIX_USER`/`ZABBIX_PASSWORD` or `ZABBIX_API_TOKEN` |
 | **Nagios** | `statusjson.cgi?query=hostlist` (§6.2) | **Implemented** (`etl/extract/nagios.py`) | `NAGIOS_API_URL`, `NAGIOS_USER`/`NAGIOS_PASSWORD` and/or `NAGIOS_API_KEY` |
 | **NetXMS** | REST API v1: `POST /v1/login` → bearer token, then `/v1/alarms` + `/v1/objects` | **Implemented** (`etl/extract/netxms.py`) | `NETXMS_API_URL`, `NETXMS_USER`, `NETXMS_PASSWORD` |
 | **Centreon** | REST v2 `/monitoring/resources` (§6.3) + inbound webhook | **Implemented** (`etl/extract/centreon.py`) | `CENTREON_API_URL`, `CENTREON_USER`/`CENTREON_PASSWORD` or `CENTREON_API_KEY` |
@@ -97,9 +97,16 @@ webhook.
 (e.g. `https://zabbix.anptic.bf/api_jsonrpc.php`). Auth: either
 `ZABBIX_API_TOKEN` (Zabbix ≥ 5.4, preferred) or `ZABBIX_USER`/`ZABBIX_PASSWORD`
 (`user.login` is called on every poll — its token is only valid ~30 min, so it
-is not cached). Fetches trigger PROBLEM events (`event.get`, `value=1`) since
-the last poll, with `selectHosts` for node matching. Severity map: Zabbix 0–5 →
-`low, low, medium, medium, high, critical`.
+is not cached). Polls the **currently unresolved** trigger problems
+(`problem.get`), not the event stream since the last poll: §6.1 names
+`event.get`, but that offered each event in exactly one poll window, so a
+problem raised before the collector first ran — or during any gap longer than
+the look-back — could never reach the dashboard. Problems that stay open are
+re-reported each pass under their stable event id and deduplicated by the
+backend, as with the other current-state collectors. `problem.get` rejects
+`selectHosts`, so the hosts come from a follow-up `trigger.get` on the
+problem's `objectid`; problems `suppressed` by a maintenance window are
+dropped. Severity map: Zabbix 0–5 → `low, low, medium, medium, high, critical`.
 
 **Nagios** — set `NAGIOS_API_URL` to the base URL that fronts the CGIs
 (e.g. `https://nagios.anptic.bf/nagios`; the collector appends

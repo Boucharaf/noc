@@ -89,12 +89,29 @@ def collect_supervision(self):
             continue
 
         ingested = 0
+        failed = 0
         for event in events:
             result = api_client.ingest_incident(to_ingest_payload(event))
             if result is not None:
                 ingested += 1
-        _set_last_poll(tool, started_at)
-        stats[tool] = {"fetched": len(events), "ingested": ingested}
+            else:
+                failed += 1
+
+        # Advance the cursor only once everything has landed. A collector that
+        # filters on `since` is offered each event in exactly one window, so
+        # moving the cursor past a failed ingest drops that incident for good;
+        # holding it back lets the next poll cover the same ground again. The
+        # current-state collectors ignore `since` and re-report regardless.
+        if not failed:
+            _set_last_poll(tool, started_at)
+        else:
+            logger.warning(
+                "[%s] %d of %d incident(s) failed to ingest — poll cursor held back",
+                tool,
+                failed,
+                len(events),
+            )
+        stats[tool] = {"fetched": len(events), "ingested": ingested, "failed": failed}
         logger.info("[%s] fetched=%d ingested=%d", tool, len(events), ingested)
 
     return stats

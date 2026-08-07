@@ -1,9 +1,23 @@
 """
-Zabbix collector — JSON-RPC `event.get` (cahier des charges §6.1).
+Zabbix collector — JSON-RPC `problem.get` (cahier des charges §6.1 names
+`event.get`; the deviation is deliberate, see below).
 
 Auth: either a static API token (ZABBIX_API_TOKEN, Zabbix ≥ 5.4) or
 `user.login` with ZABBIX_USER/ZABBIX_PASSWORD (token valid ~30 min, so we
 log in on every poll rather than caching it).
+
+Polls the problems that are *currently unresolved*, not the event stream since
+the last poll — the same "report current state, let the backend dedupe"
+approach as the nagios/netxms/centreon/itop collectors. `event.get` with
+`time_from` offered each event in exactly one poll window, which meant a
+problem raised before the collector first ran, or during any gap longer than
+the look-back, could never reach the dashboard at all, and an ingest that
+failed dropped the incident for good. A problem that stays open now re-reports
+every pass under its (stable) event id and is deduplicated by the backend on
+(source_tool, external_id).
+
+`problem.get` returns the trigger in `objectid` and rejects `selectHosts`, so
+the hosts behind the problems are resolved with one follow-up `trigger.get`.
 """
 
 import logging
@@ -42,40 +56,65 @@ def _login() -> str:
     )
 
 
+def _hosts_by_trigger(problems: list[dict], token: str) -> dict[str, dict]:
+    """{triggerid: first host} for the triggers behind `problems`."""
+    trigger_ids = sorted({p["objectid"] for p in problems if p.get("objectid")})
+    if not trigger_ids:
+        return {}
+    triggers = _rpc(
+        "trigger.get",
+        {
+            "triggerids": trigger_ids,
+            "output": ["triggerid"],
+            "selectHosts": ["host", "name"],
+        },
+        auth=token,
+    )
+    return {t["triggerid"]: (t.get("hosts") or [{}])[0] for t in triggers}
+
+
 def fetch_events(nodes: list[dict], since: datetime) -> list[dict]:
-    """New problem events since `since`, mapped onto dim_node codes."""
+    """Unresolved trigger problems, mapped onto dim_node codes.
+
+    `since` is unused: the current problem list is reported in full on every
+    poll, as it is for the other current-state collectors.
+    """
     token = _login()
-    events = _rpc(
-        "event.get",
+    problems = _rpc(
+        "problem.get",
         {
             "output": "extend",
-            "time_from": int(since.timestamp()),
-            "source": 0,  # trigger events
-            "value": 1,  # PROBLEM (not recovery)
-            "selectHosts": ["host", "name"],
-            "sortfield": "clock",
+            "source": 0,  # trigger problems
+            "object": 0,  # raised on a trigger
+            "sortfield": ["eventid"],
             "sortorder": "ASC",
         },
         auth=token,
     )
 
+    hosts = _hosts_by_trigger(problems, token)
+
     results = []
-    for ev in events:
-        hosts = ev.get("hosts") or [{}]
-        host = hosts[0].get("host", "")
-        node_code = match_node(nodes, host, hosts[0].get("name", ""))
+    for problem in problems:
+        # Suppressed = the host is in a maintenance window, so the problem is
+        # silenced on purpose and is not an incident for the dashboard.
+        if int(problem.get("suppressed", 0)):
+            continue
+        host_entry = hosts.get(problem.get("objectid")) or {}
+        host = host_entry.get("host", "")
+        node_code = match_node(nodes, host, host_entry.get("name", ""))
         if node_code is None:
             skip_unmatched("zabbix", host)
             continue
-        detected = datetime.fromtimestamp(int(ev["clock"]), tz=timezone.utc)
+        detected = datetime.fromtimestamp(int(problem["clock"]), tz=timezone.utc)
         results.append(
             {
                 "node_code": node_code,
                 "source_tool": "zabbix",
-                "external_id": f"zabbix-event-{ev['eventid']}",
-                "severity": SEVERITY_MAP.get(int(ev.get("severity", 0)), "medium"),
+                "external_id": f"zabbix-event-{problem['eventid']}",
+                "severity": SEVERITY_MAP.get(int(problem.get("severity", 0)), "medium"),
                 "detected_at": detected.isoformat(),
-                "description": ev.get("name") or "Alerte Zabbix",
+                "description": problem.get("name") or "Alerte Zabbix",
                 "cause_category": None,
                 "cause_label": None,
             }
