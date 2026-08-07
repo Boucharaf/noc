@@ -163,14 +163,25 @@ Their stdout goes to `/var/log/centreon-docker/*.out`, tailed into
 - To see an incident flow end to end, add a host pointing at an unreachable
   address and let it go DOWN:
 
+  Pick a code that is **active** in the CMDB — `collect_supervision` loads only
+  `dim_node WHERE is_active`, so a host named after a deactivated node goes
+  DOWN and is skipped, which looks exactly like a broken collector:
+
+  ```sql
+  SELECT code, name FROM dim_node WHERE source_tool = 'centreon' AND is_active;
+  ```
+
   ```bash
   docker compose exec centreon bash -c '
     C="/usr/share/centreon/bin/centreon -u admin -p $CENTREON_ADMIN_PASSWORD"
-    $C -o HOST -a add -v "DED-001;Demo;192.0.2.1;;Central;"
+    $C -o HOST -a add -v "BAN-004;Demo;192.0.2.1;;Central;"
     for p in check_command\;check_local_ping max_check_attempts\;1 \
              check_interval\;1 retry_check_interval\;1 check_period\;24x7 \
              active_checks_enabled\;1 notifications_enabled\;0; do
-      $C -o HOST -a setparam -v "DED-001;$p"
+      $C -o HOST -a setparam -v "BAN-004;$p"
     done
     $C -a POLLERGENERATE -v 1 && $C -a CFGMOVE -v 1 && systemctl restart centengine'
   ```
+
+  The second field is the alias and plays no part in matching — the host name
+  is what has to be the node code.

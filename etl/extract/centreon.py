@@ -68,12 +68,21 @@ def fetch_events(nodes: list[dict], since: datetime) -> list[dict]:
         severity = STATUS_SEVERITY.get(status_name)
         if severity is None:
             continue
-        host = (
-            (res.get("parent") or {}).get("name")  # service → its host
-            or res.get("alias")
-            or res.get("name", "")
+        # A host resource carries the configured host name in `name` — which is
+        # where the node code goes (see the image README) — and a free-text
+        # label in `alias`; either may be what the CMDB knows the node by, so
+        # both are offered rather than letting a non-empty alias hide the name.
+        # For a service the parent host is what identifies the node, so it goes
+        # first; that service's own name/alias simply won't match anything.
+        parent = (res.get("parent") or {}).get("name") or ""
+        host = parent or res.get("name") or res.get("alias") or ""
+        node_code = match_node(
+            nodes,
+            parent,
+            res.get("name", ""),
+            res.get("alias", ""),
+            res.get("fqdn", ""),
         )
-        node_code = match_node(nodes, host, res.get("fqdn", ""))
         if node_code is None:
             skip_unmatched("centreon", host)
             continue
