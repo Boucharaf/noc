@@ -1,8 +1,9 @@
 """Real supervision-tool collectors.
 
-Each module exposes `fetch_events(nodes, since) -> list[dict]` returning raw
-events in the shape `transform.normalize.to_ingest_payload` expects. A
-collector is enabled iff its endpoint env var is configured — see
+Each module exposes `fetch_events(nodes) -> list[dict]` returning raw events in
+the shape `transform.normalize.to_ingest_payload` expects — the problems its
+tool reports as open at that moment, so a pass that is missed or fails costs
+nothing. A collector is enabled iff its endpoint env var is configured — see
 `enabled_collectors()`.
 """
 

@@ -18,7 +18,7 @@ from extract.common import match_node, skip_unmatched
 
 logger = logging.getLogger(__name__)
 
-def fetch_events(nodes: list[dict], since: datetime) -> list[dict]:
+def fetch_events(nodes: list[dict]) -> list[dict]:
     url = f"{config.NAGIOS_API_URL.rstrip('/')}/cgi-bin/statusjson.cgi"
     headers = {}
     if config.NAGIOS_API_KEY:

@@ -97,13 +97,13 @@ This is the path that keeps the dashboard feeling "live":
    - Loads all `is_active = TRUE` nodes (code, name, IP, source_tool) from
      Postgres (`pipelines/collector.py`).
    - Polls every **configured** supervision tool (`extract/` — a tool is
-     enabled iff its `*_API_URL` env var is set): Zabbix JSON-RPC `event.get`,
+     enabled iff its `*_API_URL` env var is set): Zabbix JSON-RPC `problem.get`,
      Nagios `statusjson.cgi?query=hostlist`, NetXMS REST `/alarms`, Centreon
      REST v2 `/monitoring/resources`. Failures are isolated per tool.
    - Maps each alert onto a `dim_node` code (exact code → name → IP match,
      `extract/common.py`); unmatched hosts are logged and skipped.
-   - Tracks a per-tool last-poll timestamp in Redis (`etl:last_poll:{tool}`)
-     so restarts don't re-fetch history.
+   - Keeps no poll cursor: each collector reports what its tool has open right
+     now, so a missed or failed pass is made good by the next one.
    - Normalizes events into the ingest payload shape (`transform/normalize.py`)
      and POSTs to `backend:8000/api/incidents/ingest` with
      `Authorization: Bearer $NOC_API_KEY` (`load/api_client.py`).

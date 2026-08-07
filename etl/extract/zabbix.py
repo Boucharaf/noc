@@ -73,12 +73,8 @@ def _hosts_by_trigger(problems: list[dict], token: str) -> dict[str, dict]:
     return {t["triggerid"]: (t.get("hosts") or [{}])[0] for t in triggers}
 
 
-def fetch_events(nodes: list[dict], since: datetime) -> list[dict]:
-    """Unresolved trigger problems, mapped onto dim_node codes.
-
-    `since` is unused: the current problem list is reported in full on every
-    poll, as it is for the other current-state collectors.
-    """
+def fetch_events(nodes: list[dict]) -> list[dict]:
+    """Unresolved trigger problems, mapped onto dim_node codes."""
     token = _login()
     problems = _rpc(
         "problem.get",

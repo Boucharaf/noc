@@ -77,10 +77,11 @@ accordingly.
 seconds (default **300** — the spec's §2.2 five-minute batch). Each pass:
 
 1. Loads all active nodes (code, name, IP, source_tool) from Postgres.
-2. For each **configured** tool, calls its `fetch_events(nodes, since)`
-   collector. `since` is the tool's last successful poll, tracked in Redis
-   (`etl:last_poll:{tool}`) so a worker restart doesn't re-fetch history
-   (first run looks back two intervals).
+2. For each **configured** tool, calls its `fetch_events(nodes)` collector,
+   which returns the problems that tool reports as open at that moment. No
+   cursor is kept: every pass sees current state, so a missed pass, a failed
+   ingest or a worker restart costs nothing — the next pass reports the same
+   problems and the backend deduplicates them.
 3. Normalizes each event (`transform/normalize.py`) and POSTs it to
    `POST /api/incidents/ingest` with the static `NOC_API_KEY`.
 4. Failures are **isolated per tool** — an unreachable Zabbix never blocks

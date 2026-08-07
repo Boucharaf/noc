@@ -5,10 +5,10 @@ dashboard never creates/updates iTop tickets (see the removed
 itop_service.py) — it only ever displays what iTop already has.
 
 Every poll fetches every still-active Incident (operational_status not in
-resolved/closed) rather than filtering on `since`, matching the netxms
-collector's "poll current state, skip terminated" approach: a ticket that
-stays open keeps reporting with the same external_id, and the backend
-dedupes on (source_tool, external_id). Resolved/closed tickets are excluded
+resolved/closed), the same "poll current state, skip what is finished"
+approach every collector here takes: a ticket that stays open keeps reporting
+with the same external_id, and the backend dedupes on
+(source_tool, external_id). Resolved/closed tickets are excluded
 rather than "just" closed ones: normalize.to_ingest_payload always ingests
 as status="open", so a resolved-in-iTop ticket would otherwise be reported
 as a brand-new open incident on the dashboard.
@@ -96,7 +96,7 @@ def _match_node(nodes: list[dict], fields: dict) -> str | None:
     return match_node(nodes, *hints) if hints else None
 
 
-def fetch_events(nodes: list[dict], since: datetime) -> list[dict]:
+def fetch_events(nodes: list[dict]) -> list[dict]:
     data = _query(
         key="SELECT Incident WHERE operational_status NOT IN ('resolved', 'closed')",
         output_fields="ref,title,description,priority,start_date,functionalcis_list",

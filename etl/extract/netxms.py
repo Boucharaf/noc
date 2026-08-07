@@ -86,7 +86,7 @@ def _resolve_source(source_id, token: str, cache: dict) -> tuple[str, str]:
     return resolved
 
 
-def fetch_events(nodes: list[dict], since: datetime) -> list[dict]:
+def fetch_events(nodes: list[dict]) -> list[dict]:
     token = _login()
 
     objects = _as_list(_get("/v1/objects", token), "objects")

@@ -26,9 +26,6 @@ COLLECT_INTERVAL_S = int(os.getenv("ETL_COLLECT_INTERVAL_S", "300"))
 # Where the scheduled end-of-month exports are written (mounted volume).
 REPORTS_DIR = os.getenv("REPORTS_DIR", "/reports")
 
-REDIS_HOST = os.getenv("REDIS_HOST", "redis")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-
 HTTP_TIMEOUT_S = int(os.getenv("ETL_HTTP_TIMEOUT_S", "15"))
 
 # ── Supervision tool endpoints ──────────────────────────────────────────────
@@ -49,9 +46,7 @@ NAGIOS_API_URL = os.getenv(
 ).strip()  # e.g. https://nagios.anptic.bf/nagios
 NAGIOS_USER = os.getenv("NAGIOS_USER", "")
 NAGIOS_PASSWORD = os.getenv("NAGIOS_PASSWORD", "")
-NAGIOS_API_KEY = os.getenv(
-    "NAGIOS_API_KEY", ""
-)  # sent as X-Auth-Token if set (spec §6.2)
+NAGIOS_API_KEY = os.getenv("NAGIOS_API_KEY", "")  # sent as X-Auth-Token if set
 
 NETXMS_API_URL = os.getenv(
     "NETXMS_API_URL", ""

@@ -1,20 +1,11 @@
 import logging
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 
 import psycopg2
-import redis
 
 from celery_app import app
-from config import (
-    COLLECT_INTERVAL_S,
-    NOC_API_KEY,
-    NOC_API_URL,
-    REDIS_HOST,
-    REDIS_PORT,
-    REPORTS_DIR,
-    build_dsn,
-)
+from config import NOC_API_KEY, NOC_API_URL, REPORTS_DIR, build_dsn
 from extract import enabled_collectors
 from load.api_client import NocApiClient
 from pipelines.collector import load_active_nodes
@@ -24,40 +15,16 @@ logger = logging.getLogger(__name__)
 
 api_client = NocApiClient(base_url=NOC_API_URL, api_key=NOC_API_KEY)
 
-# Poll-state (last successful collection per tool) lives in Redis so restarts
-# don't re-fetch the whole event history.
-state_redis = redis.Redis(
-    host=REDIS_HOST, port=REDIS_PORT, decode_responses=True, socket_connect_timeout=2
-)
-STATE_KEY = "etl:last_poll:{tool}"
-
-
-def _last_poll(tool: str) -> datetime:
-    try:
-        raw = state_redis.get(STATE_KEY.format(tool=tool))
-        if raw:
-            return datetime.fromisoformat(raw)
-    except redis.RedisError as exc:
-        logger.warning("Poll-state read failed for %s: %s", tool, exc)
-    # First run (or Redis unavailable): look back two intervals, not all history.
-    return datetime.now(timezone.utc) - timedelta(seconds=COLLECT_INTERVAL_S * 2)
-
-
-def _set_last_poll(tool: str, at: datetime) -> None:
-    try:
-        state_redis.set(STATE_KEY.format(tool=tool), at.isoformat())
-    except redis.RedisError as exc:
-        logger.warning("Poll-state write failed for %s: %s", tool, exc)
-
 
 @app.task(name="etl.collect_supervision", bind=True, max_retries=0)
 def collect_supervision(self):
     """
     One batch collection pass (every 5 minutes):
-    poll every *configured* supervision tool for new/active problems, map each
-    onto a dim_node, and POST them to /api/incidents/ingest. The backend
-    deduplicates on (source_tool, external_id), so re-reporting a still-open
-    problem is a no-op.
+    ask every *configured* supervision tool which problems are open right now,
+    map each onto a dim_node, and POST them to /api/incidents/ingest. The
+    backend deduplicates on (source_tool, external_id), so re-reporting a
+    still-open problem is a no-op — which is what makes a missed pass, a failed
+    ingest or a worker restart cost nothing: the next pass sees the same state.
 
     A tool is configured when its *_API_URL env var is set (see etl/config.py);
     tools without an endpoint are skipped. Failures are isolated per tool — one
@@ -77,12 +44,13 @@ def collect_supervision(self):
         # iTop tickets reference CIs across every monitored node, not one
         # source_tool's subset — unlike the monitoring-tool collectors it
         # needs the full active-node list to match on.
-        nodes = all_nodes if tool == "itop" else [
-            n for n in all_nodes if n["source_tool"] == tool
-        ]
-        started_at = datetime.now(timezone.utc)
+        nodes = (
+            all_nodes
+            if tool == "itop"
+            else [n for n in all_nodes if n["source_tool"] == tool]
+        )
         try:
-            events = fetch_events(nodes, since=_last_poll(tool))
+            events = fetch_events(nodes)
         except Exception as exc:
             logger.error("[%s] collection failed: %s", tool, exc)
             stats[tool] = {"error": str(exc)}
@@ -97,16 +65,11 @@ def collect_supervision(self):
             else:
                 failed += 1
 
-        # Advance the cursor only once everything has landed. A collector that
-        # filters on `since` is offered each event in exactly one window, so
-        # moving the cursor past a failed ingest drops that incident for good;
-        # holding it back lets the next poll cover the same ground again. The
-        # current-state collectors ignore `since` and re-report regardless.
-        if not failed:
-            _set_last_poll(tool, started_at)
-        else:
+        # No cursor to hold back: every collector reports the problems that are
+        # open right now, so whatever failed here is offered again next pass.
+        if failed:
             logger.warning(
-                "[%s] %d of %d incident(s) failed to ingest — poll cursor held back",
+                "[%s] %d of %d incident(s) failed to ingest — retried next poll",
                 tool,
                 failed,
                 len(events),
@@ -143,7 +106,7 @@ def refresh_kpi_view(self):
 )
 def generate_monthly_report(self):
     """
-    End-of-month automatic export (spec §1.2 « Rapport mensuel », P1).
+    End-of-month automatic export.
     Runs on the 1st at 02:30, right after the nightly KPI refresh, and archives
     the previous month's report in PDF and DOCX under REPORTS_DIR.
     """
