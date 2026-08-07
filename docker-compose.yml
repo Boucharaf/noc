@@ -70,6 +70,12 @@ services:
       - REDIS_PORT=${REDIS_PORT}
       - CELERY_BROKER_DB=${CELERY_BROKER_DB:-1}
       - REPORTS_DIR=/reports
+      # Must match etl-beat's value: beat uses it to schedule the collection,
+      # the worker to set the lifetime of the collector-status key it writes.
+      # If only beat has it, the worker keeps the 300s default and the status
+      # outlives a dead worker by minutes while still reading as current.
+      - ETL_COLLECT_INTERVAL_S=${ETL_COLLECT_INTERVAL_S:-300}
+      - ETL_HTTP_TIMEOUT_S=${ETL_HTTP_TIMEOUT_S:-15}
       # Supervision tool endpoints — a collector runs only when its URL is set
       - ZABBIX_API_URL=${ZABBIX_API_URL:-}
       - ZABBIX_USER=${ZABBIX_USER:-}
