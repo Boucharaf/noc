@@ -71,8 +71,11 @@ const ToolCard = ({ tool, entry }) => {
         />
         {presentation.label}
       </div>
+      {/* A failing collector's detail is the raw API error, which can run to a
+          couple of hundred characters. Clamped so one broken tool cannot
+          stretch every card in its row; the full text stays in the tooltip. */}
       <div
-        className="mt-1 break-words text-xs"
+        className="mt-1 line-clamp-2 break-words text-xs"
         style={{ color: "var(--color-text-muted)" }}
         title={entry.detail}
       >
