@@ -119,7 +119,10 @@ def acknowledge_incident(
     _current_user: User = Depends(require_role("admin", "noc_agent")),
 ):
     incident = incident_service.acknowledge_incident(db, incident_id, payload.acknowledged_at)
-    cache_service.invalidate_prefix("kpi:alerts")
+    # No cache to invalidate: acknowledging moves an incident from "open" to
+    # "acknowledged" without changing any cached figure — the KPIs count
+    # resolved against total, and the alerts endpoints are read straight from
+    # the database. Resolving does change them, which is why it invalidates.
     return IncidentIngestResponse(
         incident_id=incident.id,
         node_id=incident.node_id,

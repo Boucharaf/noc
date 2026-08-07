@@ -8,6 +8,10 @@ from app.models.dimension import Cause, Locality, Node, Region
 from app.models.incident import Incident
 from app.models.kpi import KpiNodeMonthly as mv
 
+# Bucket for incidents with no cause_id. Shown to users, so it is French like
+# the rest of the dashboard labels.
+UNCLASSIFIED_CATEGORY = "Non classé"
+
 FRENCH_MONTHS = [
     "",
     "Janvier",
@@ -375,18 +379,29 @@ def get_latest_data_month(db: Session) -> tuple[int, int]:
 
 
 def get_cause_breakdown(db: Session, month: int, year: int) -> list[dict]:
+    """Incident counts per cause category for one month.
+
+    Outer-joined on purpose. Incidents collected from the supervision tools
+    carry no cause — none of those APIs reports one, and nothing classifies
+    them afterwards — so an inner join silently drops every one of them and
+    leaves the chart empty for any month that was not seeded by hand. Counting
+    them under UNCLASSIFIED_CATEGORY keeps the breakdown summing to the
+    month's real incident total, and makes the size of the unclassified slice
+    the visible measure of how much classification is still missing.
+    """
     period_start = month_start(month, year)
+    category = func.coalesce(Cause.category, UNCLASSIFIED_CATEGORY).label("category")
     rows = (
         db.execute(
             select(
-                Cause.category,
+                category,
                 func.count(Incident.id).label("total_incidents"),
                 func.avg(Incident.mttr_minutes).label("avg_mttr"),
             )
             .select_from(Incident)
-            .join(Cause, Incident.cause_id == Cause.id)
+            .outerjoin(Cause, Incident.cause_id == Cause.id)
             .where(func.date_trunc("month", Incident.detected_at) == period_start)
-            .group_by(Cause.category)
+            .group_by(category)
             .order_by(desc("total_incidents"))
         )
         .mappings()
