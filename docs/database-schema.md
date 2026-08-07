@@ -92,7 +92,8 @@ there's no fixed seed list beyond what `generate_seed.py` and live ingestion pro
 
 ### `dim_user`
 
-Dashboard login accounts (cahier des charges §10.1: admin / analyst / noc_agent).
+Dashboard login accounts. Three roles: admin (read + write), analyst
+(read-only), noc_agent (read + acknowledge).
 
 | Column | Type | Notes |
 |---|---|---|
@@ -185,7 +186,7 @@ Unique index on `(month, node_id)`.
 
 **Refresh**: two mechanisms, per environment:
 
-- **Nightly batch (spec §2.2)** — the Celery job `etl.refresh_kpi_view` runs
+- **Nightly batch** — the Celery job `etl.refresh_kpi_view` runs
   `REFRESH MATERIALIZED VIEW CONCURRENTLY mv_kpi_node_monthly` daily at 02:00
   (`CONCURRENTLY` is possible thanks to the unique `(month, node_id)` index,
   so dashboard reads are never blocked).

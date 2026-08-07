@@ -63,10 +63,10 @@ accordingly.
 
 | System | Protocol | Status | Config vars |
 |---|---|---|---|
-| **Zabbix** | JSON-RPC `problem.get` (§6.1) | **Implemented** (`etl/extract/zabbix.py`) | `ZABBIX_API_URL`, `ZABBIX_USER`/`ZABBIX_PASSWORD` or `ZABBIX_API_TOKEN` |
-| **Nagios** | `statusjson.cgi?query=hostlist` (§6.2) | **Implemented** (`etl/extract/nagios.py`) | `NAGIOS_API_URL`, `NAGIOS_USER`/`NAGIOS_PASSWORD` and/or `NAGIOS_API_KEY` |
+| **Zabbix** | JSON-RPC `problem.get` | **Implemented** (`etl/extract/zabbix.py`) | `ZABBIX_API_URL`, `ZABBIX_USER`/`ZABBIX_PASSWORD` or `ZABBIX_API_TOKEN` |
+| **Nagios** | `statusjson.cgi?query=hostlist` | **Implemented** (`etl/extract/nagios.py`) | `NAGIOS_API_URL`, `NAGIOS_USER`/`NAGIOS_PASSWORD` and/or `NAGIOS_API_KEY` |
 | **NetXMS** | REST API v1: `POST /v1/login` → bearer token, then `/v1/alarms` + `/v1/objects` | **Implemented** (`etl/extract/netxms.py`) | `NETXMS_API_URL`, `NETXMS_USER`, `NETXMS_PASSWORD` |
-| **Centreon** | REST v2 `/monitoring/resources` (§6.3) + inbound webhook | **Implemented** (`etl/extract/centreon.py`) | `CENTREON_API_URL`, `CENTREON_USER`/`CENTREON_PASSWORD` or `CENTREON_API_KEY` |
+| **Centreon** | REST v2 `/monitoring/resources` + inbound webhook | **Implemented** (`etl/extract/centreon.py`) | `CENTREON_API_URL`, `CENTREON_USER`/`CENTREON_PASSWORD` or `CENTREON_API_KEY` |
 | **Twilio (SMS)** | REST API (`Messages.json`) | **Implemented** (`backend/app/services/notification_service.py`) | `NOTIFICATIONS_ENABLED`, `TWILIO_*`, `NOC_SMS_RECIPIENTS` |
 | **SMTP (email)** | SMTP + STARTTLS | **Implemented** (same service) | `SMTP_*`, `NOC_EMAIL_RECIPIENTS` |
 | **Web Push (browser/PWA)** | Web Push protocol, VAPID-signed | **Implemented** (`backend/app/services/push_service.py`) | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_CLAIMS_EMAIL` |
@@ -74,7 +74,7 @@ accordingly.
 ## How collection works
 
 `etl-beat` schedules `etl.collect_supervision` every `ETL_COLLECT_INTERVAL_S`
-seconds (default **300** — the spec's §2.2 five-minute batch). Each pass:
+seconds (default **300**, the contracted reporting granularity). Each pass:
 
 1. Loads all active nodes (code, name, IP, source_tool) from Postgres.
 2. For each **configured** tool, calls its `fetch_events(nodes)` collector,
@@ -99,20 +99,22 @@ webhook.
 `ZABBIX_API_TOKEN` (Zabbix ≥ 5.4, preferred) or `ZABBIX_USER`/`ZABBIX_PASSWORD`
 (`user.login` is called on every poll — its token is only valid ~30 min, so it
 is not cached). Polls the **currently unresolved** trigger problems
-(`problem.get`), not the event stream since the last poll: §6.1 names
-`event.get`, but that offered each event in exactly one poll window, so a
-problem raised before the collector first ran — or during any gap longer than
-the look-back — could never reach the dashboard. Problems that stay open are
-re-reported each pass under their stable event id and deduplicated by the
-backend, as with the other current-state collectors. `problem.get` rejects
-`selectHosts`, so the hosts come from a follow-up `trigger.get` on the
-problem's `objectid`; problems `suppressed` by a maintenance window are
-dropped. Severity map: Zabbix 0–5 → `low, low, medium, medium, high, critical`.
+(`problem.get`), not the event stream since the last poll. `event.get` with
+`time_from` is the obvious alternative and is wrong here: it offers each event
+in exactly one poll window, so a problem raised before the collector first ran
+— or during any gap longer than the look-back — could never reach the
+dashboard, and a failed ingest loses that incident for good. Problems that
+stay open are re-reported each pass under their stable event id and
+deduplicated by the backend, as with the other current-state collectors.
+`problem.get` rejects `selectHosts`, so the hosts come from a follow-up
+`trigger.get` on the problem's `objectid`; problems `suppressed` by a
+maintenance window are dropped, since somebody declared that outage planned.
+Severity map: Zabbix 0–5 → `low, low, medium, medium, high, critical`.
 
 **Nagios** — set `NAGIOS_API_URL` to the base URL that fronts the CGIs
 (e.g. `https://nagios.anptic.bf/nagios`; the collector appends
 `/cgi-bin/statusjson.cgi`). Auth: Basic (`NAGIOS_USER`/`NAGIOS_PASSWORD`)
-and/or `NAGIOS_API_KEY` sent as `X-Auth-Token` (spec §6.2). Polls **current
+and/or `NAGIOS_API_KEY` sent as `X-Auth-Token`. Polls **current
 host status** with `details=true`: state `4` (DOWN) → `critical`, `8`
 (UNREACHABLE) → `high`. Because status (not an event log) is polled, a host
 that stays down is re-reported each pass with the stable id
@@ -149,9 +151,9 @@ active.
 e.g. `https://centreon.anptic.bf/centreon/api/latest` for an external server).
 Auth: static `CENTREON_API_KEY` (sent as `X-AUTH-TOKEN`) or
 `CENTREON_USER`/`CENTREON_PASSWORD` (a `/login` call per poll). Fetches
-unhandled `CRITICAL`/`UNKNOWN`/`DOWN` resources (§6.3's `status IN (2,3)`
-filter). For service resources the **parent host** name is used for node
-matching.
+unhandled `CRITICAL`/`UNKNOWN`/`DOWN` resources. For service resources the
+**parent host** name identifies the node; for host resources both the host
+name and its alias are tried, so either can carry the node code.
 
 The local container starts with a single host — the central monitoring itself
 by ping — because a fresh Centreon has no host templates: those come from
@@ -189,9 +191,9 @@ the same alert firing again after recovery is a new incident.
 Independently of the 5-minute batch, Centreon (or any tool) can push alerts in
 real time by POSTing directly to `/api/incidents/ingest` with
 `Authorization: Bearer $NOC_API_KEY` — see the payload contract in
-[api-reference.md](api-reference.md#post-apiincidentsingest) and the broker
-configuration example in the cahier des charges §6.3. Webhook-pushed and
-batch-collected alerts coexist safely thanks to the deduplication above.
+[api-reference.md](api-reference.md#post-apiincidentsingest). Webhook-pushed
+and batch-collected alerts coexist safely thanks to the deduplication above:
+whichever arrives first creates the incident, the other is absorbed.
 
 ## Web Push (browser/PWA)
 
@@ -255,8 +257,9 @@ Authorization: Bearer $NOC_API_KEY
 
 checked by `verify_api_key` (`backend/app/core/security.py`) on
 `POST /api/incidents/ingest` (and accepted on `GET /api/report/monthly` for
-the scheduled export). This matches cahier des charges §10.1 ("clé API
-statique pour les webhooks"). The per-tool `ZABBIX_*`/`NAGIOS_*`/`NETXMS_*`/
+the scheduled export). A single static key is used because the callers are
+monitoring daemons configured by hand, with no way to refresh a token. The
+per-tool `ZABBIX_*`/`NAGIOS_*`/`NETXMS_*`/
 `CENTREON_*` variables are for the **outbound** direction — what the ETL uses
 to poll those tools' own APIs — separate from the shared inbound `NOC_API_KEY`
 tools use to push webhooks to `/ingest`.

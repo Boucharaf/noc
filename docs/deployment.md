@@ -118,7 +118,7 @@ write — demo behavior; set `false` in production and rely on the nightly
 **ETL / Celery**
 `CELERY_BROKER_DB` (Redis logical DB for the broker, default 1 — separate from
 the backend's cache on DB 0), `ETL_COLLECT_INTERVAL_S` (seconds between
-supervision-API polls, default 300 — spec §2.2), `REPORTS_DIR` (where the monthly report job
+supervision-API polls, default 300), `REPORTS_DIR` (where the monthly report job
 writes, default `/reports`)
 
 **Global**
@@ -163,9 +163,11 @@ script.
 `nginx/generate_cert.sh` creates a **self-signed** certificate at
 `nginx/certs/noc-selfsigned.crt`/`.key`, valid 825 days, with SANs for
 `noc.anptic.bf`, `noc-api.anptic.bf`, `localhost`, and `127.0.0.1`. It satisfies
-the cahier des charges' "HTTPS obligatoire" (§10.1) requirement for local/demo
+the requirement that the dashboard be served over HTTPS for local and demo
 use, but browsers and `curl` will flag it as untrusted since it isn't
-CA-signed.
+CA-signed. Replace it with a CA-signed certificate before any deployment real
+users log in to — a certificate warning trains them to click through exactly
+the dialog that would warn them about an interception.
 
 Regenerate it (e.g. after expiry, or to add a SAN):
 

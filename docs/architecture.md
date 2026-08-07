@@ -92,7 +92,7 @@ split into a `beat` scheduler and a `worker` process — there is no single long
 This is the path that keeps the dashboard feeling "live":
 
 1. `etl-beat` enqueues `etl.collect_supervision` every `ETL_COLLECT_INTERVAL_S`
-   seconds (default 300 — the spec's 5-minute batch, §2.2).
+   seconds (default 300, the contracted reporting granularity).
 2. `etl-worker` picks up the task:
    - Loads all `is_active = TRUE` nodes (code, name, IP, source_tool) from
      Postgres (`pipelines/collector.py`).
@@ -115,7 +115,7 @@ This is the path that keeps the dashboard feeling "live":
    - Inserts the `fact_incident` row.
    - Refreshes `mv_kpi_node_monthly` synchronously **when `SYNC_MV_REFRESH=true`**
      (the default, fine for the small demo dataset). In production set it to
-     `false` and rely on the nightly `etl.refresh_kpi_view` batch (spec §2.2) —
+     `false` and rely on the nightly `etl.refresh_kpi_view` batch —
      see [Scheduled jobs](#scheduled-jobs).
    - Invalidates all `kpi:*` Redis cache keys so the next dashboard read recomputes.
 4. The ingest **route** then publishes the incident to the `noc:alerts` Redis
@@ -155,8 +155,8 @@ Two independent services react to a **critical** incident, both as FastAPI
 **background tasks** scheduled after the webhook response is sent (the
 supervision tool never waits on either):
 
-**SMS/email** — `backend/app/services/notification_service.py` implements the
-spec's §7 step 6: the NOC lead gets an SMS (Twilio REST API, plain `requests`
+**SMS/email** — `backend/app/services/notification_service.py` handles
+escalation on critical incidents: the NOC lead gets an SMS (Twilio REST API, plain `requests`
 call — no SDK) and the permanence list gets an email (stdlib `smtplib`,
 STARTTLS). Disabled by default (`NOTIFICATIONS_ENABLED=false`); config is
 `TWILIO_*`, `NOC_SMS_RECIPIENTS`, `SMTP_*`, `NOC_EMAIL_RECIPIENTS`.
@@ -180,8 +180,8 @@ Celery beat (`etl/celery_app.py`) drives three schedules, executed by
 
 | Task | Schedule | What it does |
 |---|---|---|
-| `etl.collect_supervision` | every `ETL_COLLECT_INTERVAL_S` (default 300s, spec §2.2) | Polls every configured supervision-tool API and POSTs new alerts to `/ingest` |
-| `etl.refresh_kpi_view` | daily **02:00** | `REFRESH MATERIALIZED VIEW CONCURRENTLY mv_kpi_node_monthly` (spec §2.2 nightly batch; `CONCURRENTLY` works because the view has a unique index on `(month, node_id)`) |
+| `etl.collect_supervision` | every `ETL_COLLECT_INTERVAL_S` (default 300s) | Polls every configured supervision-tool API and POSTs new alerts to `/ingest` |
+| `etl.refresh_kpi_view` | daily **02:00** | `REFRESH MATERIALIZED VIEW CONCURRENTLY mv_kpi_node_monthly` (`CONCURRENTLY` works because the view has a unique index on `(month, node_id)`, and keeps dashboard reads unblocked while it runs) |
 | `etl.generate_monthly_report` | **1st of month, 02:30** | Downloads the previous month's report from `/api/report/monthly` (PDF + DOCX, authenticating with the static API key) and archives both to the `reports` volume (`/reports`) |
 
 The synchronous refresh-on-write in the backend (`SYNC_MV_REFRESH`, default

@@ -37,7 +37,7 @@ Two independent auth schemes are used, depending on the caller:
 - JWTs are issued by `POST /api/auth/login` or `POST /api/auth/pin-login`, signed
   with `HS256` using `SECRET_KEY`, and expire after `ACCESS_TOKEN_EXPIRE_MINUTES`
   (default 30). Payload: `{sub, username, role, exp}`.
-- **Every endpoint requires authentication** (spec §10.1). Reads accept any
+- **Every endpoint requires authentication.** Reads accept any
   logged-in role; write actions are role-gated by `require_role()`
   (`backend/app/core/security.py`):
 
@@ -50,8 +50,9 @@ Two independent auth schemes are used, depending on the caller:
 ## Rate limiting
 
 Per-IP, per-minute fixed windows backed by Redis
-(`backend/app/core/rate_limit.py`, spec §10.1). Behind NGINX, the client IP is
-taken from `X-Real-IP`.
+(`backend/app/core/rate_limit.py`). Behind NGINX, the client IP is taken from
+`X-Real-IP` — which means the gateway must set that header itself and not pass
+through a client-supplied one, or the limit is trivially evaded.
 
 | Scope | Limit | Env var |
 |---|---|---|
@@ -109,9 +110,8 @@ NOC / 07:00–17:00 terrain windows).
 
 ### `GET /api/kpi/compare`
 
-Current month vs earlier periods (N-1 and N-3 months), with per-KPI deltas —
-the spec's P2 "Comparaison périodes" module. Feeds the "Comparaison de
-Périodes" card on the Vue Globale tab.
+Current month vs earlier periods (N-1 and N-3 months), with per-KPI deltas.
+Feeds the "Comparaison de Périodes" card on the Vue Globale tab.
 
 Query: `month`, `year`
 
