@@ -90,9 +90,7 @@ def fetch_events(nodes: list[dict]) -> list[dict]:
     token = _login()
 
     objects = _as_list(_get("/v1/objects", token), "objects")
-    listed = {
-        obj.get("id"): (obj.get("name", ""), _object_ip(obj)) for obj in objects
-    }
+    listed = {obj.get("id"): (obj.get("name", ""), _object_ip(obj)) for obj in objects}
 
     alarms = _as_list(_get("/v1/alarms", token), "alarms")
 

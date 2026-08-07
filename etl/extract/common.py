@@ -20,7 +20,9 @@ def match_node(nodes: list[dict], *candidates: str) -> str | None:
     by_name = {n["name"].lower(): n["code"] for n in nodes}
     by_ip = {n["ip_address"]: n["code"] for n in nodes if n.get("ip_address")}
     for value in values:
-        code = by_code.get(value.lower()) or by_name.get(value.lower()) or by_ip.get(value)
+        code = (
+            by_code.get(value.lower()) or by_name.get(value.lower()) or by_ip.get(value)
+        )
         if code:
             return code
     return None
