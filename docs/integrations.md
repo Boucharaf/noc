@@ -118,12 +118,13 @@ NETXMS_PASSWORD}` to `/v1/login`, gets back a bearer token (short-lived, so it
 logs in on every poll — same approach as Zabbix/Centreon), then calls
 `/v1/alarms` (a flat list of `{id, severity, state, source, message,
 lastChangeTime}`) and `/v1/objects` with `Authorization: Bearer <token>`.
-`/v1/objects` is used, best-effort, to resolve an alarm's numeric `source` id
-to an object name for node matching — it may not enumerate every Node
-depending on the server's object tree (NetXMS 6.2 returns only the root
-objects there; nodes live under `/v1/objects/2/children`), in which case that
-alarm's host falls back to the raw numeric id (normally unmatched, logged, and
-skipped like any other unprovisioned host). Alarm `state` 2 (terminated/resolved) is dropped;
+An alarm's numeric `source` id is resolved to an object name and primary IP for
+node matching. `/v1/objects` supplies those in one call, but it does not
+enumerate every Node — on the server in this stack it returns only the seven
+root containers — so an id missing from that listing is fetched individually
+with `/v1/objects/{id}` (once per distinct source per poll, cached). An id that
+resolves to neither falls back to the raw numeric id (normally unmatched,
+logged, and skipped like any other unprovisioned host). Alarm `state` 2 (terminated/resolved) is dropped;
 severity 0–4 (NORMAL…CRITICAL) maps to `low, medium, medium, high, critical`,
 with NORMAL alarms also ignored. Alarm ids are stable → deduplicated while
 active.

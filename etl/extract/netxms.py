@@ -6,12 +6,12 @@ Targets the NetXMS web API daemon v1 REST API: POST {url}/v1/login with
 we log in on every poll, matching the zabbix/centreon collectors), which
 authenticates GET {url}/v1/alarms — a flat list of
 {id, severity, state, source, message, lastChangeTime}. `source` is the
-numeric id of the object (usually a Node) the alarm was raised on; GET
-{url}/v1/objects is used to resolve it to a name for node matching, on a
-best-effort basis (it may not include every Node depending on server config —
-an alarm whose source isn't in that list falls back to matching on the raw
-numeric id, which will normally miss and get logged/skipped like any other
-unmatched host).
+numeric id of the object (usually a Node) the alarm was raised on, resolved to
+a name (and IP) for node matching: GET {url}/v1/objects supplies the tree in
+one call, but on the servers we target it returns only the root containers, so
+any id missing from it is fetched individually with GET {url}/v1/objects/{id}.
+An id that resolves to neither falls back to matching on the raw numeric id,
+which will normally miss and get logged/skipped like any other unmatched host.
 
 Active alarms are polled, so an alarm that stays active keeps its (stable)
 alarm id — the backend deduplicates open incidents on
@@ -59,14 +59,44 @@ def _as_list(payload: dict | list, key: str) -> list:
     return payload.get(key, []) if isinstance(payload, dict) else payload
 
 
+def _object_ip(obj: dict) -> str:
+    """A Node's primary address — `ipAddress` is {family, address, prefixLength}."""
+    addr = obj.get("ipAddress")
+    if isinstance(addr, dict):
+        return addr.get("address", "")
+    return addr or ""
+
+
+def _resolve_source(source_id, token: str, cache: dict) -> tuple[str, str]:
+    """(name, ip) for an alarm's source object, "" for either when unknown.
+
+    Only called for ids the /v1/objects listing didn't cover; the cache keeps
+    it to one request per distinct source per poll, however many alarms share it.
+    """
+    if source_id in cache:
+        return cache[source_id]
+    resolved = ("", "")
+    try:
+        obj = _get(f"/v1/objects/{source_id}", token)
+        if isinstance(obj, dict):
+            resolved = (obj.get("name", ""), _object_ip(obj))
+    except requests.RequestException as exc:
+        logger.warning("[netxms] could not resolve object %s: %s", source_id, exc)
+    cache[source_id] = resolved
+    return resolved
+
+
 def fetch_events(nodes: list[dict], since: datetime) -> list[dict]:
     token = _login()
 
     objects = _as_list(_get("/v1/objects", token), "objects")
-    object_names = {obj.get("id"): obj.get("name", "") for obj in objects}
+    listed = {
+        obj.get("id"): (obj.get("name", ""), _object_ip(obj)) for obj in objects
+    }
 
     alarms = _as_list(_get("/v1/alarms", token), "alarms")
 
+    resolved_cache: dict = {}
     results = []
     for alarm in alarms:
         if int(alarm.get("state", 0)) == TERMINATED_STATE:
@@ -74,9 +104,12 @@ def fetch_events(nodes: list[dict], since: datetime) -> list[dict]:
         severity_raw = int(alarm.get("severity", alarm.get("currentSeverity", 1)))
         if severity_raw == 0:  # NORMAL — not an incident
             continue
-        source_id = alarm.get("source", alarm.get("sourceObjectId"))
-        host = str(object_names.get(source_id) or source_id or "")
-        node_code = match_node(nodes, host)
+        source_id = alarm.get("source") or alarm.get("sourceObjectId")
+        name, ip = listed.get(source_id) or _resolve_source(
+            source_id, token, resolved_cache
+        )
+        host = name or str(source_id or "")
+        node_code = match_node(nodes, host, ip)
         if node_code is None:
             skip_unmatched("netxms", host)
             continue
