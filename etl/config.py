@@ -30,6 +30,12 @@ COLLECT_INTERVAL_S = int(os.getenv("ETL_COLLECT_INTERVAL_S", "300"))
 # Where the scheduled end-of-month exports are written (mounted volume).
 REPORTS_DIR = os.getenv("REPORTS_DIR", "/reports")
 
+# Redis DB 0 — the backend's cache database, not the broker's DB 1. The
+# collector-status key written after each pass is read by the backend to answer
+# GET /api/interop/status, so both sides must agree on the database.
+REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+
 HTTP_TIMEOUT_S = int(os.getenv("ETL_HTTP_TIMEOUT_S", "15"))
 
 # ── Supervision tool endpoints ──────────────────────────────────────────────

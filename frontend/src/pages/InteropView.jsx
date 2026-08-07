@@ -1,39 +1,101 @@
 import React from "react";
-import { Activity, Link2, Server, Zap } from "lucide-react";
+import { Activity, Link2, LifeBuoy, Radar, Server, Zap } from "lucide-react";
 import Card from "../components/Card";
 import TrendLine from "../components/charts/TrendLine";
-import { useKpiNodes, useKpiTrend } from "../hooks/useKPI";
+import { useInteropStatus, useKpiTrend } from "../hooks/useKPI";
 import { STATUS } from "../theme/colors";
 
-const TOOLS = [
-  {
-    key: "zabbix",
+// One card per tool the ETL can collect from, keyed by the source_tool value
+// the backend reports. Descriptions say what this dashboard actually does with
+// each tool — not what the tool is capable of — so the page stays honest about
+// the integration rather than the product.
+const TOOLS = {
+  zabbix: {
     name: "Zabbix",
     icon: Activity,
-    description: "Surveillance énergie et onduleurs. Agent actif.",
+    description: "Problèmes déclencheurs non résolus, via l'API JSON-RPC.",
   },
-  {
-    key: "nagios",
+  nagios: {
     name: "Nagios",
     icon: Server,
-    description: "Disponibilité hôtes et services via NDO2DB.",
+    description: "État courant des hôtes, via statusjson.cgi.",
   },
-  {
-    key: "centreon",
-    name: "Centreon / iTop",
+  netxms: {
+    name: "NetXMS",
+    icon: Radar,
+    description: "Alarmes actives, via l'API REST v1.",
+  },
+  centreon: {
+    name: "Centreon",
     icon: Link2,
-    description: "Agrégation des alertes et création de tickets automatique.",
+    description: "Ressources en incident, via l'API REST v2 et les webhooks.",
   },
-];
+  itop: {
+    name: "iTop",
+    icon: LifeBuoy,
+    description: "Tickets ouverts, en lecture seule — aucun ticket n'est créé.",
+  },
+};
+
+// A status the page cannot vouch for must not look like success: anything the
+// backend does not positively report as healthy is shown in a colour that
+// invites a look, never green.
+const STATE_PRESENTATION = {
+  ok: { label: "Connecté", color: STATUS.good },
+  degraded: { label: "Dégradé", color: STATUS.warning },
+  error: { label: "En échec", color: STATUS.critical },
+  not_configured: { label: "Non configuré", color: "var(--color-text-muted)" },
+  unknown: { label: "Indéterminé", color: STATUS.warning },
+};
+
+const ToolCard = ({ tool, entry }) => {
+  const meta = TOOLS[entry.tool];
+  const presentation =
+    STATE_PRESENTATION[entry.state] ?? STATE_PRESENTATION.unknown;
+
+  return (
+    <Card key={tool} icon={meta.icon} title={meta.name}>
+      <p
+        className="mb-4 text-sm"
+        style={{ color: "var(--color-text-secondary)" }}
+      >
+        {meta.description}
+      </p>
+      <div
+        className="flex items-center gap-1.5 text-sm font-semibold"
+        style={{ color: presentation.color }}
+      >
+        <span
+          className="h-2 w-2 shrink-0 rounded-full"
+          style={{ background: presentation.color }}
+        />
+        {presentation.label}
+      </div>
+      <div
+        className="mt-1 break-words text-xs"
+        style={{ color: "var(--color-text-muted)" }}
+        title={entry.detail}
+      >
+        {entry.detail}
+      </div>
+      <div
+        className="mt-2 text-xs"
+        style={{ color: "var(--color-text-muted)" }}
+      >
+        {entry.incidents_this_month} incident(s) ce mois-ci
+      </div>
+    </Card>
+  );
+};
 
 const InteropView = () => {
-  const { data: nodes = [], isLoading } = useKpiNodes(undefined, 100);
+  const { data: status, isLoading } = useInteropStatus();
   const { data: trend } = useKpiTrend(6);
 
-  const incidentsByTool = nodes.reduce((acc, n) => {
-    acc[n.source_tool] = (acc[n.source_tool] ?? 0) + n.total_incidents;
-    return acc;
-  }, {});
+  const tools = status?.tools ?? [];
+  const lastRun = status?.collected_at
+    ? new Date(status.collected_at).toLocaleString("fr-FR")
+    : null;
 
   return (
     <div className="flex min-h-full flex-col gap-4">
@@ -50,40 +112,21 @@ const InteropView = () => {
             className="text-sm"
             style={{ color: "var(--color-text-secondary)" }}
           >
-            Pipeline collecte → agrégation → ITSM → tableau de bord
+            {isLoading
+              ? "Pipeline collecte → agrégation → ITSM → tableau de bord"
+              : lastRun
+                ? `Dernière collecte : ${lastRun}`
+                : "Aucune collecte récente — le collecteur est-il actif ?"}
           </p>
         </div>
       </div>
 
-      <div className="grid shrink-0 grid-cols-1 gap-4 md:grid-cols-3">
-        {TOOLS.map((tool) => (
-          <Card key={tool.key} icon={tool.icon} title={tool.name}>
-            <p
-              className="mb-4 text-sm"
-              style={{ color: "var(--color-text-secondary)" }}
-            >
-              {tool.description}
-            </p>
-            <div
-              className="flex items-center gap-1.5 text-sm font-semibold"
-              style={{ color: STATUS.good }}
-            >
-              <span
-                className="h-2 w-2 rounded-full"
-                style={{ background: STATUS.good }}
-              />
-              Connecté
-            </div>
-            <div
-              className="mt-1 text-xs"
-              style={{ color: "var(--color-text-muted)" }}
-            >
-              {isLoading
-                ? "Chargement…"
-                : `${incidentsByTool[tool.key] ?? 0} incident(s) ce mois-ci`}
-            </div>
-          </Card>
-        ))}
+      <div className="grid shrink-0 grid-cols-1 gap-4 md:grid-cols-3 xl:grid-cols-5">
+        {tools
+          .filter((entry) => TOOLS[entry.tool])
+          .map((entry) => (
+            <ToolCard key={entry.tool} tool={entry.tool} entry={entry} />
+          ))}
       </div>
 
       <Card

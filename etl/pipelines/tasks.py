@@ -9,6 +9,7 @@ from config import NOC_API_KEY, NOC_API_URL, REPORTS_DIR, build_dsn
 from extract import enabled_collectors
 from load.api_client import NocApiClient
 from pipelines.collector import load_active_nodes
+from pipelines.status import publish_collector_status
 from transform.normalize import to_ingest_payload
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,9 @@ def collect_supervision(self):
             "No supervision tool configured (set ZABBIX_API_URL / NAGIOS_API_URL / "
             "NETXMS_API_URL / CENTREON_API_URL) — nothing to collect"
         )
+        # Still published, so the dashboard distinguishes "no tool configured"
+        # from "the worker has stopped running".
+        publish_collector_status({})
         return {"configured": 0}
 
     all_nodes = load_active_nodes(build_dsn())
@@ -76,6 +80,8 @@ def collect_supervision(self):
             )
         stats[tool] = {"fetched": len(events), "ingested": ingested, "failed": failed}
         logger.info("[%s] fetched=%d ingested=%d", tool, len(events), ingested)
+
+    publish_collector_status(stats)
 
     return stats
 
