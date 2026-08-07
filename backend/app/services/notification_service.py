@@ -1,6 +1,11 @@
 """
-Notifications on critical incidents (cahier des charges §7 step 6):
-SMS to the NOC lead via Twilio + permanence email via SMTP.
+Notifications on critical incidents: SMS to the NOC lead via Twilio, plus the
+permanence email over SMTP.
+
+Only severity "critical" notifies. That threshold is the whole point of the
+feature — it exists to reach someone who is not looking at the dashboard, and
+a channel that fires on lesser severities gets muted by its recipients, after
+which it reaches nobody at all.
 
 Both channels degrade gracefully: if credentials are missing or the provider is
 unreachable, the failure is logged and ingestion continues — an alerting outage

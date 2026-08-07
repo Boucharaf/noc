@@ -1,6 +1,12 @@
 """
-Per-IP fixed-window rate limiting backed by Redis (spec §10.1:
-100 req/min on read endpoints, 10 req/min on /ingest).
+Per-IP fixed-window rate limiting backed by Redis: 100 req/min on read
+endpoints, 10 req/min on /ingest.
+
+The ingest limit is the tighter of the two because it is the only unauthenticated-
+by-user path — a supervision tool holding the static API key — and because a
+looping webhook is the realistic way this service gets flooded. Read traffic
+comes from logged-in dashboards, which are bounded by how many people are
+looking at them.
 
 Fails open: if Redis is unavailable the request goes through — availability of
 the dashboard matters more than strict quota enforcement.

@@ -1,9 +1,11 @@
 """
-Real-time alert stream (spec §8.1, hooks/useRealtime.js).
+Real-time alert stream. The browser side is hooks/useRealtime.js.
 
 Each connection subscribes to the Redis ALERT_CHANNEL and forwards incidents
 published by /api/incidents/ingest. A JWT is required as a query parameter
-(browsers cannot set an Authorization header on a WebSocket handshake).
+because browsers cannot set an Authorization header on a WebSocket handshake —
+which puts the token in the URL, where proxies and access logs may record it,
+so keep token lifetimes short and avoid logging the query string.
 """
 import logging
 

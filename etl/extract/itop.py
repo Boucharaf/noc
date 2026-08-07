@@ -1,8 +1,11 @@
 """
-iTop collector — REST/JSON API (cahier des charges, iTop as read-only ticket
-source). Read-only: `core/get` on class Incident, HTTP Basic auth. The
-dashboard never creates/updates iTop tickets (see the removed
-itop_service.py) — it only ever displays what iTop already has.
+iTop collector — REST/JSON API: `core/get` on class Incident, HTTP Basic auth.
+
+Strictly read-only, and that is a standing constraint rather than an
+unfinished feature: iTop is the service desk of record, so the dashboard
+reports what it already holds and never creates, updates or closes a ticket.
+Anything that writes back belongs on the iTop side of the boundary, where the
+ITSM workflow, its approvals and its audit trail live.
 
 Every poll fetches every still-active Incident (operational_status not in
 resolved/closed), the same "poll current state, skip what is finished"

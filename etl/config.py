@@ -21,7 +21,11 @@ def broker_url() -> str:
 
 NOC_API_URL = os.getenv("NOC_API_URL", "http://backend:8000")
 NOC_API_KEY = os.getenv("NOC_API_KEY", "dev-noc-api-key")
-# Spec §2.2: batch collection polls the supervision APIs every 5 minutes.
+# How often every configured supervision API is polled. Five minutes is the
+# contracted reporting granularity for this dashboard; it is also about as
+# often as these tools can be polled without the request itself becoming a
+# load problem on the monitoring servers. Raising it delays detection by the
+# same amount, since nothing else drives collection.
 COLLECT_INTERVAL_S = int(os.getenv("ETL_COLLECT_INTERVAL_S", "300"))
 # Where the scheduled end-of-month exports are written (mounted volume).
 REPORTS_DIR = os.getenv("REPORTS_DIR", "/reports")
@@ -29,8 +33,11 @@ REPORTS_DIR = os.getenv("REPORTS_DIR", "/reports")
 HTTP_TIMEOUT_S = int(os.getenv("ETL_HTTP_TIMEOUT_S", "15"))
 
 # ── Supervision tool endpoints ──────────────────────────────────────────────
-# A collector runs only when its *_API_URL is set; unset tools are skipped.
-# Cahier des charges §6.1–6.3.
+# A collector runs only when its *_API_URL is set; unset tools are skipped
+# silently. That is the intended way to turn a tool off — there is no separate
+# enable flag — so an endpoint accidentally left blank looks exactly like a
+# tool that was never meant to run. Check the startup log, which names the
+# collectors it activated, before concluding a tool has nothing to report.
 
 ZABBIX_API_URL = os.getenv(
     "ZABBIX_API_URL", ""

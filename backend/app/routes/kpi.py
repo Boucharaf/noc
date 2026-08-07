@@ -8,8 +8,11 @@ from app.core.security import get_current_user
 from app.db.session import get_db
 from app.services import cache_service, kpi_service
 
-# All KPI reads require a logged-in user (any role — analyst included) and are
-# rate-limited per spec §10.1.
+# All KPI reads require a logged-in user (any role, analyst included) and are
+# rate-limited. Declaring both as router-level dependencies rather than
+# per-endpoint is deliberate: a route added later inherits them automatically,
+# so the failure mode is a new endpoint that is accidentally protected rather
+# than one that is accidentally public.
 router = APIRouter(
     prefix="/api/kpi",
     tags=["kpi"],

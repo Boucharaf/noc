@@ -1,17 +1,23 @@
 """
-NetXMS collector — REST API v1 (cahier des charges §6, "NetXMS API").
+NetXMS collector — REST API v1.
 
 Targets the NetXMS web API daemon v1 REST API: POST {url}/v1/login with
 {"username", "password"} returns a bearer token (short-lived, not cached —
 we log in on every poll, matching the zabbix/centreon collectors), which
 authenticates GET {url}/v1/alarms — a flat list of
 {id, severity, state, source, message, lastChangeTime}. `source` is the
-numeric id of the object (usually a Node) the alarm was raised on, resolved to
-a name (and IP) for node matching: GET {url}/v1/objects supplies the tree in
-one call, but on the servers we target it returns only the root containers, so
-any id missing from it is fetched individually with GET {url}/v1/objects/{id}.
-An id that resolves to neither falls back to matching on the raw numeric id,
-which will normally miss and get logged/skipped like any other unmatched host.
+numeric id of the object (usually a Node) the alarm was raised on, and has to
+be resolved to a name and address before it can be matched to a node.
+
+Resolution deliberately uses two endpoints. GET {url}/v1/objects returns the
+object tree in one request, but what it actually contains depends on the
+server's configuration: on the instances this was built against it yields only
+the handful of root containers and no Nodes at all, so relying on it alone
+means no alarm ever resolves and every one is skipped as unmatched — a silent
+failure that reads like an empty CMDB. Ids it does not cover are therefore
+fetched one at a time from GET {url}/v1/objects/{id}, cached per poll. An id
+neither endpoint resolves falls back to matching on the raw number, which
+normally misses and is logged and skipped like any other unknown host.
 
 Active alarms are polled, so an alarm that stays active keeps its (stable)
 alarm id — the backend deduplicates open incidents on

@@ -28,10 +28,16 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
 # Leading '-'-delimited token (uppercased) -> existing dim_locality.code.
-# Confident matches only — see plan discussion for why the many other town
-# prefixes seen in real ticket data (KOUP, DIAL, SABO, KONG, OROD, NAKO,
-# DANO, TANG, KORS, KOMB, YAKO, GOUR, REO, NOBE, BOUS, ...) are left to fall
-# back to SIE rather than guessing an unverified region.
+#
+# Only prefixes whose town is unambiguous are listed. Real ticket data carries
+# many more that look like place names — KOUP, DIAL, SABO, KONG, OROD, NAKO,
+# DANO, TANG, KORS, KOMB, YAKO, GOUR, REO, NOBE, BOUS and others — and they are
+# deliberately left out. Guessing a region for one of them would file a node
+# under a locality nobody verified, and since locality drives the geographic
+# breakdown of every KPI, a wrong guess is worse than the honest fallback: it
+# produces a confident number that is quietly incorrect and that no later
+# reader has any reason to doubt. Adding an entry here is cheap; do it once
+# somebody who knows the site confirms the mapping.
 LOCALITY_PREFIX_MAP = {
     "GAOU": "GAO",
     "GAOUA": "GAO",

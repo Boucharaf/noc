@@ -61,7 +61,10 @@ def ingest_incident(
         }
     )
     if incident.severity == "critical":
-        # Spec §7 step 6 — SMS + permanence email; run after the response is sent.
+        # SMS + permanence email, deferred until after the response is sent:
+        # the supervision tool posting this incident must not be made to wait
+        # on Twilio or SMTP, and must not see its POST fail because a notifier
+        # is down. Recording the incident is what has to succeed here.
         background_tasks.add_task(
             notification_service.notify_critical_incident,
             incident.id,

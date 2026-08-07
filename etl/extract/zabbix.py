@@ -1,23 +1,30 @@
 """
-Zabbix collector — JSON-RPC `problem.get` (cahier des charges §6.1 names
-`event.get`; the deviation is deliberate, see below).
+Zabbix collector — JSON-RPC `problem.get`.
 
 Auth: either a static API token (ZABBIX_API_TOKEN, Zabbix ≥ 5.4) or
 `user.login` with ZABBIX_USER/ZABBIX_PASSWORD (token valid ~30 min, so we
 log in on every poll rather than caching it).
 
-Polls the problems that are *currently unresolved*, not the event stream since
-the last poll — the same "report current state, let the backend dedupe"
-approach as the nagios/netxms/centreon/itop collectors. `event.get` with
-`time_from` offered each event in exactly one poll window, which meant a
-problem raised before the collector first ran, or during any gap longer than
-the look-back, could never reach the dashboard at all, and an ingest that
-failed dropped the incident for good. A problem that stays open now re-reports
-every pass under its (stable) event id and is deduplicated by the backend on
-(source_tool, external_id).
+Reports the problems Zabbix currently holds unresolved, not the events raised
+since the last poll — the same "report current state, let the backend
+deduplicate" contract every collector here follows. Read `event.get` with
+`time_from` as the tempting alternative and understand why it is wrong: it
+offers each event in exactly one poll window, so a trigger that fired before
+collection first ran stays invisible for as long as it remains open, any
+outage longer than the look-back leaves a permanent hole, and an ingest that
+fails loses that incident for good. Current state has none of those failure
+modes. A problem that stays open re-reports every pass under its event id,
+which is stable for the life of the problem, and the backend collapses the
+repeats on (source_tool, external_id).
 
-`problem.get` returns the trigger in `objectid` and rejects `selectHosts`, so
-the hosts behind the problems are resolved with one follow-up `trigger.get`.
+Two API details drive the shape of this module, both verified against Zabbix
+7.0 and neither obvious from the method name:
+
+  * `problem.get` rejects `selectHosts`. It names the trigger in `objectid`
+    instead, so the hosts have to be fetched separately with `trigger.get`.
+  * `suppressed` marks a problem silenced by a maintenance window. Those are
+    dropped: somebody deliberately declared that outage uninteresting, and
+    surfacing it anyway would put planned work into the availability figures.
 """
 
 import logging

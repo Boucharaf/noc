@@ -1,5 +1,5 @@
 """
-Nagios collector — `statusjson.cgi?query=hostlist` (cahier des charges §6.2).
+Nagios collector — `statusjson.cgi?query=hostlist`.
 
 Auth: Basic (NAGIOS_USER/NAGIOS_PASSWORD) and/or an X-Auth-Token header
 (NAGIOS_API_KEY). This polls current host *status* rather than an event log,

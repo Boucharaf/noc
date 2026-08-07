@@ -19,9 +19,22 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 
 def hash_pin(pin: str) -> str:
-    # Fast, deterministic hash so a quick-login PIN can be looked up directly
-    # (a short numeric PIN doesn't warrant adaptive/salted hashing — see §10.1
-    # and the note on dim_user.pin_hash in database/01_schema.sql).
+    """Hash a quick-login PIN for direct lookup by hash.
+
+    Unsalted SHA-256, unlike hash_password above, which uses bcrypt. This is
+    a real weakening and worth understanding before reusing the pattern: the
+    keyspace of a short numeric PIN is small enough to enumerate completely in
+    well under a second, so anyone who obtains dim_user.pin_hash recovers every
+    PIN, and identical PINs are visible as identical hashes. It is accepted
+    here only because the PIN is a convenience credential for shift handover on
+    a shared NOC console — a second factor for someone already physically at
+    the console, never the sole protection on an account.
+
+    Two consequences follow. Do not let a PIN stand in for the password on any
+    path that matters, and if PINs ever become longer, user-chosen, or reused
+    from another system, replace this with a salted adaptive hash and the
+    lookup-by-hash that depends on it.
+    """
     return hashlib.sha256(pin.encode()).hexdigest()
 
 

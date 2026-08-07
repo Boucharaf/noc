@@ -47,8 +47,11 @@ const useAlertSocket = () => {
   }, [token, queryClient]);
 };
 
-// WebSocket push (spec §8.1) with 15s polling kept as fallback for environments
-// where the /ws upgrade is blocked.
+// WebSocket push, with 15s polling deliberately kept alongside it rather than
+// as a replacement: corporate proxies and older reverse-proxy configurations
+// silently refuse the /ws upgrade, and a NOC wall display that quietly stopped
+// updating is worse than one that updates a little late. The poll is cheap and
+// the socket makes it redundant when it works.
 export const useOpenAlerts = (limit = 20) => {
   useAlertSocket();
   return useQuery({
