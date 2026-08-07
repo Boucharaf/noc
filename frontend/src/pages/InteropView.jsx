@@ -1,5 +1,13 @@
 import React from "react";
-import { Activity, Link2, LifeBuoy, Radar, Server, Zap } from "lucide-react";
+import {
+  Activity,
+  AlertTriangle,
+  Link2,
+  LifeBuoy,
+  Radar,
+  Server,
+  Zap,
+} from "lucide-react";
 import Card from "../components/Card";
 import TrendLine from "../components/charts/TrendLine";
 import { useInteropStatus, useKpiTrend } from "../hooks/useKPI";
@@ -91,14 +99,32 @@ const ToolCard = ({ tool, entry }) => {
   );
 };
 
+// Distinguishes "the collectors reported nothing" from "we could not ask".
+// Reporting the first when the second is true sends whoever is on shift to
+// restart a worker that was never the problem.
+const requestFailureDetail = (error) => {
+  const code = error?.response?.status;
+  if (code === 404) return "Endpoint /api/interop/status introuvable (404).";
+  if (code === 401 || code === 403) return `Accès refusé (${code}).`;
+  if (code) return `Le serveur a répondu ${code}.`;
+  return "Le serveur est injoignable.";
+};
+
 const InteropView = () => {
-  const { data: status, isLoading } = useInteropStatus();
+  const { data: status, isLoading, isError, error } = useInteropStatus();
   const { data: trend } = useKpiTrend(6);
 
   const tools = status?.tools ?? [];
   const lastRun = status?.collected_at
     ? new Date(status.collected_at).toLocaleString("fr-FR")
     : null;
+
+  let subtitle = "Pipeline collecte → agrégation → ITSM → tableau de bord";
+  if (isError) subtitle = "Statut des collecteurs indisponible";
+  else if (!isLoading)
+    subtitle = lastRun
+      ? `Dernière collecte : ${lastRun}`
+      : "Aucune collecte récente — le collecteur est-il actif ?";
 
   return (
     <div className="flex min-h-full flex-col gap-4">
@@ -115,24 +141,33 @@ const InteropView = () => {
             className="text-sm"
             style={{ color: "var(--color-text-secondary)" }}
           >
-            {isLoading
-              ? "Pipeline collecte → agrégation → ITSM → tableau de bord"
-              : lastRun
-                ? `Dernière collecte : ${lastRun}`
-                : "Aucune collecte récente — le collecteur est-il actif ?"}
+            {subtitle}
           </p>
         </div>
       </div>
 
-      {/* Five cards, so the column counts are chosen to avoid a row with a
-          single orphan: 2 gives 2+2+1, 3 gives 3+2, 5 gives one full row. */}
-      <div className="grid shrink-0 grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-        {tools
-          .filter((entry) => TOOLS[entry.tool])
-          .map((entry) => (
-            <ToolCard key={entry.tool} tool={entry.tool} entry={entry} />
-          ))}
-      </div>
+      {isError ? (
+        // Say plainly that the question could not be asked. Rendering an empty
+        // grid here would read as "no tools configured", which is a different
+        // fault with a different fix.
+        <Card icon={AlertTriangle} title="Statut des collecteurs indisponible">
+          <p className="text-sm" style={{ color: "var(--color-text-secondary)" }}>
+            {requestFailureDetail(error)} L&apos;état des intégrations ne peut
+            pas être vérifié — les outils ci-dessous peuvent aussi bien
+            fonctionner qu&apos;être en panne.
+          </p>
+        </Card>
+      ) : (
+        // Five cards, so the column counts are chosen to avoid a row with a
+        // single orphan: 2 gives 2+2+1, 3 gives 3+2, 5 gives one full row.
+        <div className="grid shrink-0 grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+          {tools
+            .filter((entry) => TOOLS[entry.tool])
+            .map((entry) => (
+              <ToolCard key={entry.tool} tool={entry.tool} entry={entry} />
+            ))}
+        </div>
+      )}
 
       <Card
         title="Disponibilité globale agrégée"

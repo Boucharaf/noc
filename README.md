@@ -26,6 +26,7 @@
 - [Progressive Web App & Push Notifications](#progressive-web-app--push-notifications)
 - [API Documentation](#api-documentation)
 - [Demo Data & ETL Collection](#demo-data--etl-collection)
+- [Collector status](#collector-status)
 - [Further Documentation](#further-documentation)
 - [Contributing](#contributing)
 
@@ -617,6 +618,7 @@ require a JWT; see [Authentication](#authentication) for roles and rate limits):
 | GET | `/api/alerts/open` | Open/acknowledged alerts, oldest first |
 | GET | `/api/locality/{id}/nodes` | Node detail for one locality |
 | GET | `/api/kpi/localities/map` | Every locality with coordinates + KPIs, for the map |
+| GET | `/api/interop/status` | Live state of each supervision-tool collector + incidents raised per tool |
 | POST | `/api/incidents/ingest` | Webhook ingestion (requires `Authorization: Bearer $NOC_API_KEY`) |
 | PATCH | `/api/incidents/{id}/acknowledge` | Mark acknowledged (roles: `admin`, `noc_agent`) |
 | PATCH | `/api/incidents/{id}/resolve` | Resolve an incident (roles: `admin`, `noc_agent`) |
@@ -657,6 +659,27 @@ The database ships with a generated demo dataset so the dashboard is fully inter
 - The same Celery beat also runs two **scheduled jobs**:
   - `etl.refresh_kpi_view` — nightly at **02:00**, `REFRESH MATERIALIZED VIEW CONCURRENTLY mv_kpi_node_monthly`.
   - `etl.generate_monthly_report` — on the **1st of each month at 02:30**, downloads the previous month's report (PDF + DOCX) and archives it in the `reports` Docker volume (`/reports` inside `etl-worker`).
+- Every pass records its own outcome. The worker writes the per-tool result to a Redis key with a TTL of three intervals, and `GET /api/interop/status` serves it to the **Interopérabilité** tab — see [Collector status](#collector-status).
+
+---
+
+## Collector status
+
+The **Interopérabilité** tab reports what each collector is actually doing, rather than asserting that the integrations work. `GET /api/interop/status` combines two things the dashboard cannot get from one place: the ETL worker's last collection pass, and the incidents raised this month **grouped by the tool that reported them** (`fact_incident.source_tool` — not `dim_node.source_tool`, which records the tool nominally responsible for a node and legitimately disagrees).
+
+Each of the five tools reports one of:
+
+| State | Meaning |
+|---|---|
+| `ok` | The tool answered and everything fetched was ingested |
+| `degraded` | The tool answered, but some incidents failed to reach the backend |
+| `error` | The collector could not complete — the supervision API's own error is carried in `detail` |
+| `not_configured` | No `*_API_URL` is set, so the collector never ran |
+| `unknown` | No status published within the key's lifetime — the worker is stopped or unreachable |
+
+Only `ok` is shown in green. The status key expires after three poll intervals, so a worker that dies leaves the page reporting `unknown` rather than continuing to display its last successful pass as though it were current — a stale green badge is worse than no badge, because it is believed. For the same reason the endpoint is **not cached**: serving liveness from a five-minute cache reintroduces exactly the lag that makes a status display untrustworthy.
+
+This is also the quickest way to diagnose a tool that has stopped producing incidents — expired credentials surface here as `error` with the API's own message, instead of only in `docker compose logs etl-worker`.
 
 ---
 
