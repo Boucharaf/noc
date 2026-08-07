@@ -113,10 +113,17 @@ dropped. Severity map: Zabbix 0–5 → `low, low, medium, medium, high, critica
 (e.g. `https://nagios.anptic.bf/nagios`; the collector appends
 `/cgi-bin/statusjson.cgi`). Auth: Basic (`NAGIOS_USER`/`NAGIOS_PASSWORD`)
 and/or `NAGIOS_API_KEY` sent as `X-Auth-Token` (spec §6.2). Polls **current
-host status**: state `4` (DOWN) → `critical`, `8` (UNREACHABLE) → `high`.
-Because status (not an event log) is polled, a host that stays down is
-re-reported each pass with the stable id `nagios-{host}-down` — deduplicated
-by the backend.
+host status** with `details=true`: state `4` (DOWN) → `critical`, `8`
+(UNREACHABLE) → `high`. Because status (not an event log) is polled, a host
+that stays down is re-reported each pass with the stable id
+`nagios-{host}-down` — deduplicated by the backend. `details=true` also
+supplies `last_state_change`, which dates the outage from when Nagios saw it
+rather than from when we polled (otherwise a host already down when collection
+starts loses all its earlier downtime from the KPIs), and `plugin_output` for
+the description. Older servers that ignore `details` return the bare status
+code and fall back to the poll time and a generic label. Nagios exposes no
+host address here, so matching is **by name only** — name hosts after their
+node code.
 
 **NetXMS** — set `NETXMS_API_URL` to the REST API v1 base (`http://netxms:8000`
 for the container in this stack, or e.g. `http://netxms.anptic.bf:8000` for an
