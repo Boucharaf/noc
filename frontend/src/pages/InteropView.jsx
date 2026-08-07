@@ -124,7 +124,9 @@ const InteropView = () => {
         </div>
       </div>
 
-      <div className="grid shrink-0 grid-cols-1 gap-4 md:grid-cols-3 xl:grid-cols-5">
+      {/* Five cards, so the column counts are chosen to avoid a row with a
+          single orphan: 2 gives 2+2+1, 3 gives 3+2, 5 gives one full row. */}
+      <div className="grid shrink-0 grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
         {tools
           .filter((entry) => TOOLS[entry.tool])
           .map((entry) => (
