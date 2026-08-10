@@ -96,25 +96,91 @@ CREATE INDEX idx_incident_month ON fact_incident(
 CREATE INDEX idx_node_locality ON dim_node(locality_id);
 CREATE INDEX idx_locality_region ON dim_locality(region_id);
 
+-- Monthly KPIs per node.
+--
+-- Availability is measured from how long the node was actually down during the
+-- month, which is not the same thing as the incidents raised during it:
+--
+--   * An outage that is still open counts. The earlier version summed
+--     downtime_minutes, which is only written when an incident is resolved, so
+--     a node down since 2024 contributed nothing and the dashboard reported
+--     100% availability next to a thousand open incidents.
+--   * An outage counts against every month it spans, clipped to that month,
+--     not only the month it was detected in.
+--   * Overlapping incidents on one node count once. Summing per-incident
+--     downtime double-counts a node with several concurrent alarms, and a
+--     node with 27 of them would otherwise report negative availability.
+--     range_agg unions the intervals first.
+--   * The denominator is the elapsed part of the month, not a flat 30 days,
+--     so the current month is not diluted by the days that have not happened.
+--
+-- total_incidents / resolved / avg_mttr keep their original meaning: incidents
+-- *detected* in that month. A node-month can therefore hold 0 incidents and
+-- still show degraded availability — that is an outage which started earlier
+-- and has not been cleared.
 CREATE MATERIALIZED VIEW mv_kpi_node_monthly AS
+WITH span AS (
+  SELECT
+    i.id, i.node_id, i.status, i.mttr_minutes, i.detected_at,
+    TSRANGE(
+      i.detected_at,
+      CASE
+        WHEN i.status IN ('open', 'acknowledged')
+          THEN GREATEST(NOW()::TIMESTAMP, i.detected_at)
+        ELSE GREATEST(COALESCE(i.resolved_at, i.detected_at), i.detected_at)
+      END,
+      '[)'
+    ) AS outage
+  FROM fact_incident i
+),
+node_month AS (
+  SELECT DISTINCT s.node_id, m AS month
+  FROM span s,
+  LATERAL GENERATE_SERIES(
+    DATE_TRUNC('month', LOWER(s.outage)),
+    DATE_TRUNC('month', UPPER(s.outage)),
+    INTERVAL '1 month'
+  ) AS m
+),
+unioned AS (
+  SELECT nm.node_id, nm.month,
+         RANGE_AGG(s.outage * TSRANGE(nm.month, nm.month + INTERVAL '1 month', '[)')) AS outages
+  FROM node_month nm
+  JOIN span s
+    ON s.node_id = nm.node_id
+   AND s.outage && TSRANGE(nm.month, nm.month + INTERVAL '1 month', '[)')
+  GROUP BY 1, 2
+),
+downtime AS (
+  SELECT u.node_id, u.month,
+         COALESCE(SUM(EXTRACT(EPOCH FROM (UPPER(o) - LOWER(o))) / 60.0), 0) AS total_downtime
+  FROM unioned u, LATERAL UNNEST(u.outages) o
+  GROUP BY 1, 2
+)
 SELECT
-  DATE_TRUNC('month', i.detected_at)  AS month,
+  nm.month,
   n.id                               AS node_id,
   n.code, n.name, n.source_tool,
   l.id                               AS locality_id,
   l.name                             AS locality,
   r.name                             AS region,
   COUNT(i.id)                        AS total_incidents,
-  COUNT(CASE WHEN i.status='resolved' THEN 1 END) AS resolved,
+  COUNT(i.id) FILTER (WHERE i.status IN ('resolved', 'closed')) AS resolved,
   AVG(i.mttr_minutes)                AS avg_mttr,
-  SUM(i.downtime_minutes)            AS total_downtime,
-  100.0 - (SUM(i.downtime_minutes)::FLOAT
-    / (24.0*60*30)*100)              AS availability_pct
-FROM fact_incident i
-JOIN dim_node n ON i.node_id = n.id
+  COALESCE(d.total_downtime, 0)::INTEGER AS total_downtime,
+  GREATEST(0, 100.0 - COALESCE(d.total_downtime, 0) / GREATEST(
+    EXTRACT(EPOCH FROM (
+      LEAST(nm.month + INTERVAL '1 month', NOW()::TIMESTAMP) - nm.month
+    )) / 60.0, 1) * 100)             AS availability_pct
+FROM node_month nm
+JOIN dim_node n ON n.id = nm.node_id
 JOIN dim_locality l ON n.locality_id = l.id
 JOIN dim_region r ON l.region_id = r.id
-GROUP BY 1,2,3,4,5,6,7,8
+LEFT JOIN downtime d ON d.node_id = nm.node_id AND d.month = nm.month
+LEFT JOIN fact_incident i
+       ON i.node_id = nm.node_id
+      AND DATE_TRUNC('month', i.detected_at) = nm.month
+GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, d.total_downtime
 WITH DATA;
 
 CREATE UNIQUE INDEX ON mv_kpi_node_monthly(month, node_id);
