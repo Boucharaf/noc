@@ -47,16 +47,26 @@ def _rows_to_alerts(rows) -> list[dict]:
     return result
 
 
-def get_open_alerts(db: Session, limit: int = 20) -> list[dict]:
+def get_open_alerts(
+    db: Session, limit: int = 20, locality_id: int | None = None
+) -> list[dict]:
+    """Oldest-first open/acknowledged alerts, optionally for one locality.
+
+    `locality_id` is what makes the map's side panel possible: the global feed
+    is a top-N across the whole network, and with ~1450 open incidents a
+    locality's own alerts would almost never appear in it.
+    """
+    query = (
+        select(*_ALERT_COLUMNS)
+        .join(Node, Incident.node_id == Node.id)
+        .join(Locality, Node.locality_id == Locality.id)
+        .where(Incident.status.in_(("open", "acknowledged")))
+    )
+    if locality_id is not None:
+        query = query.where(Locality.id == locality_id)
+
     rows = (
-        db.execute(
-            select(*_ALERT_COLUMNS)
-            .join(Node, Incident.node_id == Node.id)
-            .join(Locality, Node.locality_id == Locality.id)
-            .where(Incident.status.in_(("open", "acknowledged")))
-            .order_by(Incident.detected_at.asc())
-            .limit(limit)
-        )
+        db.execute(query.order_by(Incident.detected_at.asc()).limit(limit))
         .mappings()
         .all()
     )

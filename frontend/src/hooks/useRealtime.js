@@ -52,11 +52,13 @@ const useAlertSocket = () => {
 // silently refuse the /ws upgrade, and a NOC wall display that quietly stopped
 // updating is worse than one that updates a little late. The poll is cheap and
 // the socket makes it redundant when it works.
-export const useOpenAlerts = (limit = 20) => {
+export const useOpenAlerts = (limit = 20, localityId = null) => {
   useAlertSocket();
   return useQuery({
-    queryKey: ['alerts', 'open', limit],
-    queryFn: () => alertsApi.getOpenAlerts(limit),
+    // localityId is part of the key so the map's per-locality panel does not
+    // read the global feed's cached rows (and vice versa).
+    queryKey: ['alerts', 'open', limit, localityId],
+    queryFn: () => alertsApi.getOpenAlerts(limit, localityId),
     refetchInterval: POLL_INTERVAL_MS,
   });
 };

@@ -1,7 +1,11 @@
 import apiClient from "./client";
 
-export const getOpenAlerts = (limit = 20) =>
-  apiClient.get("/alerts/open", { params: { limit } }).then((r) => r.data);
+export const getOpenAlerts = (limit = 20, localityId = null) =>
+  apiClient
+    .get("/alerts/open", {
+      params: { limit, ...(localityId ? { locality_id: localityId } : {}) },
+    })
+    .then((r) => r.data);
 
 export const getRecentNotifications = (limit = 10) =>
   apiClient.get("/alerts/recent", { params: { limit } }).then((r) => r.data);

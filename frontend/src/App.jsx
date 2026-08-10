@@ -9,6 +9,7 @@ import Header from "./components/layout/Header";
 import TabNav from "./components/layout/TabNav";
 import GlobalView from "./pages/GlobalView";
 import LocalityView from "./pages/LocalityView";
+import MapView from "./pages/MapView";
 import SLAView from "./pages/SLAView";
 import InteropView from "./pages/InteropView";
 import DataModelView from "./pages/DataModelView";
@@ -33,6 +34,7 @@ const DashboardShell = () => {
           <Route path="/" element={<Navigate to="/global" replace />} />
           <Route path="/global" element={<GlobalView />} />
           <Route path="/locality" element={<LocalityView />} />
+          <Route path="/map" element={<MapView />} />
           <Route path="/sla" element={<SLAView />} />
           <Route path="/interop" element={<InteropView />} />
           <Route path="/datamodel" element={<DataModelView />} />

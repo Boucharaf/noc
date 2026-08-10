@@ -249,6 +249,7 @@ def get_localities_map(db: Session, month: int, year: int) -> list[dict]:
         .mappings()
         .all()
     )
+    open_counts = get_open_counts_by_locality(db)
 
     return [
         {
@@ -263,9 +264,40 @@ def get_localities_map(db: Session, month: int, year: int) -> list[dict]:
                 round(float(r["avg_mttr"]), 1) if r["avg_mttr"] is not None else None
             ),
             "availability_pct": round(float(r["availability_pct"]), 1),
+            "open_by_severity": open_counts.get(r["locality_id"], {}),
+            "open_total": sum(open_counts.get(r["locality_id"], {}).values()),
         }
         for r in rows
     ]
+
+
+def get_open_counts_by_locality(db: Session) -> dict[int, dict[str, int]]:
+    """{locality_id: {severity: open incident count}} for right now.
+
+    Served alongside the monthly figures on the map so severity filtering is a
+    client-side sum rather than a request per toggle. It is deliberately *not*
+    month-scoped: "what is broken now" is the question a map answers, and an
+    outage that started in June is still broken in August.
+    """
+    rows = (
+        db.execute(
+            select(
+                Node.locality_id,
+                Incident.severity,
+                func.count().label("n"),
+            )
+            .select_from(Incident)
+            .join(Node, Incident.node_id == Node.id)
+            .where(Incident.status.in_(("open", "acknowledged")))
+            .group_by(Node.locality_id, Incident.severity)
+        )
+        .mappings()
+        .all()
+    )
+    counts: dict[int, dict[str, int]] = {}
+    for r in rows:
+        counts.setdefault(r["locality_id"], {})[r["severity"]] = int(r["n"])
+    return counts
 
 
 def get_nodes(
