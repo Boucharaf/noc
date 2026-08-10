@@ -57,7 +57,9 @@ def _month_aggregates(db: Session, period_start: date):
                 func.coalesce(func.sum(mv.total_incidents), 0).label("total_incidents"),
                 func.coalesce(func.sum(mv.resolved), 0).label("resolved"),
                 func.coalesce(func.avg(mv.avg_mttr), 0).label("avg_mttr"),
-                func.coalesce(func.avg(mv.availability_pct), 100).label("availability_pct"),
+                func.coalesce(func.avg(mv.availability_pct), 100).label(
+                    "availability_pct"
+                ),
             ).where(mv.month == period_start)
         )
         .mappings()
@@ -74,7 +76,9 @@ def get_summary(db: Session, month: int, year: int) -> dict:
                 func.coalesce(func.sum(mv.total_incidents), 0).label("total_incidents"),
                 func.coalesce(func.sum(mv.resolved), 0).label("resolved"),
                 func.coalesce(func.avg(mv.avg_mttr), 0).label("avg_mttr"),
-                func.coalesce(func.avg(mv.availability_pct), 100).label("availability_pct"),
+                func.coalesce(func.avg(mv.availability_pct), 100).label(
+                    "availability_pct"
+                ),
                 func.count(distinct(mv.locality_id))
                 .filter(mv.availability_pct < CRITICAL_AVAILABILITY_THRESHOLD)
                 .label("critical_localities"),
@@ -184,8 +188,11 @@ def get_localities(db: Session, month: int, year: int, limit: int = 10) -> list[
             .join(Locality, Locality.id == mv.locality_id)
             .where(mv.month == period_start)
             .group_by(
-                mv.locality_id, mv.locality, mv.region,
-                Locality.latitude, Locality.longitude,
+                mv.locality_id,
+                mv.locality,
+                mv.region,
+                Locality.latitude,
+                Locality.longitude,
             )
             .order_by(desc("total_incidents"))
             .limit(limit)
@@ -232,7 +239,9 @@ def get_localities_map(db: Session, month: int, year: int) -> list[dict]:
                 func.coalesce(func.sum(mv.total_incidents), 0).label("total_incidents"),
                 func.coalesce(func.sum(mv.resolved), 0).label("resolved"),
                 func.avg(mv.avg_mttr).label("avg_mttr"),
-                func.coalesce(func.avg(mv.availability_pct), 100).label("availability_pct"),
+                func.coalesce(func.avg(mv.availability_pct), 100).label(
+                    "availability_pct"
+                ),
             )
             .select_from(Locality)
             .join(Region, Region.id == Locality.region_id)
@@ -241,8 +250,11 @@ def get_localities_map(db: Session, month: int, year: int) -> list[dict]:
             )
             .where(Locality.latitude.isnot(None), Locality.longitude.isnot(None))
             .group_by(
-                Locality.id, Locality.name, Region.name,
-                Locality.latitude, Locality.longitude,
+                Locality.id,
+                Locality.name,
+                Region.name,
+                Locality.latitude,
+                Locality.longitude,
             )
             .order_by(desc("total_incidents"))
         )
@@ -309,8 +321,15 @@ def get_nodes(
 ) -> list[dict]:
     period_start = month_start(month, year)
     stmt = select(
-        mv.node_id, mv.code, mv.name, mv.source_tool, mv.locality,
-        mv.total_incidents, mv.resolved, mv.avg_mttr, mv.availability_pct,
+        mv.node_id,
+        mv.code,
+        mv.name,
+        mv.source_tool,
+        mv.locality,
+        mv.total_incidents,
+        mv.resolved,
+        mv.avg_mttr,
+        mv.availability_pct,
     ).where(mv.month == period_start)
     if locality_id is not None:
         stmt = stmt.where(mv.locality_id == locality_id)
@@ -340,6 +359,15 @@ def get_nodes(
     ]
 
 
+# A node is "flapping" when it produces many short episodes rather than one
+# long outage. Both shapes land in the recurrent list with the same incident
+# count, and they call for opposite responses: a flapping link needs the link
+# fixed, a chronic one needs someone sent to the site. 15 minutes is well above
+# a poll interval (so a genuine short outage is not mislabelled) and well below
+# any outage worth dispatching for.
+FLAPPING_MAX_AVG_MINUTES = 15
+
+
 def get_recurrent_nodes(
     db: Session, month: int, year: int, min_count: int = 3
 ) -> list[dict]:
@@ -353,17 +381,50 @@ def get_recurrent_nodes(
         .mappings()
         .all()
     )
+    if not rows:
+        return []
 
-    return [
-        {
-            "node_id": r["node_id"],
-            "code": r["code"],
-            "name": r["name"],
-            "locality": r["locality"],
-            "total_incidents": int(r["total_incidents"]),
-        }
-        for r in rows
-    ]
+    # Mean episode length per node. An unresolved incident is measured to now,
+    # the same convention mv_kpi_node_monthly uses for availability — otherwise
+    # a node that is simply still down would read as a 0-minute episode.
+    ongoing = func.extract("epoch", func.now() - Incident.detected_at) / 60
+    durations = {
+        r["node_id"]: r["avg_minutes"]
+        for r in db.execute(
+            select(
+                Incident.node_id,
+                func.avg(func.coalesce(Incident.downtime_minutes, ongoing)).label(
+                    "avg_minutes"
+                ),
+            )
+            .where(
+                Incident.node_id.in_([r["node_id"] for r in rows]),
+                func.date_trunc("month", Incident.detected_at) == period_start,
+            )
+            .group_by(Incident.node_id)
+        )
+        .mappings()
+        .all()
+    }
+
+    result = []
+    for r in rows:
+        avg_minutes = durations.get(r["node_id"])
+        avg_minutes = round(float(avg_minutes), 1) if avg_minutes is not None else None
+        result.append(
+            {
+                "node_id": r["node_id"],
+                "code": r["code"],
+                "name": r["name"],
+                "locality": r["locality"],
+                "total_incidents": int(r["total_incidents"]),
+                "avg_duration_minutes": avg_minutes,
+                "flapping": (
+                    avg_minutes is not None and avg_minutes < FLAPPING_MAX_AVG_MINUTES
+                ),
+            }
+        )
+    return result
 
 
 def get_trend(db: Session, month: int, year: int, months: int = 6) -> list[dict]:
