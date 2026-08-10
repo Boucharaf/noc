@@ -57,7 +57,12 @@ through a client-supplied one, or the limit is trivially evaded.
 | Scope | Limit | Env var |
 |---|---|---|
 | All read endpoints (KPI/SLA/alerts/locality/report, shared budget) | 100 req/min | `RATE_LIMIT_READ_PER_MIN` |
-| `POST /api/incidents/ingest` | 10 req/min | `RATE_LIMIT_INGEST_PER_MIN` |
+| `POST /api/incidents/ingest` **and** `/ingest/bulk` | 10 req/min | `RATE_LIMIT_INGEST_PER_MIN` |
+
+Both ingest paths share that budget, and a bulk call costs **one** unit
+regardless of how many incidents it carries. That is the point of it: a real
+active set (NetXMS reports ~1450 alarms per pass) sent one at a time would need
+145 minutes of quota per five-minute poll.
 
 Exceeding a limit returns `429` with a `Retry-After: 60` header. Limiting is
 **fail-open** (a Redis outage lets requests through) and can be disabled
@@ -313,6 +318,70 @@ are set (`backend/app/services/push_service.py`, see
 (ticket/SMS-email/push) fail independently and silently from the webhook
 caller's perspective — failures are logged, never surfaced or retried inline.
 
+### `POST /api/incidents/ingest/bulk`
+
+Batch counterpart to `/ingest`, for a collector reporting its **whole active
+set** in one call.
+
+**Auth**: `Authorization: Bearer $NOC_API_KEY`
+
+Request body — up to 5000 incidents, each the same shape as `/ingest`:
+
+```json
+{
+  "incidents": [
+    { "external_id": "netxms-alarm-466905", "source_tool": "netxms", "node_code": "NXMS-0837",
+      "severity": "critical", "detected_at": "2026-08-10T11:06:13Z",
+      "description": "Node down", "cause_category": "Connectivité", "cause_label": "Nœud hors service" }
+  ]
+}
+```
+
+Response (`200 OK`):
+
+```json
+{ "received": 1453, "created": 6, "duplicates": 1447, "unknown_node": 0, "resolved": 4 }
+```
+
+| Field | Meaning |
+|---|---|
+| `created` | new incidents written |
+| `duplicates` | already open with that `(source_tool, external_id)` — no write |
+| `unknown_node` | `node_code` not in `dim_node` — counted and skipped, not a 404 |
+| `resolved` | open incidents **closed** because this batch no longer carries them |
+
+#### How it differs from `/ingest`
+
+|  | `/ingest` | `/ingest/bulk` |
+|---|---|---|
+| Rate-limit cost | 1 unit per incident | 1 unit per batch |
+| DB commits / MV refreshes | 1 per incident | 1 per batch |
+| Broadcast, SMS, email, push | **yes** | **no** |
+| Alerts absent from the payload | ignored | **resolved** |
+| Unknown `node_code` | `404` | counted in `unknown_node` |
+
+Two behaviours that are easy to get wrong:
+
+- **The batch is a snapshot, not an append.** Anything open for that
+  `source_tool` and missing from the payload is treated as recovered and
+  resolved. ⚠️ **Posting a partial batch resolves incidents that are still
+  live.**
+- **It notifies nobody, deliberately.** NetXMS alone reports ~1450 active
+  alarms per pass, ~1000 of them critical; notifying per item would page the
+  permanence a thousand times for a backlog it already knows about. Anything
+  that must reach a human on arrival belongs on `/ingest`.
+
+**Empty batches never reconcile.** An empty active set is indistinguishable
+from a collector that authenticated and returned nothing, so it resolves
+nothing. Treating it as "the whole network recovered" would close every open
+incident for the tool, and the next poll would re-create them as *new*
+incidents detected now — destroying the real start times and every MTTR
+derived from them.
+
+Side effects: creates cause rows as needed, one `mv_kpi_node_monthly` refresh
+(when `SYNC_MV_REFRESH=true`) and one `kpi:*` cache invalidation for the whole
+batch, both only when something was created or resolved.
+
 ### `PATCH /api/incidents/{incident_id}/resolve`
 
 **Auth**: JWT bearer — roles `admin` or `noc_agent` (`403` for `analyst`)
@@ -345,8 +414,14 @@ All under `/api/auth`.
 
 Body: `{ "username": "admin", "password": "admin123" }`
 
-Returns `{ access_token, token_type: "bearer", user: {id, username, full_name, role} }`.
+Returns `{ access_token, token_type: "bearer", expires_in, user: {id, username, full_name, role} }`.
 `401` with `"Identifiants invalides"` on bad credentials or inactive user.
+
+`expires_in` is the token's lifetime in seconds
+(`ACCESS_TOKEN_EXPIRE_MINUTES × 60`, default 1800). It is sent explicitly so a
+client can renew ahead of expiry without parsing the JWT — the lifetime is
+server policy, and a client reading it out of the token would keep following a
+stale copy of that policy after any change.
 
 ### `POST /api/auth/pin-login`
 
@@ -356,6 +431,25 @@ Same response shape as `/login`. Looked up by SHA-256 hash of the PIN
 (`dim_user.pin_hash`), not by iterating users — see
 [database-schema.md](database-schema.md) for why. `401` with `"Code PIN invalide"`
 on no match.
+
+### `POST /api/auth/refresh`
+
+**Auth**: JWT bearer. Exchanges a **still-valid** token for a fresh one; same
+response shape as `/login`. `401` if the token is missing, invalid or already
+expired.
+
+This makes the session sliding: it stays alive while somebody is using the
+dashboard and still lapses `ACCESS_TOKEN_EXPIRE_MINUTES` after the last
+activity. The frontend calls it from
+`frontend/src/hooks/useSessionKeepAlive.js` once the token is within 5 minutes
+of expiring — checked every minute and on `visibilitychange`, since a
+backgrounded tab throttles timers enough to let a session lapse unnoticed.
+
+Renewal runs off the access token itself rather than a separate long-lived
+refresh token, so **an expired session cannot be revived** — an unattended
+console ends up logged out, which is the intent. Simply raising
+`ACCESS_TOKEN_EXPIRE_MINUTES` would buy the same convenience by leaving a
+long-lived bearer token in `localStorage`.
 
 ### `GET /api/auth/me`
 

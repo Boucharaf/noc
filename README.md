@@ -19,6 +19,7 @@
   - [3. Run with Docker (Recommended)](#3-run-with-docker-recommended)
   - [4. Run Locally (Development)](#4-run-locally-development)
 - [Services & Ports](#services--ports)
+  - [First-run setup of the bundled tools](#first-run-setup-of-the-bundled-tools)
 - [Supervision Map](#supervision-map)
 - [Authentication](#authentication)
 - [Branding: Logo & Favicon](#branding-logo--favicon)
@@ -26,6 +27,8 @@
 - [Progressive Web App & Push Notifications](#progressive-web-app--push-notifications)
 - [API Documentation](#api-documentation)
 - [Demo Data & ETL Collection](#demo-data--etl-collection)
+- [Loading the real CMDB](#loading-the-real-cmdb)
+- [Incident lifecycle](#incident-lifecycle)
 - [Collector status](#collector-status)
 - [Further Documentation](#further-documentation)
 - [Contributing](#contributing)
@@ -206,19 +209,26 @@ noc/
 │       │   ├── charts/           # Chart.js-based chart components (theme-aware)
 │       │   ├── map/              # BurkinaFasoMap (Leaflet/OSM) + LocalityBulletList
 │       │   └── layout/           # Header (incl. push-notification bell toggle), TabNav
-│       ├── hooks/                # useKPI, useRealtime, useChartTheme, useClock, usePushNotifications
+│       ├── hooks/                # useKPI, useRealtime, useChartTheme, useClock, usePushNotifications, useSessionKeepAlive
+│       ├── utils/                # format.js — shared display formatters (incident age)
 │       ├── pages/                # Login + dashboard views (Global, Localities, SLA, Interop, Data Model)
-│       └── store/                # Zustand stores: period, theme, auth (persisted)
+│       └── store/                # Zustand stores: period, theme, auth (persisted, incl. session expiry)
 │
 └── etl/                          # Collector + scheduled jobs service (see "Demo Data & ETL Collection" below)
     ├── celery_app.py              # Celery app + beat schedule: collect_incident (every ETL_COLLECT_INTERVAL_S),
     │                              #   refresh_kpi_view (daily 02:00), generate_monthly_report (1st of month, 02:30)
-    ├── config.py                  # DB DSN / broker URL / API URL / REPORTS_DIR helpers
+    ├── config.py                  # DB DSN / broker URL / API URL / REPORTS_DIR helpers (+ netxms_dsn for the geography rebuild)
     ├── pipelines/                 # collector.py (loads active nodes), tasks.py (the Celery tasks)
     ├── extract/                   # Real per-tool collectors (Zabbix JSON-RPC, Nagios statusjson, NetXMS REST, Centreon REST v2)
-    ├── transform/                 # Normalizes collected events into the ingest payload shape
-    └── load/                      # Posts incidents to /api/incidents/ingest; downloads monthly reports
+    ├── transform/                 # normalize.py (ingest payload shape) + causes.py (cause taxonomy & classifier)
+    ├── load/                      # Posts incidents to /api/incidents/ingest{,/bulk}; downloads monthly reports
+    ├── provision_netxms_nodes.py  # One-off: create dim_node rows from the NetXMS inventory
+    ├── provision_itop_nodes.py    # One-off: create dim_node rows from iTop's open tickets
+    └── rebuild_geography.py       # One-off: swap the seeded dimensions for the real ANPTIC reference data
 ```
+
+The three one-off scripts are dry-run by default and take `--apply` to write —
+see [Loading the real CMDB](#loading-the-real-cmdb).
 
 Two containers run this image: `etl-beat` (Celery scheduler) and `etl-worker`
 (Celery worker) — see [docs/architecture.md](docs/architecture.md).
@@ -284,6 +294,14 @@ CENTREON_API_URL=http://centreon/centreon/api/latest
 CENTREON_USER=admin
 CENTREON_PASSWORD=your_centreon_password
 CENTREON_API_KEY=
+
+# ── NetXMS database ──────────────────────────────────────
+# Used by the netxms-db container, and read directly by
+# etl/rebuild_geography.py — the ANPTIC administrative reference tables
+# (donnebase) are not exposed by the NetXMS REST API. Collectors do not use it.
+NETXMS_DB_NAME=netxms
+NETXMS_DB_USER=netxms
+NETXMS_DB_PASSWORD=your_netxms_db_password
 
 # ── Webhook auth ─────────────────────────────────────────
 # Static bearer key supervision tools (Centreon/Zabbix) must send when
@@ -454,10 +472,44 @@ After starting the project, the following services are available:
 | **API Docs (Swagger)** | http://localhost:8000/docs | Interactive API documentation |
 | **API Docs (ReDoc)** | http://localhost:8000/redoc | Alternative API documentation |
 | **Zabbix** | http://localhost:8081 | Bundled Zabbix 7.0 UI — default login `Admin` / `zabbix` |
-| **iTop** | http://localhost:8082 | Bundled iTop 3.2 (ITSM/CMDB) — one-time setup wizard on first start |
+| **iTop** | http://localhost:8082 | Bundled iTop 3.2 (ITSM/CMDB) — one-time setup on first start, see below |
+| **NetXMS web console** | http://localhost:8086 | Bundled NetXMS console (`admin` / `$NETXMS_PASSWORD`) |
+| **Centreon** | http://localhost:8084 | Bundled Centreon central UI |
 | **Nagios** | http://localhost:8083 | Bundled Nagios Core — login `$NAGIOS_USER` / `$NAGIOS_PASSWORD` |
 
 > **Note:** The frontend (`:3000`) and backend (`:8000`) ports are exposed directly for debugging and bypass TLS entirely. Only the NGINX gateway enforces HTTPS.
+
+### First-run setup of the bundled tools
+
+**iTop** ships uninstalled. Until its setup completes there is no
+`conf/production/config-itop.php`, and `webservices/rest.php` answers **HTTP 500
+to every operation** — which the ETL reports as
+`500 Server Error … /webservices/rest.php`. Either walk the wizard at
+http://localhost:8082, or install it unattended:
+
+```bash
+docker compose exec -u www-data -w /var/www/html/setup/unattended-install itop \
+  php unattended-install.php --param-file=/path/to/response.xml \
+  --installation_xml=/var/www/html/datamodels/2.x/installation.xml
+```
+
+Two traps: the response file's `selected_extensions` is **ignored unless
+`--installation_xml` is passed** (without it the compile dies with
+`Missing unique tag: groups`), and the collector queries the `Incident` class,
+which only exists in the **ITIL** module set (`itop-ticket-mgmt-itil-incident`)
+— the non-ITIL default has `UserRequest` only. A failed run also leaves
+`data/.maintenance` and `data/.readonly` behind, which make the retry print
+only "This application is currently under maintenance"; delete both first.
+
+Afterwards the API user still needs iTop's **REST Services User** profile —
+`secure_rest_services` is on by default and being an Administrator does not
+imply it, so calls return `code: 1, "…profile REST Services User is required"`.
+
+**NetXMS** uses a PostGIS-enabled database image
+(`postgis/postgis:15-3.5-alpine`, a drop-in for `postgres:15` on the same
+PGDATA). The ANPTIC reference data carries geometry columns that will not
+restore without the extension — see
+[Loading the real CMDB](#loading-the-real-cmdb).
 
 ### HTTPS / TLS
 
@@ -486,6 +538,8 @@ The "Vue Globale" and "Vue par Localité" tabs render a real **Leaflet + OpenStr
 - **Markers**: colored by availability (green ≥97%, amber 90–97%, red <90%), sized by incident volume (`sqrt` scale), with a pulsing ring on critical ones. Hover for a tooltip, click to select.
 - **Dark mode**: OSM only publishes one (light) cartography, so dark mode applies a CSS filter (`invert + hue-rotate + contrast`) scoped to just the tile pane in `index.css` (`.leaflet-dark-map .leaflet-tile-pane`) — markers/popups are on a separate pane and stay unaffected.
 - **Stacking**: the map wrapper uses `isolate z-0` so Leaflet's internal z-indexes (up to 1000) can't paint over the sticky header/tab bar while scrolling.
+- **Sizing**: the map fills its card but never shrinks below `MIN_HEIGHT` (280px). That floor is a **`min-height`, not a `height`** — the wrapper is a flex item with `flex-1` (`flex-basis: 0%`), and flex-basis overrides the `height` property, so a height set there is silently ignored and the box collapses to whatever space is left over. The pages that host it carry matching row floors (`min-h-[380px]` on Vue Globale, `min-h-[520px]` on Vue par Localité, which stacks the map *and* the locality list); `Card` does not clip, so a row shorter than its content paints the map straight through the card below.
+- **Resize handling**: Leaflet measures its container once at mount and afterwards only listens for **window** resizes, so a card reflowing around it leaves the map drawing at a stale size. An `InvalidateOnResize` child watches the container with a `ResizeObserver` and calls `map.invalidateSize()` (rAF-coalesced).
 - **Attribution**: the default "Leaflet | © OpenStreetMap" control is disabled (`attributionControl={false}`) for a cleaner internal-dashboard look. ⚠️ Tiles still come from the free `tile.openstreetmap.org` servers, whose [usage policy](https://operations.osmfoundation.org/policies/tiles/) requires visible attribution — restore the credit or switch to a self-hosted/commercial tile provider before any public deployment.
 - **Scroll-zoom gating**: the map requires one click before the scroll wheel zooms it (with a fading hint chip), so scrolling the dashboard page over the map doesn't get hijacked into zooming it — a standard embedded-map pattern.
 - **Bounded**: `maxBounds`/`minZoom`/`maxZoom` keep panning/zooming scoped to Burkina Faso.
@@ -514,7 +568,22 @@ Demo accounts (seeded by `database/generate_seed.py`):
 
 The frontend stores the JWT in `localStorage` (zustand `persist`, see
 `frontend/src/store/auth.js`) and attaches it to every API call via an axios
-request interceptor; a 401 response anywhere logs the session out.
+request interceptor; a 401 response anywhere logs the session out and the login
+screen explains why ("Session expirée") rather than appearing unprompted.
+
+**The session slides.** The token lives `ACCESS_TOKEN_EXPIRE_MINUTES` (default
+30), and `frontend/src/hooks/useSessionKeepAlive.js` exchanges it for a fresh
+one via `POST /api/auth/refresh` once it is within 5 minutes of expiring —
+checked every minute and whenever the tab becomes visible again, since a
+backgrounded tab throttles timers hard enough to let a session lapse unnoticed.
+A dashboard someone is watching stays logged in; one left unattended still
+lapses 30 minutes after the last activity.
+
+Renewal deliberately runs off the access token itself rather than a separate
+long-lived refresh token: an already-expired session cannot be revived, which
+is the intended end state for an abandoned console. Raising
+`ACCESS_TOKEN_EXPIRE_MINUTES` instead would buy the same convenience by leaving
+a long-lived bearer token sitting in `localStorage`.
 
 **Every endpoint requires authentication**: read endpoints
 (KPI/SLA/alerts/report) accept any logged-in user's JWT, the ingest webhook
@@ -619,12 +688,14 @@ require a JWT; see [Authentication](#authentication) for roles and rate limits):
 | GET | `/api/locality/{id}/nodes` | Node detail for one locality |
 | GET | `/api/kpi/localities/map` | Every locality with coordinates + KPIs, for the map |
 | GET | `/api/interop/status` | Live state of each supervision-tool collector + incidents raised per tool |
-| POST | `/api/incidents/ingest` | Webhook ingestion (requires `Authorization: Bearer $NOC_API_KEY`) |
+| POST | `/api/incidents/ingest` | Webhook ingestion, one incident (requires `Authorization: Bearer $NOC_API_KEY`) |
+| POST | `/api/incidents/ingest/bulk` | Batch ingestion — a poller's whole active set in one call (same API key) |
 | PATCH | `/api/incidents/{id}/acknowledge` | Mark acknowledged (roles: `admin`, `noc_agent`) |
 | PATCH | `/api/incidents/{id}/resolve` | Resolve an incident (roles: `admin`, `noc_agent`) |
 | GET | `/api/report/monthly` | Monthly report, `format=json`, `pdf` or `docx` (JWT **or** API key) |
-| POST | `/api/auth/login` | Username/password login → JWT |
-| POST | `/api/auth/pin-login` | 4-digit PIN quick login → JWT |
+| POST | `/api/auth/login` | Username/password login → JWT + `expires_in` |
+| POST | `/api/auth/pin-login` | 4-digit PIN quick login → JWT + `expires_in` |
+| POST | `/api/auth/refresh` | Exchange a still-valid JWT for a fresh one (sliding session) |
 | GET | `/api/auth/me` | Current user (session restore) |
 | GET | `/api/notifications/vapid-public-key` | The server's VAPID public key (frontend uses it as `applicationServerKey`) |
 | POST | `/api/notifications/subscribe` | Register this device's Web Push subscription for the current user |
@@ -641,6 +712,30 @@ subscribed device (`backend/app/services/push_service.py`, when
 `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY` are set — see
 [Progressive Web App & Push Notifications](#progressive-web-app--push-notifications)).
 
+### `/ingest` vs `/ingest/bulk`
+
+The two ingestion paths differ in more than batching, and picking the wrong one
+is consequential:
+
+| | `/ingest` | `/ingest/bulk` |
+|---|---|---|
+| Payload | one incident | the poller's **whole** active set |
+| Rate-limit cost | 1 unit per incident | 1 unit per batch |
+| Broadcast / SMS / email / push | **yes** | **no** |
+| Missing alerts | ignored | **resolved** (treated as recovered) |
+
+`/ingest` is for webhooks — a single event that has just happened and may need
+to reach a human. `/ingest/bulk` is for a collector reconciling state: it is a
+snapshot, so anything absent from it is closed (see
+[Incident lifecycle](#incident-lifecycle)), and it deliberately notifies nobody.
+NetXMS alone reports ~1450 active alarms per pass, ~1000 of them critical —
+sending those one at a time would exhaust the 10/min ingest quota in the first
+six and page the permanence a thousand times for a backlog it already knows
+about.
+
+> ⚠️ **Post partial batches to `/ingest/bulk` and you will resolve incidents
+> that are still live.** Only send a complete active set.
+
 ---
 
 ## Demo Data & ETL Collection
@@ -648,6 +743,11 @@ subscribed device (`backend/app/services/push_service.py`, when
 The database ships with a generated demo dataset so the dashboard is fully interactive out of the box — no real Zabbix/Nagios/Centreon/iTop instance required:
 
 - **13 regions**, **14 localities**, **~157 nodes** across Burkina Faso, **6 months of incidents**, and the 3 demo user accounts (see [Authentication](#authentication)) — all in `database/02_seed.sql`, produced by `database/generate_seed.py`.
+
+> **Running against real data?** The demo dimensions are fictional and sit in
+> the same tables as anything you collect. `etl/rebuild_geography.py` replaces
+> them with the real ANPTIC reference data and deletes the demo facts — see
+> [Loading the real CMDB](#loading-the-real-cmdb).
 - On a **fresh** Postgres volume, `01_schema.sql` then `02_seed.sql` run automatically via `docker-entrypoint-initdb.d`. To regenerate the dataset or force a reseed:
   ```bash
   python3 database/generate_seed.py   # rewrites database/02_seed.sql
@@ -655,11 +755,115 @@ The database ships with a generated demo dataset so the dashboard is fully inter
   docker volume rm noc_pgdata         # drops the existing DB so init scripts re-run
   docker compose up -d
   ```
-- The **`etl` service** runs **real collectors** (no simulation): every `ETL_COLLECT_INTERVAL_S` (default 5 min) it polls each supervision tool whose `*_API_URL` is configured — Zabbix (JSON-RPC `problem.get`), Nagios (`statusjson.cgi`), NetXMS (REST alarms), Centreon (REST v2 resources) — maps each alert onto a `dim_node` (by code, then name, then IP), and POSTs it to `/api/incidents/ingest`. Tools without an endpoint are skipped; one unreachable tool never blocks the others. Re-reported still-open alerts are deduplicated by the backend on `(source_tool, external_id)`. **To integrate: just set the tool's `*_API_URL` + credentials in `.env` and restart `etl-worker`** — see [docs/integrations.md](docs/integrations.md).
+- The **`etl` service** runs **real collectors** (no simulation): every `ETL_COLLECT_INTERVAL_S` (default 5 min) it polls each supervision tool whose `*_API_URL` is configured — Zabbix (JSON-RPC `problem.get`), Nagios (`statusjson.cgi`), NetXMS (REST alarms), Centreon (REST v2 resources) — maps each alert onto a `dim_node` (by code, then name, then IP), and POSTs the whole pass to `/api/incidents/ingest/bulk` in **one request per tool**. Tools without an endpoint are skipped; one unreachable tool never blocks the others. Re-reported still-open alerts are deduplicated on `(source_tool, external_id)`, and alerts the tool has stopped reporting are resolved — see [Incident lifecycle](#incident-lifecycle). **To integrate: just set the tool's `*_API_URL` + credentials in `.env` and restart `etl-worker`** — see [docs/integrations.md](docs/integrations.md).
+- **Alarm-source identity is cached across polls** (`NETXMS_OBJECT_CACHE_TTL_S`, default 24h, in Redis). NetXMS's `/v1/objects` lists only root containers, so each distinct alarm source otherwise costs its own HTTP request *every* pass — ~1180 per poll on the ANPTIC instance. With the cache a steady-state pass makes **4** requests instead of 1173. See [docs/integrations.md](docs/integrations.md).
+- **Not every alert is a host.** On the ANPTIC NetXMS instance roughly one alarm source in eight is a `BusinessService` rather than a `Node`; those are skipped silently (`HOST_CLASSES` in `etl/extract/netxms.py`) instead of being reported as unprovisioned hosts on every pass.
+- **Causes are classified from the alert text** (`etl/transform/causes.py`): the taxonomy is what the tools actually observe — "Nœud injoignable (ICMP)", "Interface hors service" — not root cause, which belongs on the iTop ticket where a human owns it. Text nothing matches stays uncategorised rather than being forced into an "Autre" bucket that would quietly become the largest cause on the dashboard.
 - The same Celery beat also runs two **scheduled jobs**:
   - `etl.refresh_kpi_view` — nightly at **02:00**, `REFRESH MATERIALIZED VIEW CONCURRENTLY mv_kpi_node_monthly`.
   - `etl.generate_monthly_report` — on the **1st of each month at 02:30**, downloads the previous month's report (PDF + DOCX) and archives it in the `reports` Docker volume (`/reports` inside `etl-worker`).
 - Every pass records its own outcome. The worker writes the per-tool result to a Redis key with a TTL of three intervals, and `GET /api/interop/status` serves it to the **Interopérabilité** tab — see [Collector status](#collector-status).
+
+---
+
+## Loading the real CMDB
+
+Collectors match each alert to a `dim_node` by code, name or IP. The seeded
+nodes are fictional and share no names with real infrastructure, so against a
+real supervision tool **every alert is skipped as unmatched and nothing is
+ingested** until the CMDB holds the real hosts. Three scripts populate it. All
+live in `etl/` and run inside the worker:
+
+| Script | What it does |
+|---|---|
+| `provision_netxms_nodes.py` | Creates `dim_node` rows for every host in the NetXMS inventory |
+| `provision_itop_nodes.py` | Same, for the hosts iTop's open tickets reference |
+| `rebuild_geography.py` | Replaces the seeded regions/localities/causes with the real reference data and deletes the demo facts |
+
+```bash
+# Dry run first — both print the full plan and change nothing
+docker compose exec etl-worker python provision_netxms_nodes.py
+docker compose exec etl-worker python provision_netxms_nodes.py --apply
+
+docker compose exec etl-worker python rebuild_geography.py
+docker compose exec etl-worker python rebuild_geography.py --apply
+```
+
+Both are idempotent and safe to re-run — `provision_*` skips hosts already in
+`dim_node`, and `rebuild_geography` rebuilds the dimensions from scratch each
+time.
+
+**Where the geography comes from.** NetXMS records a postal address per node,
+so localities are read from the data rather than guessed from a name prefix.
+`rebuild_geography.py` resolves each node through the real administrative
+chain — `object_properties.siteadmin_id → siteadministratif → ville → commune →
+province → limiteregion` — and falls back to matching the node's postal city
+against a ville name. Regions are the **2025 découpage** (17 regions), labelled
+with their former name (`Bankui (ex-Boucle du Mouhoun)`) because node addresses
+still carry the pre-reform names. Localities get their coordinates from
+`ST_Centroid(ville.geom)`; a locality with no coordinates does not appear on
+the map.
+
+Hosts whose location the inventory does not record land in a
+`Siège / infrastructure centrale` fallback locality, shared by both
+provisioning scripts so the dashboard never grows two different "unknown"
+buckets.
+
+> This reference data lives in the NetXMS database (`donnebase` schema), not
+> behind its REST API — which is why `rebuild_geography.py` is the one piece of
+> the ETL that reads a supervision tool's database directly (`NETXMS_DB_*` in
+> `docker-compose.yml`). Collectors still go through the API.
+
+---
+
+## Incident lifecycle
+
+Supervision tools report **current state**, not events: an alert that clears
+simply stops being listed, and nothing ever announces that it ended. So each
+collection pass is a reconciliation, not an append —
+`/api/incidents/ingest/bulk` compares the batch against what is open and:
+
+| In the batch | Already open in the DB | Result |
+|---|---|---|
+| ✅ | ❌ | **created** |
+| ✅ | ✅ | ignored (idempotent — the same alert re-reported) |
+| ❌ | ✅ | **resolved** — the alert cleared |
+
+Deduplication and reconciliation both key on `(source_tool, external_id)`, so a
+still-open problem re-reported every 5 minutes writes nothing.
+
+**Empty batches never reconcile.** An empty active set is indistinguishable
+from a collector that authenticated and returned nothing, and treating it as
+"the whole network recovered" would close every open incident for that tool —
+the next poll would then re-create them as *new* incidents detected now,
+destroying the real start times and every MTTR derived from them. A genuine
+all-clear is picked up by the next pass carrying at least one alert.
+
+### Availability
+
+`mv_kpi_node_monthly.availability_pct` measures **how long the node was
+actually down**, which is not the same as the incidents raised:
+
+- **Outages that are still open count.** Downtime is measured to `NOW()` while
+  an incident is unresolved. (The obvious implementation — summing
+  `downtime_minutes`, which is only written on resolution — reports 100%
+  availability next to a thousand open incidents.)
+- **An outage counts against every month it spans**, clipped to that month, not
+  only the month it was detected in.
+- **Overlapping incidents on one node count once.** `RANGE_AGG` unions the
+  intervals; summing them would let a node with 27 concurrent alarms report
+  negative availability.
+- **The denominator is the elapsed part of the month**, so the current month is
+  not diluted by days that have not happened yet.
+
+`total_incidents` / `resolved` / `avg_mttr` keep their plain meaning —
+incidents *detected* in that month. A node-month can therefore show 0 incidents
+and still show degraded availability: an outage that started earlier and has
+not cleared.
+
+> Requires PostgreSQL 14+ for multirange support. `database/01_schema.sql` only
+> runs on a fresh volume — an **existing** database needs the view dropped and
+> recreated by hand to pick up a change to it.
 
 ---
 

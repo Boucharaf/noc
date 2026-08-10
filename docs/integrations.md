@@ -19,11 +19,14 @@ via `.env`:
 | Nagios | http://localhost:8083 | `http://nagios/cgi-bin/statusjson.cgi` | `$NAGIOS_USER` / `$NAGIOS_PASSWORD` |
 | NetXMS | http://localhost:8086 (nxmc web console) | `http://netxms:8000` (REST v1) | `admin` / `$NETXMS_PASSWORD` |
 | Centreon | http://localhost:8084/centreon | `http://centreon/centreon/api/latest` (REST v2) | `admin` / `$CENTREON_PASSWORD` |
-| iTop | http://localhost:8082 | — (standalone ITSM/CMDB tool, no backend integration) | created in setup wizard |
+| iTop | http://localhost:8082 | `http://itop/webservices/rest.php?version=1.0` (REST/JSON, read-only) | created during setup |
 
-iTop requires a **one-time setup wizard** on first start (DB server
-`localhost`, login `admin`, password `$ITOP_DB_PASSWORD`); it ships purely as
-a standalone tool in the stack. NetXMS publishes no official Docker image, so
+iTop requires a **one-time setup** on first start (DB server `localhost`,
+login `admin`, password `$ITOP_DB_PASSWORD`) — until it completes, every REST
+call answers HTTP 500 and the collector reports that verbatim. See
+[First-run setup of the bundled tools](../README.md#first-run-setup-of-the-bundled-tools)
+for the unattended install, the ITIL module requirement and the
+**REST Services User** profile the API account needs. NetXMS publishes no official Docker image, so
 its image is built from `backend/docker-images/netxms` (see the README there);
 `$NETXMS_PASSWORD` is applied to the built-in `admin` account the first time
 the schema is created, and the Web API is also exposed on
@@ -67,6 +70,7 @@ accordingly.
 | **Nagios** | `statusjson.cgi?query=hostlist` | **Implemented** (`etl/extract/nagios.py`) | `NAGIOS_API_URL`, `NAGIOS_USER`/`NAGIOS_PASSWORD` and/or `NAGIOS_API_KEY` |
 | **NetXMS** | REST API v1: `POST /v1/login` → bearer token, then `/v1/alarms` + `/v1/objects` | **Implemented** (`etl/extract/netxms.py`) | `NETXMS_API_URL`, `NETXMS_USER`, `NETXMS_PASSWORD` |
 | **Centreon** | REST v2 `/monitoring/resources` + inbound webhook | **Implemented** (`etl/extract/centreon.py`) | `CENTREON_API_URL`, `CENTREON_USER`/`CENTREON_PASSWORD` or `CENTREON_API_KEY` |
+| **iTop** | REST/JSON `core/get` on `Incident`, HTTP Basic, **read-only** | **Implemented** (`etl/extract/itop.py`) | `ITOP_API_URL`, `ITOP_USER`, `ITOP_PASSWORD` |
 | **Twilio (SMS)** | REST API (`Messages.json`) | **Implemented** (`backend/app/services/notification_service.py`) | `NOTIFICATIONS_ENABLED`, `TWILIO_*`, `NOC_SMS_RECIPIENTS` |
 | **SMTP (email)** | SMTP + STARTTLS | **Implemented** (same service) | `SMTP_*`, `NOC_EMAIL_RECIPIENTS` |
 | **Web Push (browser/PWA)** | Web Push protocol, VAPID-signed | **Implemented** (`backend/app/services/push_service.py`) | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_CLAIMS_EMAIL` |
@@ -82,11 +86,18 @@ seconds (default **300**, the contracted reporting granularity). Each pass:
    cursor is kept: every pass sees current state, so a missed pass, a failed
    ingest or a worker restart costs nothing — the next pass reports the same
    problems and the backend deduplicates them.
-3. Normalizes each event (`transform/normalize.py`) and POSTs it to
-   `POST /api/incidents/ingest` with the static `NOC_API_KEY`.
-4. Failures are **isolated per tool** — an unreachable Zabbix never blocks
-   Nagios collection. Each pass logs `[tool] fetched=N ingested=M` and returns
-   a per-tool stats dict (visible in `docker compose logs etl-worker`).
+3. Classifies a cause from the alert text (`transform/causes.py`), normalizes
+   each event (`transform/normalize.py`), and POSTs the tool's **whole active
+   set in one request** to `POST /api/incidents/ingest/bulk` with the static
+   `NOC_API_KEY`.
+4. The backend treats that batch as a snapshot: new alerts are created,
+   re-reported ones are ignored, and **alerts the tool has stopped reporting
+   are resolved**. This is the only signal a cleared alert ever produces — see
+   [Incident lifecycle](../README.md#incident-lifecycle).
+5. Failures are **isolated per tool** — an unreachable Zabbix never blocks
+   Nagios collection. Each pass logs `[tool] fetched=N ingested=M resolved=R`
+   and returns a per-tool stats dict (visible in
+   `docker compose logs etl-worker`).
 
 If **no** tool is configured, the task logs "nothing to collect" and exits —
 the dashboard then only shows seeded/historical data and whatever arrives by
@@ -145,6 +156,35 @@ logged, and skipped like any other unprovisioned host). Alarm `state` 2 (termina
 severity 0–4 (NORMAL…CRITICAL) maps to `low, medium, medium, high, critical`,
 with NORMAL alarms also ignored. Alarm ids are stable → deduplicated while
 active.
+
+Not every alarm source is a host: on the ANPTIC instance roughly one distinct
+source in eight is a `BusinessService`. Those can never match a `dim_node`, so
+they are dropped **silently** (`HOST_CLASSES` in `etl/extract/netxms.py`) —
+warning about them would tell the operator to provision something
+unprovisionable, on every pass, for as long as the service stays down.
+
+**Object identity is cached across polls.** Because `/v1/objects` returns only
+the root containers, every distinct alarm source otherwise costs its own GET on
+every pass — ~1180 requests each five minutes on the ANPTIC instance, ~340k a
+day, all to re-read names and IPs that essentially never change. The resolved
+`(name, IP, class)` is therefore stored in Redis under
+`noc:netxms:object:{id}` for `NETXMS_OBJECT_CACHE_TTL_S` (default 24h):
+
+| | Requests per pass | Duration |
+|---|---|---|
+| Cold cache (first pass after a redeploy) | 1173 | 2.5s |
+| Warm cache (steady state) | **4** | 1.0s |
+
+Redis rather than a process-local dict because the worker runs with
+concurrency 2 and would otherwise keep one cache per process, discarded on
+every restart. Only successful resolutions are cached — storing a failure would
+let one transient error hide a host for the whole TTL. A Redis outage or a
+corrupted entry falls back to the HTTP lookup and re-caches the correct value,
+so the cache can never make a poll fail.
+
+> The trade: a node renamed or re-addressed in NetXMS keeps its previous
+> identity here for up to the TTL, which only affects how it matches a
+> `dim_node`. Lower `NETXMS_OBJECT_CACHE_TTL_S` if your inventory churns.
 
 **Centreon** — set `CENTREON_API_URL` to the v2 API base
 (`http://centreon/centreon/api/latest` for the container in this stack, or
