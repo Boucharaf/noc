@@ -160,6 +160,13 @@ Same shape as above, but returns **every** locality with coordinates —
 including ones with zero incidents this month — so the supervision map never
 has a "missing" node. Feeds `BurkinaFasoMap.jsx`.
 
+Each row also carries `open_by_severity` (`{critical, high, medium, low}`,
+omitting severities with no open incidents) and `open_total`. Unlike the other
+figures on this endpoint these are **not month-scoped**: they count what is
+open right now, because an outage that started in June is still an outage in
+August. The Carte tab filters on them client-side, which is why they ship with
+the map data rather than behind their own endpoint.
+
 ### `GET /api/kpi/nodes`
 
 Top nodes by incident count, optionally scoped to a locality.
@@ -269,6 +276,13 @@ always `null` — kept in the response shape for future use, but nothing
 populates it today.
 
 ---
+
+**Query params**: `limit` (1–100, default 20), `locality_id` (optional).
+
+`locality_id` restricts the feed to one locality — what the Carte tab's side
+panel uses. Without it the endpoint is a top-N across the whole network, and
+with ~1450 incidents open a given town's alerts would almost never appear in
+it.
 
 ## Incidents endpoints
 

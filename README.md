@@ -21,6 +21,7 @@
 - [Services & Ports](#services--ports)
   - [First-run setup of the bundled tools](#first-run-setup-of-the-bundled-tools)
 - [Supervision Map](#supervision-map)
+  - [The Carte tab](#the-carte-tab)
 - [Authentication](#authentication)
 - [Branding: Logo & Favicon](#branding-logo--favicon)
 - [Integrations](#integrations)
@@ -211,7 +212,7 @@ noc/
 │       │   └── layout/           # Header (incl. push-notification bell toggle), TabNav
 │       ├── hooks/                # useKPI, useRealtime, useChartTheme, useClock, usePushNotifications, useSessionKeepAlive
 │       ├── utils/                # format.js — shared display formatters (incident age)
-│       ├── pages/                # Login + dashboard views (Global, Localities, SLA, Interop, Data Model)
+│       ├── pages/                # Login + dashboard views (Global, Localities, Carte, SLA, Interop, Data Model)
 │       └── store/                # Zustand stores: period, theme, auth (persisted, incl. session expiry)
 │
 └── etl/                          # Collector + scheduled jobs service (see "Demo Data & ETL Collection" below)
@@ -533,7 +534,7 @@ For a real deployment, replace `nginx/certs/*` with a certificate from Let's Enc
 
 ## Supervision Map
 
-The "Vue Globale" and "Vue par Localité" tabs render a real **Leaflet + OpenStreetMap** map of Burkina Faso (`frontend/src/components/map/BurkinaFasoMap.jsx`), fed by `GET /api/kpi/localities/map` (every locality with coordinates, incident count, and availability for the selected month — unlike `/api/kpi/localities`, this one includes localities with zero incidents so the map never has "missing" nodes).
+The **Carte**, "Vue Globale" and "Vue par Localité" tabs all render a real **Leaflet + OpenStreetMap** map of Burkina Faso (`frontend/src/components/map/BurkinaFasoMap.jsx`), fed by `GET /api/kpi/localities/map` (every locality with coordinates, incident count, and availability for the selected month — unlike `/api/kpi/localities`, this one includes localities with zero incidents so the map never has "missing" nodes).
 
 - **Markers**: colored by availability (green ≥97%, amber 90–97%, red <90%), sized by incident volume (`sqrt` scale), with a pulsing ring on critical ones. Hover for a tooltip, click to select.
 - **Dark mode**: OSM only publishes one (light) cartography, so dark mode applies a CSS filter (`invert + hue-rotate + contrast`) scoped to just the tile pane in `index.css` (`.leaflet-dark-map .leaflet-tile-pane`) — markers/popups are on a separate pane and stay unaffected.
@@ -545,6 +546,36 @@ The "Vue Globale" and "Vue par Localité" tabs render a real **Leaflet + OpenStr
 - **Bounded**: `maxBounds`/`minZoom`/`maxZoom` keep panning/zooming scoped to Burkina Faso.
 - **`LocalityBulletList`** (the panel next to the map) is the same data as a plain clickable list — a table-view/keyboard-accessible companion to the map, not just decoration.
 - **Cross-page navigation**: clicking a marker or bullet in "Vue Globale" calls `navigate('/locality', { state: { localityId } })`; `LocalityView` reads that state to preselect the clicked locality (falling back to the busiest one if navigated to directly via the tab).
+
+### The Carte tab
+
+`frontend/src/pages/MapView.jsx` gives the map a page of its own, with the two
+things it cannot carry as a panel beside KPI cards: filters, and a
+click-through list of what is actually broken.
+
+- **Markers are sized by the incidents matching the filter**, not by the
+  month's total. The question this page answers is "what is broken *now*", so
+  an outage that started in June still counts, and a locality with nothing
+  matching is removed rather than drawn at zero.
+- **Severity chips and a region select**, both applied client-side. That is
+  why `/api/kpi/localities/map` also returns `open_by_severity` and
+  `open_total` per locality — filtering becomes a sum over data already in
+  hand instead of a request per toggle. Those counts are deliberately *not*
+  month-scoped, for the same reason the markers are not.
+- **Clicking a locality lists its own open incidents** — node code,
+  description, severity and age. `GET /api/alerts/open` takes a `locality_id`
+  for this: the unfiltered feed is a top-N across the whole network, and with
+  ~1450 incidents open a given town's alerts would almost never surface in it.
+
+The panel names both numbers it knows — *"79 affiché(s) · 159 au total"* —
+because they are genuinely different: the list is the oldest 100 rows the API
+will return, then filtered in the browser, while the total comes from the
+aggregate. A locality with more than 100 open incidents can therefore have
+matching ones outside the window; the second number is what tells you so.
+
+The selected locality is derived from the filtered set rather than stored, so
+the panel can never contradict the marker it came from when the filter
+changes. A selection that gets filtered out closes the panel.
 
 ---
 
@@ -684,9 +715,9 @@ require a JWT; see [Authentication](#authentication) for roles and rate limits):
 | GET | `/api/kpi/hour-distribution` | Incidents per hour of day (H24) |
 | GET | `/api/kpi/causes` | Incident breakdown by cause category |
 | GET | `/api/sla` | SLA indicators vs. targets |
-| GET | `/api/alerts/open` | Open/acknowledged alerts, oldest first |
+| GET | `/api/alerts/open` | Open/acknowledged alerts, oldest first (optional `locality_id` filter) |
 | GET | `/api/locality/{id}/nodes` | Node detail for one locality |
-| GET | `/api/kpi/localities/map` | Every locality with coordinates + KPIs, for the map |
+| GET | `/api/kpi/localities/map` | Every locality with coordinates + KPIs, plus `open_by_severity`/`open_total` for the Carte tab |
 | GET | `/api/interop/status` | Live state of each supervision-tool collector + incidents raised per tool |
 | POST | `/api/incidents/ingest` | Webhook ingestion, one incident (requires `Authorization: Bearer $NOC_API_KEY`) |
 | POST | `/api/incidents/ingest/bulk` | Batch ingestion — a poller's whole active set in one call (same API key) |
