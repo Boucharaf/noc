@@ -261,7 +261,7 @@ def get_localities_map(db: Session, month: int, year: int) -> list[dict]:
         .mappings()
         .all()
     )
-    open_counts = get_open_counts_by_locality(db)
+    severity_counts = get_severity_counts_by_locality(db, period_start)
 
     return [
         {
@@ -276,20 +276,25 @@ def get_localities_map(db: Session, month: int, year: int) -> list[dict]:
                 round(float(r["avg_mttr"]), 1) if r["avg_mttr"] is not None else None
             ),
             "availability_pct": round(float(r["availability_pct"]), 1),
-            "open_by_severity": open_counts.get(r["locality_id"], {}),
-            "open_total": sum(open_counts.get(r["locality_id"], {}).values()),
+            "by_severity": severity_counts.get(r["locality_id"], {}),
         }
         for r in rows
     ]
 
 
-def get_open_counts_by_locality(db: Session) -> dict[int, dict[str, int]]:
-    """{locality_id: {severity: open incident count}} for right now.
+def get_severity_counts_by_locality(
+    db: Session, period_start: date
+) -> dict[int, dict[str, int]]:
+    """{locality_id: {severity: incident count}} for one month.
 
-    Served alongside the monthly figures on the map so severity filtering is a
-    client-side sum rather than a request per toggle. It is deliberately *not*
-    month-scoped: "what is broken now" is the question a map answers, and an
-    outage that started in June is still broken in August.
+    Month-scoped, like every other figure the map carries, so the period picker
+    drives this page the same way it drives the rest of the dashboard. An
+    earlier version counted what was open *right now* instead, which read
+    sensibly on its own but left the picker apparently broken: the payload
+    reloaded on every month change and nothing on screen moved.
+
+    Served alongside the monthly aggregates so severity filtering stays a
+    client-side sum rather than a request per toggle.
     """
     rows = (
         db.execute(
@@ -300,7 +305,7 @@ def get_open_counts_by_locality(db: Session) -> dict[int, dict[str, int]]:
             )
             .select_from(Incident)
             .join(Node, Incident.node_id == Node.id)
-            .where(Incident.status.in_(("open", "acknowledged")))
+            .where(func.date_trunc("month", Incident.detected_at) == period_start)
             .group_by(Node.locality_id, Incident.severity)
         )
         .mappings()

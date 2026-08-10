@@ -67,3 +67,18 @@ export const availabilityColor = (pct) => {
   if (pct < 97) return STATUS.warning;
   return STATUS.good;
 };
+
+// What a map marker's colour means, per page. It travels with the palette
+// rather than the map component because it is colour policy, not rendering:
+// the KPI views colour by monthly availability, while the Carte tab colours by
+// the severity of what is open right now. Mixing the two is not cosmetic —
+// severity-coloured filter chips above availability-coloured markers made
+// ticking "Moyenne" (yellow) light up a map of red dots.
+export const AVAILABILITY_SCHEME = {
+  colorFor: (l) => availabilityColor(l.availability_pct),
+  legend: [
+    { color: availabilityColor(99), label: "Disponibilité ≥ 97%" },
+    { color: availabilityColor(93), label: "90–97%" },
+    { color: availabilityColor(80), label: "< 90%" },
+  ],
+};

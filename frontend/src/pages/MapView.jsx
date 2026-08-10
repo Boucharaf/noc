@@ -23,6 +23,21 @@ const PANEL_LIMIT = 100;
 
 const ALL_REGIONS = "all";
 
+// On this page the markers must mean the same thing as the filter chips above
+// them. Colouring by monthly availability instead made ticking "Moyenne"
+// (yellow) show a map of red dots, because 61 of 76 localities sit under 90%
+// availability whatever you filter on.
+const severityScheme = (severities) => ({
+  colorFor: (l) =>
+    SEVERITY_COLOR[
+      SEVERITIES.find((s) => severities.has(s) && (l.by_severity?.[s] ?? 0) > 0)
+    ] ?? SEVERITY_COLOR.low,
+  legend: SEVERITIES.filter((s) => severities.has(s)).map((s) => ({
+    color: SEVERITY_COLOR[s],
+    label: SEVERITY_LABEL[s],
+  })),
+});
+
 const MapView = () => {
   const { data: localities = [], isLoading } = useKpiLocalitiesMap();
   const [selectedId, setSelectedId] = useState(null);
@@ -39,16 +54,16 @@ const MapView = () => {
     [localities],
   );
 
-  // Markers are sized by the incidents that match the filter, not by the
-  // month's total — on this page the question is "what is broken now", so a
-  // locality with nothing matching is removed rather than drawn at zero.
+  // Markers are sized by the incidents matching the severity filter for the
+  // selected month, so the period picker drives this page like every other
+  // tab. A locality with nothing matching is removed rather than drawn at zero.
   const points = useMemo(
     () =>
       localities
         .map((l) => ({
           ...l,
           matching: SEVERITIES.filter((s) => severities.has(s)).reduce(
-            (sum, s) => sum + (l.open_by_severity?.[s] ?? 0),
+            (sum, s) => sum + (l.by_severity?.[s] ?? 0),
             0,
           ),
         }))
@@ -78,6 +93,7 @@ const MapView = () => {
     });
 
   const visibleAlerts = alerts.filter((a) => severities.has(a.severity));
+  const scheme = useMemo(() => severityScheme(severities), [severities]);
 
   return (
     <div className="flex min-h-full flex-col gap-4">
@@ -94,7 +110,7 @@ const MapView = () => {
             <p className="text-sm" style={{ color: "var(--color-text-secondary)" }}>
               {isLoading
                 ? "Chargement…"
-                : `${totalShown} incident(s) ouvert(s) sur ${points.length} localité(s)`}
+                : `${totalShown} incident(s) sur ${points.length} localité(s)`}
             </p>
           </div>
         </div>
@@ -152,20 +168,38 @@ const MapView = () => {
       <div className="grid min-h-[560px] flex-1 auto-rows-fr grid-cols-1 gap-4 lg:grid-cols-3">
         <Card
           title="Carte de Supervision"
-          subtitle="Taille = incidents filtrés · couleur = disponibilité"
+          subtitle="Taille = incidents filtrés · couleur = sévérité la plus haute"
           className="flex h-full flex-col lg:col-span-2"
           bodyClassName="flex min-h-0 flex-1 flex-col"
         >
-          <BurkinaFasoMap
-            localities={points}
-            selectedLocalityId={selectedId}
-            onSelect={setSelectedId}
-            minHeight={420}
-          />
+          {points.length === 0 && !isLoading ? (
+            // Silence here reads as a broken map. Your network currently has no
+            // "Faible" incidents at all, so ticking only that chip empties the
+            // map — say so rather than showing an empty country.
+            <div
+              className="flex min-h-[420px] flex-1 items-center justify-center rounded-lg border p-6 text-center text-sm"
+              style={{
+                borderColor: "var(--color-border)",
+                color: "var(--color-text-muted)",
+              }}
+            >
+              Aucun incident pour ce filtre.
+              <br />
+              Élargissez la sévérité ou la région.
+            </div>
+          ) : (
+            <BurkinaFasoMap
+              localities={points}
+              selectedLocalityId={selectedId}
+              onSelect={setSelectedId}
+              minHeight={420}
+              scheme={scheme}
+            />
+          )}
         </Card>
 
         <Card
-          title={selected ? selected.locality : "Incidents ouverts"}
+          title={selected ? selected.locality : "Incidents"}
           subtitle={
             selected
               ? selected.region
@@ -225,7 +259,7 @@ const MapView = () => {
                 className="p-5 text-sm"
                 style={{ color: "var(--color-text-muted)" }}
               >
-                Aucun incident ouvert pour ce filtre.
+                Aucun incident pour ce filtre.
               </p>
             )}
             {selected &&

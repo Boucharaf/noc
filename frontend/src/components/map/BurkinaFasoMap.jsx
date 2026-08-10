@@ -11,7 +11,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { MousePointerClick } from "lucide-react";
 import { useThemeStore } from "../../store/theme";
-import { availabilityColor } from "../../theme/colors";
+import { AVAILABILITY_SCHEME } from "../../theme/colors";
 
 // Bounding box around Burkina Faso (actual extent ~9.4–15.1N, -5.5–2.4E), padded
 // so panning stays regionally relevant instead of drifting into open ocean/desert.
@@ -67,6 +67,7 @@ const ScrollZoomGate = ({ onFocus }) => {
 // holds the floor; the page scrolls instead, which is the better trade.
 const MIN_HEIGHT = 280;
 
+
 // Leaflet measures its container once, at mount, and only re-measures on a
 // window resize. Every resize that matters here is a container one — the card
 // reflowing when data arrives, the KPI row wrapping, a panel expanding — and
@@ -98,6 +99,7 @@ const BurkinaFasoMap = ({
   selectedLocalityId,
   onSelect,
   minHeight = MIN_HEIGHT,
+  scheme = AVAILABILITY_SCHEME,
 }) => {
   const { theme } = useThemeStore();
   const [focused, setFocused] = useState(false);
@@ -115,10 +117,10 @@ const BurkinaFasoMap = ({
         .map((l) => ({
           ...l,
           r: radiusFor(l.total_incidents),
-          color: availabilityColor(l.availability_pct),
+          color: scheme.colorFor(l),
         })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [localities, maxIncidents],
+    [localities, maxIncidents, scheme],
   );
 
   return (
@@ -203,27 +205,15 @@ const BurkinaFasoMap = ({
         className="mt-3 flex shrink-0 flex-wrap items-center gap-4 text-xs"
         style={{ color: "var(--color-text-secondary)" }}
       >
-        <span className="flex items-center gap-1.5">
-          <span
-            className="inline-block h-2.5 w-2.5 rounded-full"
-            style={{ background: availabilityColor(100) }}
-          />
-          Disponibilité ≥ 97%
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span
-            className="inline-block h-2.5 w-2.5 rounded-full"
-            style={{ background: availabilityColor(93) }}
-          />
-          90–97%
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span
-            className="inline-block h-2.5 w-2.5 rounded-full"
-            style={{ background: availabilityColor(80) }}
-          />
-          &lt; 90%
-        </span>
+        {scheme.legend.map((entry) => (
+          <span key={entry.label} className="flex items-center gap-1.5">
+            <span
+              className="inline-block h-2.5 w-2.5 rounded-full"
+              style={{ background: entry.color }}
+            />
+            {entry.label}
+          </span>
+        ))}
         <span className="ml-auto">Taille = volume d'incidents</span>
       </div>
     </div>
