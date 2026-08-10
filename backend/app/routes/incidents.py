@@ -7,6 +7,8 @@ from app.db.session import get_db
 from app.models.user import User
 from app.schemas.incidents import (
     AcknowledgePayload,
+    IncidentBulkIngestPayload,
+    IncidentBulkIngestResponse,
     IncidentIngestPayload,
     IncidentIngestResponse,
     ResolvePayload,
@@ -91,6 +93,41 @@ def ingest_incident(
         shift=incident.shift,
         created_at=incident.created_at,
     )
+
+
+@router.post(
+    "/ingest/bulk",
+    response_model=IncidentBulkIngestResponse,
+    status_code=status.HTTP_200_OK,
+)
+def ingest_incidents_bulk(
+    payload: IncidentBulkIngestPayload,
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_api_key),
+    __: None = Depends(ingest_rate_limit),
+):
+    """Batch counterpart to /ingest, for a poller reconciling its whole active
+    set in one call.
+
+    Costs a single unit of the ingest rate limit, which is the point: the ETL
+    posts every active alarm on every pass, and at NetXMS's ~1500 that is
+    otherwise 150 minutes of quota per five-minute poll.
+
+    The batch is a snapshot, not an append: alerts it no longer carries are
+    treated as recovered and their incidents are resolved (see
+    incident_service.reconcile_open_incidents). Post partial batches here and
+    you will close incidents that are still live.
+
+    It does not broadcast or notify — see incident_service.ingest_incidents_bulk
+    for why. Anything that must reach a human on arrival belongs on /ingest.
+    """
+    result = incident_service.ingest_incidents_bulk(db, payload.incidents)
+    if result["created"] or result["resolved"]:
+        # Same invalidation /ingest does. Without it the dashboard keeps serving
+        # the KPIs cached before the batch — which is how a pass that resolved
+        # 190 incidents can still report a 0% resolution rate.
+        cache_service.invalidate_prefix("kpi:")
+    return result
 
 
 @router.patch("/{incident_id}/resolve", response_model=IncidentIngestResponse)

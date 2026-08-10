@@ -22,10 +22,15 @@ def collect_supervision(self):
     """
     One batch collection pass (every 5 minutes):
     ask every *configured* supervision tool which problems are open right now,
-    map each onto a dim_node, and POST them to /api/incidents/ingest. The
-    backend deduplicates on (source_tool, external_id), so re-reporting a
-    still-open problem is a no-op — which is what makes a missed pass, a failed
-    ingest or a worker restart cost nothing: the next pass sees the same state.
+    map each onto a dim_node, and POST them to /api/incidents/ingest/bulk — one
+    request per tool per pass. The backend deduplicates on
+    (source_tool, external_id), so re-reporting a still-open problem is a no-op
+    — which is what makes a missed pass, a failed ingest or a worker restart
+    cost nothing: the next pass sees the same state.
+
+    Note that the bulk endpoint does not notify: a pass reconciling a whole
+    active set must not page the permanence once per alarm. Single-incident
+    webhooks still arrive on /ingest and still notify.
 
     A tool is configured when its *_API_URL env var is set (see etl/config.py);
     tools without an endpoint are skipped. Failures are isolated per tool — one
@@ -60,14 +65,25 @@ def collect_supervision(self):
             stats[tool] = {"error": str(exc)}
             continue
 
-        ingested = 0
-        failed = 0
-        for event in events:
-            result = api_client.ingest_incident(to_ingest_payload(event))
-            if result is not None:
-                ingested += 1
-            else:
-                failed += 1
+        # One request for the whole pass. Posting incident-by-incident costs a
+        # unit of the ingest rate limit each, which a real active-alarm set
+        # (NetXMS reports ~1500) exhausts in the first six.
+        result = api_client.ingest_incidents_bulk(
+            [to_ingest_payload(event) for event in events]
+        )
+        if result is None:
+            ingested = 0
+            resolved = 0
+            failed = len(events)
+        else:
+            ingested = result["created"]
+            # Alerts the tool stopped reporting: the backend treats the batch as
+            # a snapshot and closes them.
+            resolved = result["resolved"]
+            # Already-open incidents are not failures: every collector
+            # re-reports its whole active set each pass, so on a steady system
+            # nearly every event is a duplicate of one already recorded.
+            failed = result["unknown_node"]
 
         # No cursor to hold back: every collector reports the problems that are
         # open right now, so whatever failed here is offered again next pass.
@@ -78,8 +94,19 @@ def collect_supervision(self):
                 failed,
                 len(events),
             )
-        stats[tool] = {"fetched": len(events), "ingested": ingested, "failed": failed}
-        logger.info("[%s] fetched=%d ingested=%d", tool, len(events), ingested)
+        stats[tool] = {
+            "fetched": len(events),
+            "ingested": ingested,
+            "resolved": resolved,
+            "failed": failed,
+        }
+        logger.info(
+            "[%s] fetched=%d ingested=%d resolved=%d",
+            tool,
+            len(events),
+            ingested,
+            resolved,
+        )
 
     publish_collector_status(stats)
 

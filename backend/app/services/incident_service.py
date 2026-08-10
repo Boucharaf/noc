@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import text
+from sqlalchemy import Integer, func, text, update
 from sqlalchemy.orm import Session
 
 from app.core.constants import SYNC_MV_REFRESH
@@ -104,6 +104,164 @@ def ingest_incident(db: Session, payload: IncidentIngestPayload) -> tuple[Incide
 
     refresh_kpi_view(db)
     return incident, True
+
+
+def reconcile_open_incidents(
+    db: Session, source_tool: str, active_external_ids: set[str]
+) -> int:
+    """Resolve incidents whose alert has disappeared from the tool's active set.
+
+    Batch collectors report what is wrong *right now*; an alert that clears
+    simply stops being listed, and nothing else ever tells us it ended. Without
+    this, incidents only accumulate: MTTR and resolution rate stay at zero
+    forever, and every availability figure is computed against outages that the
+    network recovered from months ago.
+
+    The active set is only trusted when it is non-empty. An empty one is
+    indistinguishable from a collector that authenticated but returned nothing,
+    and treating that as "the whole network recovered" would resolve every open
+    incident for the tool at once — losing the real start times, since the next
+    poll re-creates them as new incidents detected now. A genuine all-clear is
+    picked up by the next pass that carries at least one alert.
+
+    Incidents with no external_id are left alone: they cannot be matched
+    against the active set, so their absence from it means nothing.
+    """
+    if not active_external_ids:
+        return 0
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    result = db.execute(
+        update(Incident)
+        .where(
+            Incident.source_tool == source_tool,
+            Incident.status.in_(("open", "acknowledged")),
+            Incident.external_id.isnot(None),
+            Incident.external_id.notin_(active_external_ids),
+        )
+        .values(
+            status="resolved",
+            resolved_at=now,
+            # Never acknowledged by a human, but leaving it null would make the
+            # incident look unhandled forever in the alert views.
+            acknowledged_at=func.coalesce(Incident.acknowledged_at, now),
+            downtime_minutes=func.greatest(
+                func.floor(
+                    func.extract("epoch", now - Incident.detected_at) / 60
+                ).cast(Integer),
+                0,
+            ),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return result.rowcount or 0
+
+
+def ingest_incidents_bulk(
+    db: Session, payloads: list[IncidentIngestPayload]
+) -> dict[str, int]:
+    """Ingest a whole poll's worth of alerts in one transaction.
+
+    Same semantics as ingest_incident — dedupe on (source_tool, external_id)
+    against still-open incidents, create a cause when both parts are given —
+    but nothing per-item: one lookup per *set* of node codes, external ids and
+    causes, one commit, one materialized-view refresh at the end. Ingesting
+    NetXMS's ~1500 active alarms through ingest_incident means 1500 commits and
+    1500 REFRESH MATERIALIZED VIEW, which is what makes the one-by-one path
+    unusable at that size rather than merely slow.
+
+    Deliberately silent: no broadcast, no SMS, no email. This is the path for a
+    batch poller reconciling its whole active set, where the interesting event
+    is "here is everything that is wrong right now", not 1500 separate pieces of
+    news — notifying on each would page the permanence a thousand times for a
+    backlog it already knows about. Genuinely new incidents still arrive
+    through POST /ingest and still notify.
+
+    Unknown node codes are counted and skipped, not raised: one host missing
+    from the CMDB must not throw away the other 1499.
+    """
+    if not payloads:
+        return {
+            "received": 0,
+            "created": 0,
+            "duplicates": 0,
+            "unknown_node": 0,
+            "resolved": 0,
+        }
+
+    node_ids = {
+        code: nid
+        for code, nid in db.query(Node.code, Node.id).filter(
+            Node.code.in_({p.node_code for p in payloads})
+        )
+    }
+
+    external_ids = {p.external_id for p in payloads if p.external_id}
+    open_keys = set()
+    if external_ids:
+        open_keys = {
+            (source_tool, external_id)
+            for external_id, source_tool in db.query(
+                Incident.external_id, Incident.source_tool
+            ).filter(
+                Incident.external_id.in_(external_ids),
+                Incident.status.in_(("open", "acknowledged")),
+            )
+        }
+
+    created = duplicates = unknown_node = 0
+    for payload in payloads:
+        node_id = node_ids.get(payload.node_code)
+        if node_id is None:
+            unknown_node += 1
+            continue
+        key = (payload.source_tool, payload.external_id)
+        # Checked against open_keys rather than the database so that duplicates
+        # *within the batch* collapse too — a poll can legitimately carry the
+        # same external_id twice.
+        if payload.external_id and key in open_keys:
+            duplicates += 1
+            continue
+
+        cause = get_or_create_cause(db, payload.cause_category, payload.cause_label)
+        db.add(
+            Incident(
+                node_id=node_id,
+                cause_id=cause.id if cause else None,
+                external_id=payload.external_id,
+                source_tool=payload.source_tool,
+                severity=payload.severity,
+                status=payload.status,
+                detected_at=_to_naive_utc(payload.detected_at),
+                description=payload.description,
+                itop_ticket_id=payload.itop_ticket_id,
+            )
+        )
+        if payload.external_id:
+            open_keys.add(key)
+        created += 1
+
+    # Reconcile within the same transaction as the inserts, so the batch is
+    # applied as one consistent "this is the state now" snapshot per tool.
+    resolved = 0
+    for source_tool in {p.source_tool for p in payloads}:
+        resolved += reconcile_open_incidents(
+            db,
+            source_tool,
+            {p.external_id for p in payloads if p.source_tool == source_tool and p.external_id},
+        )
+
+    db.commit()
+    if created or resolved:
+        refresh_kpi_view(db)
+
+    return {
+        "received": len(payloads),
+        "created": created,
+        "duplicates": duplicates,
+        "unknown_node": unknown_node,
+        "resolved": resolved,
+    }
 
 
 def resolve_incident(

@@ -17,6 +17,22 @@ class IncidentIngestPayload(BaseModel):
     itop_ticket_id: Optional[str] = None
 
 
+class IncidentBulkIngestPayload(BaseModel):
+    # Bounded so one request cannot be turned into an unbounded write: the
+    # largest real batch is NetXMS's active alarm set, ~1500 on the ANPTIC
+    # instance, and a collector with more than this to report should page.
+    incidents: list[IncidentIngestPayload] = Field(max_length=5000)
+
+
+class IncidentBulkIngestResponse(BaseModel):
+    received: int
+    created: int
+    duplicates: int
+    unknown_node: int
+    # Open incidents this batch closed, because the tool stopped reporting them.
+    resolved: int
+
+
 class IncidentIngestResponse(BaseModel):
     incident_id: int
     node_id: int
