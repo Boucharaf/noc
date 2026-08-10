@@ -5,10 +5,13 @@ import HourHeatmap from '../components/charts/HourHeatmap';
 import { useHourDistribution, useKpiRecurrent } from '../hooks/useKPI';
 import { STATUS } from '../theme/colors';
 
+// Deliberately without row counts: they were wrong within a day of the real
+// CMDB landing (dim_region said 13, the 2025 découpage made it 17).
 const SCHEMA = [
-  ['dim_region', 'Régions administratives (13)'],
-  ['dim_locality', 'Localités, villes, et communes'],
-  ['dim_node', 'Granularité fine, routeurs, onduleurs, etc.'],
+  ['dim_region', 'Régions administratives (découpage 2025)'],
+  ['dim_locality', 'Localités et villes, référentiel ANPTIC'],
+  ['dim_node', 'Équipements supervisés : CPE, shelters, liaisons PTP, routeurs, switches'],
+  ['dim_cause', 'Nature de la panne observée par la supervision'],
   ['fact_incident', 'Table centrale de faits (Tickets, alertes)'],
   ['mv_kpi_node_monthly', 'Vue matérialisée pour KPI rapides'],
 ];

@@ -4,12 +4,7 @@ import Card from "./Card";
 import { useAcknowledgeIncident, useOpenAlerts } from "../hooks/useRealtime";
 import { useAuthStore } from "../store/auth";
 import { SEVERITY_COLOR } from "../theme/colors";
-
-const formatAge = (minutes) => {
-  if (minutes < 60) return `il y a ${minutes} min`;
-  if (minutes < 1440) return `il y a ${Math.round(minutes / 60)}h`;
-  return `il y a ${Math.round(minutes / 1440)}j`;
-};
+import { formatAge } from "../utils/format";
 
 const AlertFeed = () => {
   const { data: alerts = [], isLoading } = useOpenAlerts(20);

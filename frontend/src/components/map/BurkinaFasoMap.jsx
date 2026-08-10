@@ -1,9 +1,10 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   MapContainer,
   Marker,
   TileLayer,
   Tooltip,
+  useMap,
   useMapEvents,
 } from "react-leaflet";
 import L from "leaflet";
@@ -55,16 +56,48 @@ const ScrollZoomGate = ({ onFocus }) => {
   return null;
 };
 
-// Scales with the viewport instead of a fixed px box, so the map actually
-// uses the extra room on a tall monitor instead of leaving dead space below
-// it — clamped so it never collapses (short viewports) or runs away (ultrawide).
-const DEFAULT_HEIGHT = "clamp(320px, calc(100vh - 460px), 640px)";
+// The map fills whatever room its card gives it, but never less than this.
+//
+// It is a min-height rather than a height on purpose: the wrapper is a flex
+// item with `flex-1`, i.e. `flex-basis: 0%`, and flex-basis beats the `height`
+// property — so a height set here (or passed by a caller) is simply ignored and
+// the box is sized from leftover space alone. On a 700px-tall window that left
+// the map 124px tall, which renders but is useless. min-height is the one
+// dimension the flex algorithm will not shrink past, so it is what actually
+// holds the floor; the page scrolls instead, which is the better trade.
+const MIN_HEIGHT = 280;
+
+// Leaflet measures its container once, at mount, and only re-measures on a
+// window resize. Every resize that matters here is a container one — the card
+// reflowing when data arrives, the KPI row wrapping, a panel expanding — and
+// none of those fire a window resize, so the map keeps drawing at its old size:
+// grey bands where tiles should be, and clicks landing off-target. Watching the
+// element itself is the only reliable trigger.
+const InvalidateOnResize = () => {
+  const map = useMap();
+  useEffect(() => {
+    const container = map.getContainer();
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      // rAF-coalesced: a reflow can fire several entries, and invalidateSize
+      // does a full redraw.
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => map.invalidateSize());
+    });
+    observer.observe(container);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, [map]);
+  return null;
+};
 
 const BurkinaFasoMap = ({
   localities = [],
   selectedLocalityId,
   onSelect,
-  height = DEFAULT_HEIGHT,
+  minHeight = MIN_HEIGHT,
 }) => {
   const { theme } = useThemeStore();
   const [focused, setFocused] = useState(false);
@@ -94,8 +127,8 @@ const BurkinaFasoMap = ({
           inside this box, so the map can't paint over the sticky header (z-20)
           when the page scrolls. */}
       <div
-        className={`relative isolate z-0 w-full flex-1 min-h-0 overflow-hidden rounded-lg border ${theme === "dark" ? "leaflet-dark-map" : ""}`}
-        style={{ height, borderColor: "var(--color-border)" }}
+        className={`relative isolate z-0 w-full flex-1 overflow-hidden rounded-lg border ${theme === "dark" ? "leaflet-dark-map" : ""}`}
+        style={{ minHeight, borderColor: "var(--color-border)" }}
       >
         <MapContainer
           bounds={BFA_BOUNDS}
@@ -107,6 +140,7 @@ const BurkinaFasoMap = ({
           attributionControl={false}
           style={{ height: "100%", width: "100%" }}
         >
+          <InvalidateOnResize />
           <ScrollZoomGate onFocus={() => setFocused(true)} />
           <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
           {points.map((p) => (

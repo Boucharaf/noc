@@ -4,15 +4,9 @@ import { useAcknowledgeIncident, useRecentNotifications } from "../hooks/useReal
 import { usePushNotifications } from "../hooks/usePushNotifications";
 import { useAuthStore } from "../store/auth";
 import { SEVERITY_COLOR } from "../theme/colors";
+import { formatAge } from "../utils/format";
 
 const LAST_SEEN_KEY = "noc-notifications-last-seen";
-
-const formatAge = (minutes) => {
-  if (minutes == null) return "—";
-  if (minutes < 60) return `il y a ${minutes} min`;
-  if (minutes < 1440) return `il y a ${Math.round(minutes / 60)}h`;
-  return `il y a ${Math.round(minutes / 1440)}j`;
-};
 
 // The bell is a dropdown of recent critical/high incidents (what actually
 // triggers SMS/email/push), not just a push on/off switch — subscribing to

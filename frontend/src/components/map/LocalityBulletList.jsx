@@ -44,10 +44,13 @@ const LocalityBulletList = ({
                 style={{ background: availabilityColor(l.availability_pct) }}
               />
               <span className="min-w-0 flex-1">
-                <span className="block truncate font-medium">{l.locality}</span>
+                <span className="block truncate font-medium" title={l.locality}>
+                  {l.locality}
+                </span>
                 <span
                   className="block truncate text-xs"
                   style={{ color: "var(--color-text-secondary)" }}
+                  title={l.region}
                 >
                   {l.region}
                 </span>

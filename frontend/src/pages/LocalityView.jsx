@@ -58,7 +58,11 @@ const LocalityView = () => {
         </div>
       </div>
 
-      <div className="grid min-h-[320px] flex-1 auto-rows-fr grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-5">
+      {/* Taller floor than the other pages: this card stacks the map *and* the
+          locality list, split 3:2. The map half must clear its 280px floor plus
+          its legend (~308px), so the pair needs 308 x 5/3 ≈ 515px of body, plus
+          the card chrome — - under that the map overflows onto the list. */}
+      <div className="grid min-h-[600px] flex-1 auto-rows-fr grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-5">
         <Card
           title="Sélection"
           className="flex h-full flex-col md:col-span-2 lg:col-span-2"
@@ -73,12 +77,11 @@ const LocalityView = () => {
             </div>
           ) : (
             <>
-              <div className="min-h-0 flex-[3]">
+              <div className="flex min-h-0 flex-[3] flex-col">
                 <BurkinaFasoMap
                   localities={localities}
                   selectedLocalityId={localityId}
                   onSelect={setLocalityId}
-                  height="100%"
                 />
               </div>
               <div

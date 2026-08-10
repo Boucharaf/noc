@@ -1,13 +1,7 @@
 import React from "react";
 import Card from "./Card";
 import { SeverityBadge, StatusBadge } from "./Badge";
-
-const formatAge = (minutes) => {
-  if (minutes == null) return "—";
-  if (minutes < 60) return `il y a ${minutes} min`;
-  if (minutes < 1440) return `il y a ${Math.round(minutes / 60)}h`;
-  return `il y a ${Math.round(minutes / 1440)}j`;
-};
+import { formatAge } from "../utils/format";
 
 const IncidentTable = ({
   title = "Liste des Incidents",
