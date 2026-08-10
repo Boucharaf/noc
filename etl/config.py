@@ -19,6 +19,25 @@ def broker_url() -> str:
     return f"redis://{host}:{port}/{db}"
 
 
+def netxms_dsn() -> str:
+    """The NetXMS database, read directly — not by a collector.
+
+    Only rebuild_geography.py uses this. The administrative reference data it
+    needs (the donnebase schema: régions, provinces, communes, villes, sites
+    administratifs) exists nowhere else: the REST API exposes a node's postal
+    address but not the reference tables behind it, and the ANPTIC columns on
+    object_properties were added straight to the table. Collectors still go
+    through the API and must keep doing so.
+    """
+    return (
+        f"host={os.getenv('NETXMS_DB_HOST', 'netxms-db')} "
+        f"port={os.getenv('NETXMS_DB_PORT', 5432)} "
+        f"dbname={os.getenv('NETXMS_DB_NAME', 'netxms')} "
+        f"user={os.getenv('NETXMS_DB_USER', 'netxms')} "
+        f"password={os.getenv('NETXMS_DB_PASSWORD', '')}"
+    )
+
+
 NOC_API_URL = os.getenv("NOC_API_URL", "http://backend:8000")
 NOC_API_KEY = os.getenv("NOC_API_KEY", "dev-noc-api-key")
 # How often every configured supervision API is polled. Five minutes is the
@@ -37,6 +56,13 @@ REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
 HTTP_TIMEOUT_S = int(os.getenv("ETL_HTTP_TIMEOUT_S", "15"))
+
+# How long a NetXMS object's identity (name, primary IP, class) is trusted
+# without re-asking the server. See extract/netxms.py for why this cache exists;
+# the trade is that a node renamed or re-addressed in NetXMS keeps its old
+# identity here for up to this long, which only matters for matching it to a
+# dim_node. A day is well inside how often that happens.
+NETXMS_OBJECT_CACHE_TTL_S = int(os.getenv("NETXMS_OBJECT_CACHE_TTL_S", str(24 * 3600)))
 
 # ── Supervision tool endpoints ──────────────────────────────────────────────
 # A collector runs only when its *_API_URL is set; unset tools are skipped

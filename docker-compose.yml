@@ -88,6 +88,9 @@ services:
       - NETXMS_API_URL=${NETXMS_API_URL:-}
       - NETXMS_USER=${NETXMS_USER:-}
       - NETXMS_PASSWORD=${NETXMS_PASSWORD:-}
+      # How long an alarm source's name/IP/class is trusted without re-asking
+      # NetXMS. Lower it if nodes are renamed often; 0 is not supported.
+      - NETXMS_OBJECT_CACHE_TTL_S=${NETXMS_OBJECT_CACHE_TTL_S:-86400}
       - CENTREON_API_URL=${CENTREON_API_URL:-}
       - CENTREON_USER=${CENTREON_USER:-}
       - CENTREON_PASSWORD=${CENTREON_PASSWORD:-}
@@ -95,6 +98,12 @@ services:
       - ITOP_API_URL=${ITOP_API_URL:-}
       - ITOP_USER=${ITOP_USER:-}
       - ITOP_PASSWORD=${ITOP_PASSWORD:-}
+      # NetXMS database, for rebuild_geography.py only — the administrative
+      # reference tables (donnebase) have no API. Collectors use NETXMS_API_URL.
+      - NETXMS_DB_HOST=netxms-db
+      - NETXMS_DB_NAME=${NETXMS_DB_NAME:-}
+      - NETXMS_DB_USER=${NETXMS_DB_USER:-}
+      - NETXMS_DB_PASSWORD=${NETXMS_DB_PASSWORD:-}
     volumes:
       - reports:/reports
     depends_on:
@@ -279,13 +288,18 @@ services:
       timeout: 10s
       retries: 5
 
-  # NetXMS — dedicated PostgreSQL.
+  # NetXMS — dedicated PostgreSQL. PostGIS-enabled (drop-in for postgres:15 on
+  # the same PGDATA): the production NetXMS dump carries the ANPTIC GIS schemas
+  # (donnebase, equipementinfastructure) whose geometry columns need the
+  # extension to restore.
   netxms-db:
-    image: postgres:15-alpine
+    image: postgis/postgis:15-3.5-alpine
     environment:
       - POSTGRES_USER=${NETXMS_DB_USER}
       - POSTGRES_PASSWORD=${NETXMS_DB_PASSWORD}
       - POSTGRES_DB=${NETXMS_DB_NAME}
+    ports:
+      - "5438:5432"
     volumes:
       - netxms_pgdata:/var/lib/postgresql/data
     healthcheck:
