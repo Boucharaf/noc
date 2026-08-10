@@ -19,7 +19,7 @@ apiClient.interceptors.response.use(
       error.response?.status === 401 &&
       !error.config?.url?.includes("/auth/")
     ) {
-      useAuthStore.getState().logout();
+      useAuthStore.getState().logout("expired");
     }
     return Promise.reject(error);
   },

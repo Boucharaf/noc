@@ -15,10 +15,12 @@ import DataModelView from "./pages/DataModelView";
 import Login from "./pages/Login";
 import { useAuthStore } from "./store/auth";
 import { usePeriodAutoSync } from "./hooks/usePeriodAutoSync";
+import { useSessionKeepAlive } from "./hooks/useSessionKeepAlive";
 
 const DashboardShell = () => {
   const token = useAuthStore((s) => s.token);
   usePeriodAutoSync();
+  useSessionKeepAlive();
 
   if (!token) return <Navigate to="/login" replace />;
 

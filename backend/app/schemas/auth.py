@@ -23,4 +23,9 @@ class UserOut(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    # Seconds the token stays valid. Sent so the client can renew ahead of
+    # expiry without parsing the JWT — the lifetime is a server policy, and a
+    # client that reads it from the token would silently follow a stale copy
+    # of that policy after any change here.
+    expires_in: int
     user: UserOut
