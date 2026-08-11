@@ -7,3 +7,5 @@ __pycache__/
 venv/
 nginx/certs
 endpoints.txt
+SESSION.md
+netxmsbd07082026.sql
