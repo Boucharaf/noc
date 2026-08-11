@@ -28,6 +28,12 @@
 - [Progressive Web App & Push Notifications](#progressive-web-app--push-notifications)
 - [API Documentation](#api-documentation)
 - [Demo Data & ETL Collection](#demo-data--etl-collection)
+- [Restoring the production NetXMS dump](#restoring-the-production-netxms-dump)
+  - [What the restore requires](#what-the-restore-requires)
+  - [What you get, and what you don't](#what-you-get-and-what-you-dont)
+  - [Restoring by hand](#restoring-by-hand)
+  - [Verify](#verify)
+  - [Checklist](#checklist)
 - [Loading the real CMDB](#loading-the-real-cmdb)
 - [Incident lifecycle](#incident-lifecycle)
   - [Availability](#availability)
@@ -188,7 +194,8 @@ noc/
 ├── database/
 │   ├── 01_schema.sql             # DB schema (tables, indexes, materialized view, dim_user)
 │   ├── 02_seed.sql               # Generated demo dataset (see below) — auto-run after the schema
-│   └── generate_seed.py          # Regenerates 02_seed.sql (regions/localities/nodes/incidents/demo users)
+│   ├── generate_seed.py          # Regenerates 02_seed.sql (regions/localities/nodes/incidents/demo users)
+│   └── restore_netxms_dump.sh    # Restores the production NetXMS pg_dump into netxms-db (:5438, NOT the app DB)
 │
 ├── nginx/                        # Public gateway — the only published entry point
 │   ├── Dockerfile
@@ -559,11 +566,9 @@ puts them back at http://localhost:8000/docs and `/redoc`.
 
 ### First-run setup of the bundled tools
 
-**iTop** ships uninstalled. Until its setup completes there is no
-`conf/production/config-itop.php`, and `webservices/rest.php` answers **HTTP 500
-to every operation** — which the ETL reports as
-`500 Server Error … /webservices/rest.php`. Either walk the wizard at
-http://localhost:8082, or install it unattended:
+**iTop** ships uninstalled and its REST API stays unavailable until setup
+completes. Run it once, either through the wizard at http://localhost:8082 or
+unattended:
 
 ```bash
 docker compose exec -u www-data -w /var/www/html/setup/unattended-install itop \
@@ -571,23 +576,25 @@ docker compose exec -u www-data -w /var/www/html/setup/unattended-install itop \
   --installation_xml=/var/www/html/datamodels/2.x/installation.xml
 ```
 
-Two traps: the response file's `selected_extensions` is **ignored unless
-`--installation_xml` is passed** (without it the compile dies with
-`Missing unique tag: groups`), and the collector queries the `Incident` class,
-which only exists in the **ITIL** module set (`itop-ticket-mgmt-itil-incident`)
-— the non-ITIL default has `UserRequest` only. A failed run also leaves
-`data/.maintenance` and `data/.readonly` behind, which make the retry print
-only "This application is currently under maintenance"; delete both first.
+Three requirements for that command to produce a usable instance:
 
-Afterwards the API user still needs iTop's **REST Services User** profile —
-`secure_rest_services` is on by default and being an Administrator does not
-imply it, so calls return `code: 1, "…profile REST Services User is required"`.
+1. **Pass `--installation_xml`.** The response file's `selected_extensions` is
+   only honoured when it is present.
+2. **Select the ITIL module set** (`itop-ticket-mgmt-itil-incident`). The
+   collector queries the `Incident` class, which exists only there — the
+   non-ITIL default provides `UserRequest` only.
+3. **Start from a clean state.** If an earlier run left `data/.maintenance` or
+   `data/.readonly` behind, delete both before re-running.
+
+Then grant the API user iTop's **REST Services User** profile.
+`secure_rest_services` is enabled by default and Administrator does not imply
+it, so the profile has to be assigned explicitly.
 
 **NetXMS** uses a PostGIS-enabled database image
 (`postgis/postgis:15-3.5-alpine`, a drop-in for `postgres:15` on the same
-PGDATA). The ANPTIC reference data carries geometry columns that will not
-restore without the extension — see
-[Loading the real CMDB](#loading-the-real-cmdb).
+PGDATA). The ANPTIC reference data carries geometry columns that need the
+extension — see
+[Restoring the production NetXMS dump](#restoring-the-production-netxms-dump).
 
 ### HTTPS / TLS
 
@@ -616,8 +623,8 @@ The **Carte**, "Vue Globale" and "Vue par Localité" tabs all render a real **Le
 - **Markers**: colored by availability (green ≥97%, amber 90–97%, red <90%), sized by incident volume (`sqrt` scale), with a pulsing ring on critical ones. Hover for a tooltip, click to select.
 - **Dark mode**: OSM only publishes one (light) cartography, so dark mode applies a CSS filter (`invert + hue-rotate + contrast`) scoped to just the tile pane in `index.css` (`.leaflet-dark-map .leaflet-tile-pane`) — markers/popups are on a separate pane and stay unaffected.
 - **Stacking**: the map wrapper uses `isolate z-0` so Leaflet's internal z-indexes (up to 1000) can't paint over the sticky header/tab bar while scrolling.
-- **Sizing**: the map fills its card but never shrinks below `MIN_HEIGHT` (280px). That floor is a **`min-height`, not a `height`** — the wrapper is a flex item with `flex-1` (`flex-basis: 0%`), and flex-basis overrides the `height` property, so a height set there is silently ignored and the box collapses to whatever space is left over. The pages that host it carry matching row floors (`min-h-[380px]` on Vue Globale, `min-h-[520px]` on Vue par Localité, which stacks the map *and* the locality list); `Card` does not clip, so a row shorter than its content paints the map straight through the card below.
-- **Resize handling**: Leaflet measures its container once at mount and afterwards only listens for **window** resizes, so a card reflowing around it leaves the map drawing at a stale size. An `InvalidateOnResize` child watches the container with a `ResizeObserver` and calls `map.invalidateSize()` (rAF-coalesced).
+- **Sizing**: the map fills its card and holds a `MIN_HEIGHT` floor of 280px. Set that floor as **`min-height`, never `height`** — the wrapper is a flex item with `flex-1` (`flex-basis: 0%`), which takes precedence over `height`. Host pages carry matching row floors (`min-h-[380px]` on Vue Globale, `min-h-[520px]` on Vue par Localité, which stacks the map *and* the locality list); keep them in step with `MIN_HEIGHT`, since `Card` does not clip its content.
+- **Resize handling**: Leaflet measures its container at mount and then tracks only **window** resizes, so an `InvalidateOnResize` child watches the container with a `ResizeObserver` and calls `map.invalidateSize()` (rAF-coalesced) whenever the card itself reflows.
 - **Attribution**: the default "Leaflet | © OpenStreetMap" control is disabled (`attributionControl={false}`) for a cleaner internal-dashboard look. ⚠️ Tiles still come from the free `tile.openstreetmap.org` servers, whose [usage policy](https://operations.osmfoundation.org/policies/tiles/) requires visible attribution — restore the credit or switch to a self-hosted/commercial tile provider before any public deployment.
 - **Scroll-zoom gating**: the map requires one click before the scroll wheel zooms it (with a fading hint chip), so scrolling the dashboard page over the map doesn't get hijacked into zooming it — a standard embedded-map pattern.
 - **Bounded**: `maxBounds`/`minZoom`/`maxZoom` keep panning/zooming scoped to Burkina Faso.
@@ -640,9 +647,7 @@ click-through list of what is actually broken.
   request per toggle.
 - **Those counts are month-scoped**, like every other figure the payload
   carries, so the period picker drives this page the way it drives the rest of
-  the dashboard. An earlier version counted what was open *right now*, which
-  read sensibly on its own but left the picker apparently broken: the payload
-  reloaded on every month change and nothing on screen moved.
+  the dashboard. Keep any new figure added to this payload month-scoped too.
 - **Clicking a locality lists its own open incidents** — node code,
   description, severity and age. `GET /api/alerts/open` takes a `locality_id`
   for this: the unfiltered feed is a top-N across the whole network, and with
@@ -896,13 +901,151 @@ The database ships with a generated demo dataset so the dashboard is fully inter
 
 ---
 
+## Restoring the production NetXMS dump
+
+Everything in [Loading the real CMDB](#loading-the-real-cmdb) reads from the
+NetXMS database: the node inventory, and the `donnebase` administrative
+reference tables that give localities their coordinates. Both arrive in one
+place — a plain-SQL `pg_dump` of the ANPTIC production server
+(`netxmsbd07082026.sql`, 356 MB, taken 2026-08-07 from PostgreSQL 16.1).
+
+**Restore it with the script, not by hand:**
+
+```bash
+./database/restore_netxms_dump.sh --dry-run     # preflight only, changes nothing
+./database/restore_netxms_dump.sh               # restore into an empty netxms DB
+./database/restore_netxms_dump.sh --force       # drop an existing netxms DB first
+```
+
+It reads `NETXMS_DB_*` from `.env`, targets `localhost:5438` (the `netxms-db`
+container), and exits non-zero on any error the dump raises. Options:
+`--dry-run`, `--force`, `--keep-timescale-triggers`, and the usual
+`-h/-p/-U/-d`.
+
+> ⚠️ **This is the NetXMS database on port 5438, not the dashboard's own
+> database on 5436.** They are different containers with different content;
+> `--force` against the wrong one destroys the NOC dataset.
+
+### What the restore requires
+
+The dump is not self-contained. Four things have to be arranged around it, all
+of which the script does for you:
+
+| # | Requirement | Detail | Handled by |
+|---|---|---|---|
+| 1 | **Five roles exist** | The dump assigns ownership to `postgres`, `netxmsu`, `siganptic`, `dev` and grants to `arm`, but contains no `CREATE ROLE` | Created `NOLOGIN` and passwordless — they exist to own objects, not to log in |
+| 2 | **PostGIS installed first** | Columns are declared `public.geometry(Point,4326)` and the dump's `search_path` is empty, so the type must resolve under exactly that name | `CREATE EXTENSION postgis` into `public`, before the restore |
+| 3 | **`CREATE SCHEMA public` removed** | Requirement 2 needs the stock `public` schema kept, so the dump's own copy of that statement is dropped | One `sed` filter |
+| 4 | **TimescaleDB triggers removed** | 21 tables carry a `ts_insert_blocker` trigger calling `_timescaledb_functions.insert_blocker()`; TimescaleDB is not in `postgis/postgis:15-3.5-alpine` | A second `sed` filter — those tables restore as plain PostgreSQL tables |
+
+Both filters are anchored to the exact statement text `pg_dump` emits at the
+start of a line, so no `COPY` data row is affected. Everything else runs under
+`ON_ERROR_STOP=1`: **if the script reports success, the whole dump applied.**
+
+**Restore into an empty database.** `psql` applies a plain-SQL dump statement by
+statement without stopping, so every `COPY` appends its rows to whatever the
+target already holds. Use `--force` to drop and recreate, or `-d` to point at a
+fresh database name; the script checks the target and stops before writing
+anything if it is already populated.
+
+To preview what the dump would do to a populated database without changing it,
+run it in a transaction that rolls back:
+
+```bash
+psql -U netxms -h localhost -p 5438 --single-transaction -v ON_ERROR_STOP=1 \
+  -f netxmsbd07082026.sql
+```
+
+### What you get, and what you don't
+
+- ✅ **1407 nodes**, their `object_properties`, and the full NetXMS
+  configuration — the inventory `provision_netxms_nodes.py` reads.
+- ✅ **The `donnebase` reference schema** — 488 villes, communes, provinces and
+  the region geometries `rebuild_geography.py` resolves addresses through.
+- ❌ **No time-series history.** `event_log`, `syslog`, `snmp_trap_log` and
+  every `idata_sc_*` / `tdata_sc_*` table are TimescaleDB hypertables in
+  production. Their rows live in chunks under `_timescaledb_internal`, which
+  `pg_dump` did not include, so they restore **structurally empty** — the
+  `COPY public.event_log … FROM stdin;` in the file is followed immediately by
+  its terminator. Availability KPIs computed against this server accumulate
+  from the restore forward, not from the dump's date.
+- ❌ **No extensions** beyond the PostGIS the script installs.
+- ⚠️ **Production credentials.** The dump carries `public.users` — real named
+  ANPTIC accounts and their password hashes. After restoring, `NETXMS_PASSWORD`
+  from `.env` no longer opens the console: the `admin` account is production's.
+  Keep port 5438 bound to localhost and treat the database as sensitive.
+
+### Restoring by hand
+
+If you need to do it manually — a different target, or a partial restore:
+
+```bash
+set -a; source .env; set +a
+export PGPASSWORD="$NETXMS_DB_PASSWORD"
+PSQL="psql -h localhost -p 5438 -U $NETXMS_DB_USER"
+
+# 1. Roles the dump assigns objects to (NOLOGIN — ownership only)
+for r in postgres netxmsu siganptic dev arm; do
+  $PSQL -d postgres -c "CREATE ROLE $r NOLOGIN" 2>/dev/null || true
+done
+
+# 2. A fresh database with PostGIS in its public schema
+$PSQL -d postgres -c "DROP DATABASE IF EXISTS netxms"
+$PSQL -d postgres -c "CREATE DATABASE netxms OWNER $NETXMS_DB_USER ENCODING 'UTF8'"
+$PSQL -d netxms   -c "CREATE EXTENSION postgis"
+
+# 3. Restore, stripping the two families of statement this server cannot run
+sed -e '/^CREATE SCHEMA public;$/d' \
+    -e '/^CREATE TRIGGER ts_insert_blocker .*insert_blocker();$/d' \
+    netxmsbd07082026.sql \
+  | $PSQL -d netxms -v ON_ERROR_STOP=1 --quiet -o /dev/null -f -
+```
+
+Restore without `--single-transaction`: at 356 MB it would hold locks and WAL
+for the whole run. To start over, drop the database and repeat step 2. Keep
+that flag for the read-only trial run shown above.
+
+### Verify
+
+```bash
+psql -h localhost -p 5438 -U netxms -d netxms -c "
+  select (select count(*) from public.nodes)            as nodes,
+         (select count(*) from donnebase.ville)         as villes,
+         (select count(*) from donnebase.limiteregion)  as regions,
+         pg_size_pretty(pg_database_size('netxms'))     as size"
+```
+
+A healthy restore reports roughly **1407 nodes**, **488 villes**, and about
+**1.3 GB**. The script prints the same figures automatically, plus an `ABSENT`
+marker for any expected table the dump did not contain.
+
+### Checklist
+
+Confirm all of these before restoring — `--dry-run` verifies the first four:
+
+- [ ] `netxms-db` is running and reachable on `localhost:5438`
+- [ ] The connecting role is a **superuser** (`netxms` is, in this stack) — the
+      dump reassigns ownership to other roles
+- [ ] The server image provides **PostGIS** (`postgis/postgis:15-3.5-alpine`)
+- [ ] At least **3× the dump size free on disk** (~1.1 GB for a 356 MB dump;
+      the restore settles around 1.3 GB once indexes are built)
+- [ ] The target database is **empty**, or you intend `--force`
+
+Once it's in, continue with [Loading the real CMDB](#loading-the-real-cmdb).
+
+> The dump file itself is **not in version control** — 356 MB of production
+> data, including credentials, does not belong in the repo. Keep it out of
+> commits (add `*.sql` at the root to `.gitignore`, or store it outside the
+> working tree) and transfer it out of band.
+
+---
+
 ## Loading the real CMDB
 
-Collectors match each alert to a `dim_node` by code, name or IP. The seeded
-nodes are fictional and share no names with real infrastructure, so against a
-real supervision tool **every alert is skipped as unmatched and nothing is
-ingested** until the CMDB holds the real hosts. Three scripts populate it. All
-live in `etl/` and run inside the worker:
+Collectors match each alert to a `dim_node` by code, name or IP, so **the CMDB
+must hold the real hosts before a real supervision tool can ingest anything** —
+the seeded nodes are fictional and share no names with real infrastructure.
+Three scripts populate it. All live in `etl/` and run inside the worker:
 
 | Script | What it does |
 |---|---|
@@ -963,11 +1106,10 @@ Deduplication and reconciliation both key on `(source_tool, external_id)`, so a
 still-open problem re-reported every 5 minutes writes nothing.
 
 **Empty batches never reconcile.** An empty active set is indistinguishable
-from a collector that authenticated and returned nothing, and treating it as
-"the whole network recovered" would close every open incident for that tool —
-the next poll would then re-create them as *new* incidents detected now,
-destroying the real start times and every MTTR derived from them. A genuine
-all-clear is picked up by the next pass carrying at least one alert.
+from a collector that authenticated and returned nothing, so the backend skips
+reconciliation for it and preserves every open incident's original
+`detected_at` — and the MTTR figures derived from it. A genuine all-clear is
+picked up by the next pass carrying at least one alert.
 
 ### Availability
 
