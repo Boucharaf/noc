@@ -10,7 +10,11 @@ from app.services.auth_service import decode_access_token
 def verify_api_key(authorization: str = Header(default="")) -> None:
     """Static bearer key required on supervision-tool webhooks (Centreon/Zabbix -> /ingest).
 
-    Matches the cahier des charges §10.1: "clé API statique pour les webhooks".
+    Deliberately a shared static key rather than per-caller credentials: the
+    callers are monitoring daemons configured by hand, with no way to refresh
+    a token and no user behind them to re-authenticate. The trade-off is that
+    the key never expires, so it must be treated as a secret with a rotation
+    story of its own — changing it means editing every webhook definition.
     """
     expected = f"Bearer {NOC_API_KEY}"
     if authorization != expected:
@@ -32,8 +36,13 @@ def get_current_user(
 
 
 def require_role(*roles: str):
-    """RBAC per spec §10.1 — admin (read+write), analyst (read-only),
-    noc_agent (read + acknowledge)."""
+    """Restrict an endpoint to the given roles.
+
+    The three roles and what they may do: admin reads and writes, analyst
+    reads only, noc_agent reads and acknowledges. Enforcement lives here, on
+    the server; the frontend hides actions a role cannot perform, but that is
+    a courtesy to the user and never the control.
+    """
 
     def dependency(current_user: User = Depends(get_current_user)) -> User:
         if current_user.role not in roles:

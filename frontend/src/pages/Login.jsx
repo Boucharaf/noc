@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Delete, Lock, User } from "lucide-react";
 import { loginWithPassword, loginWithPin } from "../api/auth";
@@ -182,16 +182,25 @@ const PinForm = ({ onSubmit, loading, error }) => {
 const Login = () => {
   const navigate = useNavigate();
   const login = useAuthStore((s) => s.login);
+  const logoutReason = useAuthStore((s) => s.logoutReason);
+  const clearLogoutReason = useAuthStore((s) => s.clearLogoutReason);
   const [mode, setMode] = useState("password");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (logoutReason === "expired") {
+      setError("Session expirée — veuillez vous reconnecter.");
+      clearLogoutReason();
+    }
+  }, [logoutReason, clearLogoutReason]);
 
   const handleSubmit = (request) => {
     setLoading(true);
     setError(null);
     return request()
       .then((data) => {
-        login(data.access_token, data.user);
+        login(data.access_token, data.user, data.expires_in);
         navigate("/global", { replace: true });
       })
       .catch((err) => {

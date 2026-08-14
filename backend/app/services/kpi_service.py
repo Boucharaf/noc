@@ -8,6 +8,10 @@ from app.models.dimension import Cause, Locality, Node, Region
 from app.models.incident import Incident
 from app.models.kpi import KpiNodeMonthly as mv
 
+# Bucket for incidents with no cause_id. Shown to users, so it is French like
+# the rest of the dashboard labels.
+UNCLASSIFIED_CATEGORY = "Non classé"
+
 FRENCH_MONTHS = [
     "",
     "Janvier",
@@ -53,7 +57,9 @@ def _month_aggregates(db: Session, period_start: date):
                 func.coalesce(func.sum(mv.total_incidents), 0).label("total_incidents"),
                 func.coalesce(func.sum(mv.resolved), 0).label("resolved"),
                 func.coalesce(func.avg(mv.avg_mttr), 0).label("avg_mttr"),
-                func.coalesce(func.avg(mv.availability_pct), 100).label("availability_pct"),
+                func.coalesce(func.avg(mv.availability_pct), 100).label(
+                    "availability_pct"
+                ),
             ).where(mv.month == period_start)
         )
         .mappings()
@@ -70,7 +76,9 @@ def get_summary(db: Session, month: int, year: int) -> dict:
                 func.coalesce(func.sum(mv.total_incidents), 0).label("total_incidents"),
                 func.coalesce(func.sum(mv.resolved), 0).label("resolved"),
                 func.coalesce(func.avg(mv.avg_mttr), 0).label("avg_mttr"),
-                func.coalesce(func.avg(mv.availability_pct), 100).label("availability_pct"),
+                func.coalesce(func.avg(mv.availability_pct), 100).label(
+                    "availability_pct"
+                ),
                 func.count(distinct(mv.locality_id))
                 .filter(mv.availability_pct < CRITICAL_AVAILABILITY_THRESHOLD)
                 .label("critical_localities"),
@@ -180,8 +188,11 @@ def get_localities(db: Session, month: int, year: int, limit: int = 10) -> list[
             .join(Locality, Locality.id == mv.locality_id)
             .where(mv.month == period_start)
             .group_by(
-                mv.locality_id, mv.locality, mv.region,
-                Locality.latitude, Locality.longitude,
+                mv.locality_id,
+                mv.locality,
+                mv.region,
+                Locality.latitude,
+                Locality.longitude,
             )
             .order_by(desc("total_incidents"))
             .limit(limit)
@@ -228,7 +239,9 @@ def get_localities_map(db: Session, month: int, year: int) -> list[dict]:
                 func.coalesce(func.sum(mv.total_incidents), 0).label("total_incidents"),
                 func.coalesce(func.sum(mv.resolved), 0).label("resolved"),
                 func.avg(mv.avg_mttr).label("avg_mttr"),
-                func.coalesce(func.avg(mv.availability_pct), 100).label("availability_pct"),
+                func.coalesce(func.avg(mv.availability_pct), 100).label(
+                    "availability_pct"
+                ),
             )
             .select_from(Locality)
             .join(Region, Region.id == Locality.region_id)
@@ -237,14 +250,18 @@ def get_localities_map(db: Session, month: int, year: int) -> list[dict]:
             )
             .where(Locality.latitude.isnot(None), Locality.longitude.isnot(None))
             .group_by(
-                Locality.id, Locality.name, Region.name,
-                Locality.latitude, Locality.longitude,
+                Locality.id,
+                Locality.name,
+                Region.name,
+                Locality.latitude,
+                Locality.longitude,
             )
             .order_by(desc("total_incidents"))
         )
         .mappings()
         .all()
     )
+    severity_counts = get_severity_counts_by_locality(db, period_start)
 
     return [
         {
@@ -259,9 +276,45 @@ def get_localities_map(db: Session, month: int, year: int) -> list[dict]:
                 round(float(r["avg_mttr"]), 1) if r["avg_mttr"] is not None else None
             ),
             "availability_pct": round(float(r["availability_pct"]), 1),
+            "by_severity": severity_counts.get(r["locality_id"], {}),
         }
         for r in rows
     ]
+
+
+def get_severity_counts_by_locality(
+    db: Session, period_start: date
+) -> dict[int, dict[str, int]]:
+    """{locality_id: {severity: incident count}} for one month.
+
+    Month-scoped, like every other figure the map carries, so the period picker
+    drives this page the same way it drives the rest of the dashboard. An
+    earlier version counted what was open *right now* instead, which read
+    sensibly on its own but left the picker apparently broken: the payload
+    reloaded on every month change and nothing on screen moved.
+
+    Served alongside the monthly aggregates so severity filtering stays a
+    client-side sum rather than a request per toggle.
+    """
+    rows = (
+        db.execute(
+            select(
+                Node.locality_id,
+                Incident.severity,
+                func.count().label("n"),
+            )
+            .select_from(Incident)
+            .join(Node, Incident.node_id == Node.id)
+            .where(func.date_trunc("month", Incident.detected_at) == period_start)
+            .group_by(Node.locality_id, Incident.severity)
+        )
+        .mappings()
+        .all()
+    )
+    counts: dict[int, dict[str, int]] = {}
+    for r in rows:
+        counts.setdefault(r["locality_id"], {})[r["severity"]] = int(r["n"])
+    return counts
 
 
 def get_nodes(
@@ -273,8 +326,15 @@ def get_nodes(
 ) -> list[dict]:
     period_start = month_start(month, year)
     stmt = select(
-        mv.node_id, mv.code, mv.name, mv.source_tool, mv.locality,
-        mv.total_incidents, mv.resolved, mv.avg_mttr, mv.availability_pct,
+        mv.node_id,
+        mv.code,
+        mv.name,
+        mv.source_tool,
+        mv.locality,
+        mv.total_incidents,
+        mv.resolved,
+        mv.avg_mttr,
+        mv.availability_pct,
     ).where(mv.month == period_start)
     if locality_id is not None:
         stmt = stmt.where(mv.locality_id == locality_id)
@@ -304,6 +364,15 @@ def get_nodes(
     ]
 
 
+# A node is "flapping" when it produces many short episodes rather than one
+# long outage. Both shapes land in the recurrent list with the same incident
+# count, and they call for opposite responses: a flapping link needs the link
+# fixed, a chronic one needs someone sent to the site. 15 minutes is well above
+# a poll interval (so a genuine short outage is not mislabelled) and well below
+# any outage worth dispatching for.
+FLAPPING_MAX_AVG_MINUTES = 15
+
+
 def get_recurrent_nodes(
     db: Session, month: int, year: int, min_count: int = 3
 ) -> list[dict]:
@@ -317,17 +386,50 @@ def get_recurrent_nodes(
         .mappings()
         .all()
     )
+    if not rows:
+        return []
 
-    return [
-        {
-            "node_id": r["node_id"],
-            "code": r["code"],
-            "name": r["name"],
-            "locality": r["locality"],
-            "total_incidents": int(r["total_incidents"]),
-        }
-        for r in rows
-    ]
+    # Mean episode length per node. An unresolved incident is measured to now,
+    # the same convention mv_kpi_node_monthly uses for availability — otherwise
+    # a node that is simply still down would read as a 0-minute episode.
+    ongoing = func.extract("epoch", func.now() - Incident.detected_at) / 60
+    durations = {
+        r["node_id"]: r["avg_minutes"]
+        for r in db.execute(
+            select(
+                Incident.node_id,
+                func.avg(func.coalesce(Incident.downtime_minutes, ongoing)).label(
+                    "avg_minutes"
+                ),
+            )
+            .where(
+                Incident.node_id.in_([r["node_id"] for r in rows]),
+                func.date_trunc("month", Incident.detected_at) == period_start,
+            )
+            .group_by(Incident.node_id)
+        )
+        .mappings()
+        .all()
+    }
+
+    result = []
+    for r in rows:
+        avg_minutes = durations.get(r["node_id"])
+        avg_minutes = round(float(avg_minutes), 1) if avg_minutes is not None else None
+        result.append(
+            {
+                "node_id": r["node_id"],
+                "code": r["code"],
+                "name": r["name"],
+                "locality": r["locality"],
+                "total_incidents": int(r["total_incidents"]),
+                "avg_duration_minutes": avg_minutes,
+                "flapping": (
+                    avg_minutes is not None and avg_minutes < FLAPPING_MAX_AVG_MINUTES
+                ),
+            }
+        )
+    return result
 
 
 def get_trend(db: Session, month: int, year: int, months: int = 6) -> list[dict]:
@@ -375,18 +477,29 @@ def get_latest_data_month(db: Session) -> tuple[int, int]:
 
 
 def get_cause_breakdown(db: Session, month: int, year: int) -> list[dict]:
+    """Incident counts per cause category for one month.
+
+    Outer-joined on purpose. Incidents collected from the supervision tools
+    carry no cause — none of those APIs reports one, and nothing classifies
+    them afterwards — so an inner join silently drops every one of them and
+    leaves the chart empty for any month that was not seeded by hand. Counting
+    them under UNCLASSIFIED_CATEGORY keeps the breakdown summing to the
+    month's real incident total, and makes the size of the unclassified slice
+    the visible measure of how much classification is still missing.
+    """
     period_start = month_start(month, year)
+    category = func.coalesce(Cause.category, UNCLASSIFIED_CATEGORY).label("category")
     rows = (
         db.execute(
             select(
-                Cause.category,
+                category,
                 func.count(Incident.id).label("total_incidents"),
                 func.avg(Incident.mttr_minutes).label("avg_mttr"),
             )
             .select_from(Incident)
-            .join(Cause, Incident.cause_id == Cause.id)
+            .outerjoin(Cause, Incident.cause_id == Cause.id)
             .where(func.date_trunc("month", Incident.detected_at) == period_start)
-            .group_by(Cause.category)
+            .group_by(category)
             .order_by(desc("total_incidents"))
         )
         .mappings()

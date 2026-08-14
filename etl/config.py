@@ -19,21 +19,57 @@ def broker_url() -> str:
     return f"redis://{host}:{port}/{db}"
 
 
+def netxms_dsn() -> str:
+    """The NetXMS database, read directly — not by a collector.
+
+    Only rebuild_geography.py uses this. The administrative reference data it
+    needs (the donnebase schema: régions, provinces, communes, villes, sites
+    administratifs) exists nowhere else: the REST API exposes a node's postal
+    address but not the reference tables behind it, and the ANPTIC columns on
+    object_properties were added straight to the table. Collectors still go
+    through the API and must keep doing so.
+    """
+    return (
+        f"host={os.getenv('NETXMS_DB_HOST', 'netxms-db')} "
+        f"port={os.getenv('NETXMS_DB_PORT', 5432)} "
+        f"dbname={os.getenv('NETXMS_DB_NAME', 'netxms')} "
+        f"user={os.getenv('NETXMS_DB_USER', 'netxms')} "
+        f"password={os.getenv('NETXMS_DB_PASSWORD', '')}"
+    )
+
+
 NOC_API_URL = os.getenv("NOC_API_URL", "http://backend:8000")
 NOC_API_KEY = os.getenv("NOC_API_KEY", "dev-noc-api-key")
-# Spec §2.2: batch collection polls the supervision APIs every 5 minutes.
+# How often every configured supervision API is polled. Five minutes is the
+# contracted reporting granularity for this dashboard; it is also about as
+# often as these tools can be polled without the request itself becoming a
+# load problem on the monitoring servers. Raising it delays detection by the
+# same amount, since nothing else drives collection.
 COLLECT_INTERVAL_S = int(os.getenv("ETL_COLLECT_INTERVAL_S", "300"))
 # Where the scheduled end-of-month exports are written (mounted volume).
 REPORTS_DIR = os.getenv("REPORTS_DIR", "/reports")
 
+# Redis DB 0 — the backend's cache database, not the broker's DB 1. The
+# collector-status key written after each pass is read by the backend to answer
+# GET /api/interop/status, so both sides must agree on the database.
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
 HTTP_TIMEOUT_S = int(os.getenv("ETL_HTTP_TIMEOUT_S", "15"))
 
+# How long a NetXMS object's identity (name, primary IP, class) is trusted
+# without re-asking the server. See extract/netxms.py for why this cache exists;
+# the trade is that a node renamed or re-addressed in NetXMS keeps its old
+# identity here for up to this long, which only matters for matching it to a
+# dim_node. A day is well inside how often that happens.
+NETXMS_OBJECT_CACHE_TTL_S = int(os.getenv("NETXMS_OBJECT_CACHE_TTL_S", str(24 * 3600)))
+
 # ── Supervision tool endpoints ──────────────────────────────────────────────
-# A collector runs only when its *_API_URL is set; unset tools are skipped.
-# Cahier des charges §6.1–6.3.
+# A collector runs only when its *_API_URL is set; unset tools are skipped
+# silently. That is the intended way to turn a tool off — there is no separate
+# enable flag — so an endpoint accidentally left blank looks exactly like a
+# tool that was never meant to run. Check the startup log, which names the
+# collectors it activated, before concluding a tool has nothing to report.
 
 ZABBIX_API_URL = os.getenv(
     "ZABBIX_API_URL", ""
@@ -49,9 +85,7 @@ NAGIOS_API_URL = os.getenv(
 ).strip()  # e.g. https://nagios.anptic.bf/nagios
 NAGIOS_USER = os.getenv("NAGIOS_USER", "")
 NAGIOS_PASSWORD = os.getenv("NAGIOS_PASSWORD", "")
-NAGIOS_API_KEY = os.getenv(
-    "NAGIOS_API_KEY", ""
-)  # sent as X-Auth-Token if set (spec §6.2)
+NAGIOS_API_KEY = os.getenv("NAGIOS_API_KEY", "")  # sent as X-Auth-Token if set
 
 NETXMS_API_URL = os.getenv(
     "NETXMS_API_URL", ""

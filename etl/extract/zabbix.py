@@ -1,9 +1,30 @@
 """
-Zabbix collector — JSON-RPC `event.get` (cahier des charges §6.1).
+Zabbix collector — JSON-RPC `problem.get`.
 
 Auth: either a static API token (ZABBIX_API_TOKEN, Zabbix ≥ 5.4) or
 `user.login` with ZABBIX_USER/ZABBIX_PASSWORD (token valid ~30 min, so we
 log in on every poll rather than caching it).
+
+Reports the problems Zabbix currently holds unresolved, not the events raised
+since the last poll — the same "report current state, let the backend
+deduplicate" contract every collector here follows. Read `event.get` with
+`time_from` as the tempting alternative and understand why it is wrong: it
+offers each event in exactly one poll window, so a trigger that fired before
+collection first ran stays invisible for as long as it remains open, any
+outage longer than the look-back leaves a permanent hole, and an ingest that
+fails loses that incident for good. Current state has none of those failure
+modes. A problem that stays open re-reports every pass under its event id,
+which is stable for the life of the problem, and the backend collapses the
+repeats on (source_tool, external_id).
+
+Two API details drive the shape of this module, both verified against Zabbix
+7.0 and neither obvious from the method name:
+
+  * `problem.get` rejects `selectHosts`. It names the trigger in `objectid`
+    instead, so the hosts have to be fetched separately with `trigger.get`.
+  * `suppressed` marks a problem silenced by a maintenance window. Those are
+    dropped: somebody deliberately declared that outage uninteresting, and
+    surfacing it anyway would put planned work into the availability figures.
 """
 
 import logging
@@ -42,40 +63,61 @@ def _login() -> str:
     )
 
 
-def fetch_events(nodes: list[dict], since: datetime) -> list[dict]:
-    """New problem events since `since`, mapped onto dim_node codes."""
+def _hosts_by_trigger(problems: list[dict], token: str) -> dict[str, dict]:
+    """{triggerid: first host} for the triggers behind `problems`."""
+    trigger_ids = sorted({p["objectid"] for p in problems if p.get("objectid")})
+    if not trigger_ids:
+        return {}
+    triggers = _rpc(
+        "trigger.get",
+        {
+            "triggerids": trigger_ids,
+            "output": ["triggerid"],
+            "selectHosts": ["host", "name"],
+        },
+        auth=token,
+    )
+    return {t["triggerid"]: (t.get("hosts") or [{}])[0] for t in triggers}
+
+
+def fetch_events(nodes: list[dict]) -> list[dict]:
+    """Unresolved trigger problems, mapped onto dim_node codes."""
     token = _login()
-    events = _rpc(
-        "event.get",
+    problems = _rpc(
+        "problem.get",
         {
             "output": "extend",
-            "time_from": int(since.timestamp()),
-            "source": 0,  # trigger events
-            "value": 1,  # PROBLEM (not recovery)
-            "selectHosts": ["host", "name"],
-            "sortfield": "clock",
+            "source": 0,  # trigger problems
+            "object": 0,  # raised on a trigger
+            "sortfield": ["eventid"],
             "sortorder": "ASC",
         },
         auth=token,
     )
 
+    hosts = _hosts_by_trigger(problems, token)
+
     results = []
-    for ev in events:
-        hosts = ev.get("hosts") or [{}]
-        host = hosts[0].get("host", "")
-        node_code = match_node(nodes, host, hosts[0].get("name", ""))
+    for problem in problems:
+        # Suppressed = the host is in a maintenance window, so the problem is
+        # silenced on purpose and is not an incident for the dashboard.
+        if int(problem.get("suppressed", 0)):
+            continue
+        host_entry = hosts.get(problem.get("objectid")) or {}
+        host = host_entry.get("host", "")
+        node_code = match_node(nodes, host, host_entry.get("name", ""))
         if node_code is None:
             skip_unmatched("zabbix", host)
             continue
-        detected = datetime.fromtimestamp(int(ev["clock"]), tz=timezone.utc)
+        detected = datetime.fromtimestamp(int(problem["clock"]), tz=timezone.utc)
         results.append(
             {
                 "node_code": node_code,
                 "source_tool": "zabbix",
-                "external_id": f"zabbix-event-{ev['eventid']}",
-                "severity": SEVERITY_MAP.get(int(ev.get("severity", 0)), "medium"),
+                "external_id": f"zabbix-event-{problem['eventid']}",
+                "severity": SEVERITY_MAP.get(int(problem.get("severity", 0)), "medium"),
                 "detected_at": detected.isoformat(),
-                "description": ev.get("name") or "Alerte Zabbix",
+                "description": problem.get("name") or "Alerte Zabbix",
                 "cause_category": None,
                 "cause_label": None,
             }

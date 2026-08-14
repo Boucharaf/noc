@@ -48,8 +48,9 @@ quick overview and getting-started steps, see the [README](../README.md).
                                        ┌─────────▼──────────┐
                                        │   etl-worker        │
                                        │ (Celery worker)      │
-                                       │ POSTs to             │
-                                       │ /api/incidents/ingest │
+                                       │ POSTs each pass to   │
+                                       │ /api/incidents/      │
+                                       │        ingest/bulk   │
                                        └───────────────────────┘
 ```
 
@@ -61,7 +62,7 @@ quick overview and getting-started steps, see the [README](../README.md).
 | `frontend` | `frontend/Dockerfile` | Static React (Vite) build served by nginx-in-container on port 80 |
 | `backend` | `backend/Dockerfile` | FastAPI app (Uvicorn), REST API, JWT auth + RBAC, rate limiting, KPI computation, PDF/DOCX reports, `/ws/alerts` WebSocket, SMS/email + Web Push notifications |
 | `postgres` | `postgres:15-alpine` | System of record — dimensions, incidents, users; runs `database/*.sql` on first boot |
-| `redis` | `redis:7` | Four roles on one instance: KPI response cache + rate-limit counters + `noc:alerts` pub/sub channel (DB 0), and Celery broker (DB 1) |
+| `redis` | `redis:7` | Several roles on one instance: KPI response cache + rate-limit counters + `noc:alerts` pub/sub + collector status + the NetXMS object-identity cache (DB 0), and Celery broker (DB 1) |
 | `etl-worker` | `etl/Dockerfile` | Celery worker executing `etl.collect_incident`, `etl.refresh_kpi_view`, and `etl.generate_monthly_report`; mounts the `reports` volume at `/reports` |
 | `etl-beat` | `etl/Dockerfile` (different command) | Celery beat scheduler — `collect_supervision` every `ETL_COLLECT_INTERVAL_S` seconds (default 300s), `refresh_kpi_view` daily at 02:00, `generate_monthly_report` on the 1st at 02:30 |
 
@@ -92,37 +93,56 @@ split into a `beat` scheduler and a `worker` process — there is no single long
 This is the path that keeps the dashboard feeling "live":
 
 1. `etl-beat` enqueues `etl.collect_supervision` every `ETL_COLLECT_INTERVAL_S`
-   seconds (default 300 — the spec's 5-minute batch, §2.2).
+   seconds (default 300, the contracted reporting granularity).
 2. `etl-worker` picks up the task:
    - Loads all `is_active = TRUE` nodes (code, name, IP, source_tool) from
      Postgres (`pipelines/collector.py`).
    - Polls every **configured** supervision tool (`extract/` — a tool is
-     enabled iff its `*_API_URL` env var is set): Zabbix JSON-RPC `event.get`,
+     enabled iff its `*_API_URL` env var is set): Zabbix JSON-RPC `problem.get`,
      Nagios `statusjson.cgi?query=hostlist`, NetXMS REST `/alarms`, Centreon
      REST v2 `/monitoring/resources`. Failures are isolated per tool.
    - Maps each alert onto a `dim_node` code (exact code → name → IP match,
-     `extract/common.py`); unmatched hosts are logged and skipped.
-   - Tracks a per-tool last-poll timestamp in Redis (`etl:last_poll:{tool}`)
-     so restarts don't re-fetch history.
+     `extract/common.py`); unmatched hosts are logged and skipped. Sources that
+     are not equipment at all (a NetXMS `BusinessService`, say) are dropped
+     silently — see `HOST_CLASSES` in `extract/netxms.py`.
+   - Classifies a cause from the alert text (`transform/causes.py`); text
+     matching no rule stays uncategorised rather than becoming an "Autre"
+     bucket.
+   - Keeps no poll cursor: each collector reports what its tool has open right
+     now, so a missed or failed pass is made good by the next one.
    - Normalizes events into the ingest payload shape (`transform/normalize.py`)
-     and POSTs to `backend:8000/api/incidents/ingest` with
+     and POSTs the **whole pass in one request** to
+     `backend:8000/api/incidents/ingest/bulk` with
      `Authorization: Bearer $NOC_API_KEY` (`load/api_client.py`).
-3. The backend's `incident_service.ingest_incident`:
-   - Resolves the node by code, gets-or-creates the cause dimension row.
-   - **Deduplicates**: a payload whose `(source_tool, external_id)` matches an
-     already-open incident returns that incident (HTTP 200, no side effects) —
-     status pollers legitimately re-report active problems every pass.
-   - Inserts the `fact_incident` row.
-   - Refreshes `mv_kpi_node_monthly` synchronously **when `SYNC_MV_REFRESH=true`**
-     (the default, fine for the small demo dataset). In production set it to
-     `false` and rely on the nightly `etl.refresh_kpi_view` batch (spec §2.2) —
-     see [Scheduled jobs](#scheduled-jobs).
-   - Invalidates all `kpi:*` Redis cache keys so the next dashboard read recomputes.
-4. The ingest **route** then publishes the incident to the `noc:alerts` Redis
-   channel (pushed to browsers — see
+3. The backend's `incident_service.ingest_incidents_bulk` treats the batch as a
+   **snapshot of what is currently wrong**, not a list of things to append:
+
+   | In the batch | Already open | Result |
+   |---|---|---|
+   | ✅ | ❌ | created |
+   | ✅ | ✅ | ignored — the same alert re-reported |
+   | ❌ | ✅ | **resolved** — the alert cleared |
+
+   - Both dedupe and reconciliation key on `(source_tool, external_id)`.
+     Reconciliation is what finally closes incidents: supervision tools report
+     state, so a cleared alert simply stops being listed and nothing else ever
+     announces that it ended.
+   - **An empty batch reconciles nothing** — it is indistinguishable from a
+     collector that authenticated and returned nothing, and closing everything
+     would destroy the real detection times (the next poll re-creates them as
+     new incidents detected *now*).
+   - One lookup per *set* of node codes and external ids, one commit, one
+     `mv_kpi_node_monthly` refresh (when `SYNC_MV_REFRESH=true`) and one
+     `kpi:*` cache invalidation for the whole batch. The per-incident path does
+     all of that per row, which is what makes it unusable at ~1450 alarms.
+4. The batch path **does not** broadcast or notify — notifying per item would
+   page the permanence a thousand times for a backlog it already knows about.
+   The single-incident `POST /api/incidents/ingest` still publishes to the
+   `noc:alerts` Redis channel (see
    [Real-time alerts](#real-time-alerts-websocket)) and, for `critical`
    severity, schedules **two independent** FastAPI background tasks: SMS/email
-   and Web Push (see [Notifications](#notifications-smsemailpush)).
+   and Web Push (see [Notifications](#notifications-smsemailpush)). Anything
+   that must reach a human on arrival belongs on that path.
 5. Acknowledge/resolve actions (JWT + role-gated, dashboard-driven) follow the same
    commit → (refresh view for resolve) → cache-invalidate pattern.
 
@@ -155,8 +175,8 @@ Two independent services react to a **critical** incident, both as FastAPI
 **background tasks** scheduled after the webhook response is sent (the
 supervision tool never waits on either):
 
-**SMS/email** — `backend/app/services/notification_service.py` implements the
-spec's §7 step 6: the NOC lead gets an SMS (Twilio REST API, plain `requests`
+**SMS/email** — `backend/app/services/notification_service.py` handles
+escalation on critical incidents: the NOC lead gets an SMS (Twilio REST API, plain `requests`
 call — no SDK) and the permanence list gets an email (stdlib `smtplib`,
 STARTTLS). Disabled by default (`NOTIFICATIONS_ENABLED=false`); config is
 `TWILIO_*`, `NOC_SMS_RECIPIENTS`, `SMTP_*`, `NOC_EMAIL_RECIPIENTS`.
@@ -180,13 +200,19 @@ Celery beat (`etl/celery_app.py`) drives three schedules, executed by
 
 | Task | Schedule | What it does |
 |---|---|---|
-| `etl.collect_supervision` | every `ETL_COLLECT_INTERVAL_S` (default 300s, spec §2.2) | Polls every configured supervision-tool API and POSTs new alerts to `/ingest` |
-| `etl.refresh_kpi_view` | daily **02:00** | `REFRESH MATERIALIZED VIEW CONCURRENTLY mv_kpi_node_monthly` (spec §2.2 nightly batch; `CONCURRENTLY` works because the view has a unique index on `(month, node_id)`) |
+| `etl.collect_supervision` | every `ETL_COLLECT_INTERVAL_S` (default 300s) | Polls every configured supervision-tool API and POSTs each tool's whole active set to `/ingest/bulk` (creates new alerts, resolves cleared ones) |
+| `etl.refresh_kpi_view` | daily **02:00** | `REFRESH MATERIALIZED VIEW CONCURRENTLY mv_kpi_node_monthly` (`CONCURRENTLY` works because the view has a unique index on `(month, node_id)`, and keeps dashboard reads unblocked while it runs) |
 | `etl.generate_monthly_report` | **1st of month, 02:30** | Downloads the previous month's report from `/api/report/monthly` (PDF + DOCX, authenticating with the static API key) and archives both to the `reports` volume (`/reports`) |
 
 The synchronous refresh-on-write in the backend (`SYNC_MV_REFRESH`, default
 `true`) exists so small demo datasets reflect each ingested incident instantly; set it
-to `false` in production and let the nightly job own the refresh.
+to `false` in production and let the nightly job own the refresh. A bulk ingest
+refreshes once per batch rather than once per incident.
+
+Note the tension `availability_pct` introduces: it measures ongoing outages
+against `NOW()`, so with the refresh disabled the availability figures are only
+as fresh as the last nightly run — see
+[database-schema.md](database-schema.md#mv_kpi_node_monthly).
 
 ## Security: RBAC & rate limiting
 
@@ -195,8 +221,9 @@ to `false` in production and let the nightly job own the refresh.
   `resolve` require `admin` or `noc_agent` (analyst gets `403`). The frontend
   hides the acknowledge button from analysts rather than letting it fail.
 - **Rate limiting** (`backend/app/core/rate_limit.py`): per-IP fixed 60s
-  windows in Redis — 100/min shared across read endpoints, 10/min on
-  `/ingest`; `429` + `Retry-After: 60` beyond that. Fail-open on Redis outage;
+  windows in Redis — 100/min shared across read endpoints, 10/min shared by
+  `/ingest` and `/ingest/bulk` (a bulk call costs one unit however many
+  incidents it carries); `429` + `Retry-After: 60` beyond that. Fail-open on Redis outage;
   behind NGINX the client IP comes from `X-Real-IP`.
 
 ## Caching strategy

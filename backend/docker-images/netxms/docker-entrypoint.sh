@@ -110,6 +110,21 @@ SQL
   log "database initialized (admin password taken from NETXMS_ADMIN_PASSWORD)"
 }
 
+# netxmsd takes a lock row in the database and releases it when it shuts down.
+# A container that is killed rather than stopped — a host reboot, an OOM kill —
+# never gets there, and the next start refuses with "Database is already locked
+# by another NetXMS server instance", needing a manual `nxdbmgr unlock`. Exactly
+# one server ever uses this database, so a lock found at startup is stale by
+# definition. (Point a second netxmsd at the same database and this would let
+# both run; don't.)
+unlock_db() {
+  local output
+  output=$(yes | nxdbmgr -c "$CONF" unlock 2>&1) || true
+  case "$output" in
+  *"lock removed"*) log "cleared a stale database lock left by an unclean stop" ;;
+  esac
+}
+
 # ─────────────────────────── local agent ───────────────────────────
 # netxmsd always creates a management node for itself, named after the container
 # hostname; the local agent is what turns it into an actually monitored node
@@ -135,6 +150,7 @@ if [ "${1:-netxmsd}" = "netxmsd" ]; then
   write_config
   wait_for_db
   init_db
+  unlock_db
   start_agent
   log "starting netxmsd"
   exec netxmsd -c "$CONF" -q

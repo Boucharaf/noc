@@ -15,14 +15,22 @@ import {
   useKpiLocalitiesMap,
 } from "../hooks/useKPI";
 
+// Fills whatever box it stands in, with no height of its own: a placeholder
+// taller than the content it is replaced by makes the whole page jump when the
+// data lands (it used to be min-h-32 in front of an h-20 chart).
 const ChartLoading = () => (
   <div
-    className="flex h-full min-h-32 items-center justify-center text-sm"
+    className="flex h-full w-full items-center justify-center text-sm"
     style={{ color: "var(--color-text-muted)" }}
   >
     Chargement…
   </div>
 );
+
+// Tall enough for a six-month bar chart and a donut with its legend to be
+// readable. At the previous h-20 (80px) the bars were a few pixels of colour
+// against their own axis labels.
+const CHART_BOX = "h-48";
 
 const GlobalView = () => {
   const navigate = useNavigate();
@@ -107,7 +115,10 @@ const GlobalView = () => {
           screen is too short, `main` scrolls as the fallback and the map/list
           row keeps a usable floor instead of collapsing to nothing. */}
       <div className="flex min-h-0 flex-1 flex-col gap-4">
-        <div className="grid min-h-[260px] flex-1 auto-rows-fr grid-cols-1 gap-4 lg:grid-cols-5">
+        {/* 380px = the map's 280px floor + its legend + the card's header and
+            padding (66px). Any less and the card, which does not clip, gets a
+            map painted straight through the card below it. */}
+        <div className="grid min-h-[380px] flex-1 auto-rows-fr grid-cols-1 gap-4 lg:grid-cols-5">
           <Card
             title="Carte de Supervision"
             subtitle="Cliquez une localité pour la retrouver dans Vue par Localité"
@@ -117,11 +128,7 @@ const GlobalView = () => {
             {mapLoading ? (
               <ChartLoading />
             ) : (
-              <BurkinaFasoMap
-                localities={localities}
-                onSelect={goToLocality}
-                height="100%"
-              />
+              <BurkinaFasoMap localities={localities} onSelect={goToLocality} />
             )}
           </Card>
           <Card
@@ -144,12 +151,12 @@ const GlobalView = () => {
 
         <div className="grid shrink-0 grid-cols-1 gap-4 lg:grid-cols-2">
           <Card title="Évolution Mensuelle" subtitle="6 derniers mois">
-            <div className="h-20">
+            <div className={CHART_BOX}>
               {trendLoading ? <ChartLoading /> : <WeeklyBar points={trend} />}
             </div>
           </Card>
           <Card title="Répartition des incidents par cause">
-            <div className="h-20">
+            <div className={CHART_BOX}>
               {causesLoading ? <ChartLoading /> : <MTTRDonut causes={causes} />}
             </div>
           </Card>

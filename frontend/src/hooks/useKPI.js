@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 
+import * as interopApi from '../api/interop';
 import * as kpiApi from '../api/kpi';
 import * as slaApi from '../api/sla';
 import { usePeriodStore } from '../store';
@@ -82,6 +83,18 @@ export const useKpiCompare = () => {
   return useQuery({
     queryKey: ['kpi', 'compare', year, month],
     queryFn: () => kpiApi.getCompare(month, year),
+  });
+};
+
+// Collector health is liveness, not a KPI: it is refetched on its own short
+// interval rather than sitting until the period changes, so a tool that starts
+// failing shows up without a reload.
+export const useInteropStatus = () => {
+  const { month, year } = usePeriodStore();
+  return useQuery({
+    queryKey: ['interop', 'status', year, month],
+    queryFn: () => interopApi.getInteropStatus(month, year),
+    refetchInterval: 30000,
   });
 };
 

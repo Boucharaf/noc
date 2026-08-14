@@ -1,6 +1,7 @@
 from app.routes.alerts import router as alerts_router
 from app.routes.auth import router as auth_router
 from app.routes.incidents import router as incidents_router
+from app.routes.interop import router as interop_router
 from app.routes.kpi import locality_router, router as kpi_router
 from app.routes.notifications import router as notifications_router
 from app.routes.report import router as report_router
@@ -17,4 +18,5 @@ all_routers = [
     report_router,
     ws_router,
     notifications_router,
+    interop_router,
 ]

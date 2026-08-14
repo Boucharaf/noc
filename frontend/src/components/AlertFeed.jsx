@@ -4,19 +4,16 @@ import Card from "./Card";
 import { useAcknowledgeIncident, useOpenAlerts } from "../hooks/useRealtime";
 import { useAuthStore } from "../store/auth";
 import { SEVERITY_COLOR } from "../theme/colors";
-
-const formatAge = (minutes) => {
-  if (minutes < 60) return `il y a ${minutes} min`;
-  if (minutes < 1440) return `il y a ${Math.round(minutes / 60)}h`;
-  return `il y a ${Math.round(minutes / 1440)}j`;
-};
+import { formatAge } from "../utils/format";
 
 const AlertFeed = () => {
   const { data: alerts = [], isLoading } = useOpenAlerts(20);
   const acknowledge = useAcknowledgeIncident();
   const role = useAuthStore((state) => state.user?.role);
-  // Spec §10.1 — analysts are read-only; the backend enforces this with a 403,
-  // so don't show them an action that can only fail.
+  // Analysts are read-only. The backend enforces that with a 403 and remains
+  // the authority; hiding the button here only spares them an action that
+  // could never succeed. Keep both — dropping the server check would make this
+  // the control, and it is trivially bypassed from the browser.
   const canAcknowledge = role === "admin" || role === "noc_agent";
 
   return (

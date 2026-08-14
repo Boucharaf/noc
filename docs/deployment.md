@@ -42,7 +42,11 @@ Plus the **bundled supervision/ITSM servers** the collectors poll (see
 | `zabbix-agent` | `zabbix/zabbix-agent2:alpine-7.0-latest` | — | monitors the Zabbix host itself |
 | `zabbix-db` | `postgres:15-alpine` | — | Zabbix's own database |
 | `nagios` | `jasonrivers/nagios:latest` | `8083:80` | `$NAGIOS_USER`/`$NAGIOS_PASSWORD` |
-| `itop` | `vbkunin/itop:3.2.2` | `8082:80` | embedded MariaDB; one-time setup wizard; standalone tool, no backend integration |
+| `itop` | `vbkunin/itop:3.2.2` | `8082:80` | embedded MariaDB; one-time setup required (REST 500s until then) — polled read-only by `etl/extract/itop.py` |
+| `netxms` | `./backend/docker-images/netxms` | `8085:8000`, `4701:4701` | server + Web API (REST v1) |
+| `netxms-webui` | `./backend/docker-images/netxms-webui` | `8086:8080` | nxmc console (Tomcat), talks NXCP on 4701 |
+| `netxms-db` | `postgis/postgis:15-3.5-alpine` | `5438:5432` | **PostGIS**, not plain `postgres:15` — the ANPTIC reference data has geometry columns |
+| `centreon` | `./backend/docker-images/centreon` | `8084:80` | central + REST v2; unattended install on first start |
 
 `etl-worker` and `etl-beat` share the same image/Dockerfile but run different
 Celery commands (`worker` vs `beat`) — see [architecture.md](architecture.md#components).
@@ -113,12 +117,22 @@ fresh keypair per environment; never reuse the demo one shipped in this repo's
 **Materialized view refresh**
 `SYNC_MV_REFRESH` (default `true`: refresh `mv_kpi_node_monthly` on every
 write — demo behavior; set `false` in production and rely on the nightly
-02:00 `etl.refresh_kpi_view` job)
+02:00 `etl.refresh_kpi_view` job). A bulk ingest refreshes once per batch, not
+once per incident.
+
+⚠️ `availability_pct` measures ongoing outages against `NOW()`, so with the
+synchronous refresh off, availability is only as fresh as the last refresh —
+weigh that against the write cost rather than disabling it reflexively.
+
+**NetXMS database (geography rebuild only)**
+`NETXMS_DB_NAME`, `NETXMS_DB_USER`, `NETXMS_DB_PASSWORD` — read directly by
+`etl/rebuild_geography.py`, whose administrative reference tables have no REST
+equivalent. Collectors never use these.
 
 **ETL / Celery**
 `CELERY_BROKER_DB` (Redis logical DB for the broker, default 1 — separate from
 the backend's cache on DB 0), `ETL_COLLECT_INTERVAL_S` (seconds between
-supervision-API polls, default 300 — spec §2.2), `REPORTS_DIR` (where the monthly report job
+supervision-API polls, default 300), `REPORTS_DIR` (where the monthly report job
 writes, default `/reports`)
 
 **Global**
@@ -163,9 +177,11 @@ script.
 `nginx/generate_cert.sh` creates a **self-signed** certificate at
 `nginx/certs/noc-selfsigned.crt`/`.key`, valid 825 days, with SANs for
 `noc.anptic.bf`, `noc-api.anptic.bf`, `localhost`, and `127.0.0.1`. It satisfies
-the cahier des charges' "HTTPS obligatoire" (§10.1) requirement for local/demo
+the requirement that the dashboard be served over HTTPS for local and demo
 use, but browsers and `curl` will flag it as untrusted since it isn't
-CA-signed.
+CA-signed. Replace it with a CA-signed certificate before any deployment real
+users log in to — a certificate warning trains them to click through exactly
+the dialog that would warn them about an interception.
 
 Regenerate it (e.g. after expiry, or to add a SAN):
 
@@ -248,9 +264,19 @@ Before pointing this at real traffic / real supervision tools:
 - [ ] Generate a **fresh** `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY` pair for Web
       Push — do not reuse the demo keypair shipped in this repo's `.env` (see
       [integrations.md](integrations.md#web-push-browserpwa)).
-- [ ] Set `SYNC_MV_REFRESH=false` so the nightly 02:00 `etl.refresh_kpi_view`
-      job owns the materialized-view refresh (per-write refresh gets expensive
-      at production incident volume).
+- [ ] Decide on `SYNC_MV_REFRESH`. `false` moves the cost to the nightly 02:00
+      `etl.refresh_kpi_view` job, but availability then reflects ongoing
+      outages only as of that run. Bulk ingest already refreshes once per
+      batch rather than per incident, so the per-write cost is far lower than
+      it used to be.
+- [ ] Review `ACCESS_TOKEN_EXPIRE_MINUTES` (default 30). Sessions renew
+      themselves while the dashboard is in use
+      (`POST /api/auth/refresh`), so this is the idle timeout, not the maximum
+      session length — it does not need raising for a wall display.
+- [ ] Replace the seeded dimensions with real reference data
+      (`etl/rebuild_geography.py --apply`) and provision the real CMDB, or
+      collected alerts will not match any node — see
+      [README](../README.md#loading-the-real-cmdb).
 - [ ] Configure and enable notifications: real Twilio + SMTP credentials,
       `NOC_SMS_RECIPIENTS`/`NOC_EMAIL_RECIPIENTS`, then
       `NOTIFICATIONS_ENABLED=true`.

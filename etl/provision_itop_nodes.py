@@ -28,10 +28,16 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
 # Leading '-'-delimited token (uppercased) -> existing dim_locality.code.
-# Confident matches only — see plan discussion for why the many other town
-# prefixes seen in real ticket data (KOUP, DIAL, SABO, KONG, OROD, NAKO,
-# DANO, TANG, KORS, KOMB, YAKO, GOUR, REO, NOBE, BOUS, ...) are left to fall
-# back to SIE rather than guessing an unverified region.
+#
+# Only prefixes whose town is unambiguous are listed. Real ticket data carries
+# many more that look like place names — KOUP, DIAL, SABO, KONG, OROD, NAKO,
+# DANO, TANG, KORS, KOMB, YAKO, GOUR, REO, NOBE, BOUS and others — and they are
+# deliberately left out. Guessing a region for one of them would file a node
+# under a locality nobody verified, and since locality drives the geographic
+# breakdown of every KPI, a wrong guess is worse than the honest fallback: it
+# produces a confident number that is quietly incorrect and that no later
+# reader has any reason to doubt. Adding an entry here is cheap; do it once
+# somebody who knows the site confirms the mapping.
 LOCALITY_PREFIX_MAP = {
     "GAOU": "GAO",
     "GAOUA": "GAO",
@@ -53,6 +59,13 @@ LOCALITY_PREFIX_MAP = {
     "PO": "PO",
 }
 FALLBACK_LOCALITY_CODE = "SIE"
+FALLBACK_LOCALITY_NAME = "Siège / infrastructure centrale"
+# The fallback locality is created on first run rather than assumed: it is not
+# one of the seeded towns, and every host whose prefix is not in the map above
+# lands on it, so a missing row failed the whole backfill on the first such
+# host. Attached to the region that holds Ouagadougou, where the central
+# infrastructure sits.
+FALLBACK_REGION_OF = "OUA"
 
 # (keyword, node_type) — first substring match (case-insensitive) wins.
 NODE_TYPE_RULES = [
@@ -95,6 +108,28 @@ def _extract_hosts() -> tuple[dict[str, str | None], int]:
     return hosts, no_hint
 
 
+def _ensure_fallback_locality(cur, locality_ids: dict[str, int]) -> None:
+    """Create the fallback locality if this database has never had one."""
+    if FALLBACK_LOCALITY_CODE in locality_ids:
+        return
+    cur.execute(
+        "INSERT INTO dim_locality (region_id, code, name)"
+        " SELECT region_id, %s, %s FROM dim_locality WHERE code = %s"
+        " RETURNING id",
+        (FALLBACK_LOCALITY_CODE, FALLBACK_LOCALITY_NAME, FALLBACK_REGION_OF),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise RuntimeError(
+            f"Cannot create the {FALLBACK_LOCALITY_CODE} locality: no {FALLBACK_REGION_OF}"
+            " locality to take a region from — seed dim_locality first."
+        )
+    locality_ids[FALLBACK_LOCALITY_CODE] = row[0]
+    logger.info(
+        "Created fallback locality %s (id %d)", FALLBACK_LOCALITY_CODE, row[0]
+    )
+
+
 def _locality_id(name: str, locality_ids: dict[str, int]) -> int:
     prefix = name.split("-", 1)[0].upper()
     code = LOCALITY_PREFIX_MAP.get(prefix, FALLBACK_LOCALITY_CODE)
@@ -119,6 +154,7 @@ def main() -> None:
         with conn.cursor() as cur:
             cur.execute("SELECT code, id FROM dim_locality")
             locality_ids = dict(cur.fetchall())
+            _ensure_fallback_locality(cur, locality_ids)
 
             cur.execute("SELECT lower(name) FROM dim_node")
             existing_names = {row[0] for row in cur.fetchall()}

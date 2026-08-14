@@ -61,9 +61,13 @@ const NodeList = ({ nodes = [], loading }) => (
                 />
               </div>
               <div className="min-w-0">
+                {/* Real CMDB names run past the column ("OUAG-DCI_OUAGA_5-CPEK01"),
+                    and three neighbouring rows can truncate to the same
+                    "OUAG-DCI_OUAG…". The title puts the full name one hover away. */}
                 <p
                   className="truncate text-sm font-medium"
                   style={{ color: "var(--color-text-primary)" }}
+                  title={node.name}
                 >
                   {node.name}
                 </p>

@@ -1,11 +1,12 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { Globe, MapPin, ShieldAlert, Zap, Database } from 'lucide-react';
+import { Globe, Map, MapPin, ShieldAlert, Zap, Database } from 'lucide-react';
 
 const TabNav = () => {
   const tabs = [
     { name: 'Vue Globale', path: '/global', icon: Globe },
     { name: 'Vue par Localité', path: '/locality', icon: MapPin },
+    { name: 'Carte', path: '/map', icon: Map },
     { name: 'SLA & Alertes', path: '/sla', icon: ShieldAlert },
     { name: 'Interopérabilité', path: '/interop', icon: Zap },
     { name: 'Modèle de Données', path: '/datamodel', icon: Database },

@@ -28,6 +28,38 @@ def fake_summary(monkeypatch):
     monkeypatch.setattr(kpi_routes.kpi_service, "get_summary", lambda db, m, y: SUMMARY)
 
 
+# --- Session renewal ---
+
+
+def test_refresh_requires_a_valid_token(client):
+    """An expired session must not be revivable — renewal runs off the access
+    token itself, so once it lapses the only way back in is a fresh login."""
+    assert client.post("/api/auth/refresh").status_code == 401
+
+
+def test_refresh_returns_a_new_token_and_its_lifetime(client, admin_headers):
+    response = client.post("/api/auth/refresh", headers=admin_headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["access_token"]
+    # The client renews ahead of expiry using this, rather than parsing the JWT.
+    assert body["expires_in"] > 0
+    assert body["user"]["username"] == "admin"
+
+
+def test_login_reports_token_lifetime(client, monkeypatch):
+    monkeypatch.setattr(
+        "app.routes.auth.auth_service.authenticate_with_password",
+        lambda db, username, password: SimpleNamespace(
+            id=1, username="admin", full_name="Admin NOC", role="admin"
+        ),
+    )
+    body = client.post(
+        "/api/auth/login", json={"username": "admin", "password": "x"}
+    ).json()
+    assert body["expires_in"] > 0
+
+
 # --- Auth on read endpoints (spec §10.1) ---
 
 
@@ -231,4 +263,101 @@ def test_ingest_duplicate_is_idempotent(client, fake_ingest, monkeypatch):
 def test_ingest_validates_source_tool(client, fake_ingest):
     payload = {**INGEST_PAYLOAD, "source_tool": "solarwinds"}
     response = client.post("/api/incidents/ingest", json=payload, headers=API_KEY_HEADERS)
+    assert response.status_code == 422
+
+
+# --- Bulk ingest (batch pollers) ---
+
+BULK_RESULT = {
+    "received": 2,
+    "created": 2,
+    "duplicates": 0,
+    "unknown_node": 0,
+    "resolved": 0,
+}
+
+
+@pytest.fixture
+def fake_bulk_ingest(monkeypatch):
+    published = []
+    notified = []
+    invalidated = []
+    monkeypatch.setattr(
+        incidents_routes.incident_service,
+        "ingest_incidents_bulk",
+        lambda db, payloads: {**BULK_RESULT, "received": len(payloads)},
+    )
+    monkeypatch.setattr(
+        incidents_routes.cache_service, "invalidate_prefix", invalidated.append
+    )
+    monkeypatch.setattr(
+        incidents_routes.alert_broadcaster, "publish_alert", published.append
+    )
+    monkeypatch.setattr(
+        incidents_routes.notification_service,
+        "notify_critical_incident",
+        lambda *args: notified.append(args),
+    )
+    return published, notified, invalidated
+
+
+def test_bulk_ingest_requires_api_key(client, fake_bulk_ingest):
+    response = client.post(
+        "/api/incidents/ingest/bulk", json={"incidents": [INGEST_PAYLOAD]}
+    )
+    assert response.status_code == 401
+
+
+def test_bulk_ingest_returns_counts(client, fake_bulk_ingest):
+    response = client.post(
+        "/api/incidents/ingest/bulk",
+        json={"incidents": [INGEST_PAYLOAD, INGEST_PAYLOAD]},
+        headers=API_KEY_HEADERS,
+    )
+    assert response.status_code == 200
+    assert response.json() == BULK_RESULT
+
+
+def test_bulk_ingest_never_notifies_even_on_critical(client, fake_bulk_ingest):
+    """A pass reconciling a whole active set must not page the permanence once
+    per alarm — that is the entire reason the batch path exists."""
+    published, notified, _ = fake_bulk_ingest
+    response = client.post(
+        "/api/incidents/ingest/bulk",
+        json={"incidents": [INGEST_PAYLOAD]},  # severity "critical"
+        headers=API_KEY_HEADERS,
+    )
+    assert response.status_code == 200
+    assert published == []
+    assert notified == []
+
+
+def test_bulk_ingest_invalidates_kpi_cache(client, fake_bulk_ingest):
+    """Otherwise the dashboard keeps serving the figures cached before the
+    batch — a pass that resolved 190 incidents still reporting 0% resolution."""
+    _, _, invalidated = fake_bulk_ingest
+    client.post(
+        "/api/incidents/ingest/bulk",
+        json={"incidents": [INGEST_PAYLOAD]},
+        headers=API_KEY_HEADERS,
+    )
+    assert invalidated == ["kpi:"]
+
+
+def test_bulk_ingest_validates_each_incident(client, fake_bulk_ingest):
+    payload = {**INGEST_PAYLOAD, "source_tool": "solarwinds"}
+    response = client.post(
+        "/api/incidents/ingest/bulk",
+        json={"incidents": [INGEST_PAYLOAD, payload]},
+        headers=API_KEY_HEADERS,
+    )
+    assert response.status_code == 422
+
+
+def test_bulk_ingest_rejects_oversized_batch(client, fake_bulk_ingest):
+    response = client.post(
+        "/api/incidents/ingest/bulk",
+        json={"incidents": [INGEST_PAYLOAD] * 5001},
+        headers=API_KEY_HEADERS,
+    )
     assert response.status_code == 422

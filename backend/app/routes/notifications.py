@@ -5,7 +5,11 @@ from app.core.constants import VAPID_PUBLIC_KEY
 from app.core.security import get_current_user
 from app.db.session import get_db
 from app.models.user import User
-from app.schemas.notifications import PushSubscriptionPayload, VapidPublicKeyResponse
+from app.schemas.notifications import (
+    PushSubscriptionPayload,
+    PushUnsubscribePayload,
+    VapidPublicKeyResponse,
+)
 from app.services import push_service
 
 router = APIRouter(prefix="/api/notifications", tags=["notifications"])
@@ -27,7 +31,7 @@ def subscribe(
 
 @router.delete("/subscribe", status_code=204)
 def unsubscribe(
-    payload: PushSubscriptionPayload,
+    payload: PushUnsubscribePayload,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):

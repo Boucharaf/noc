@@ -33,9 +33,16 @@ docker build --build-arg NETXMS_VERSION=6.2.2-1+bookworm -t noc-netxms backend/d
    even when the password is set at init, and it makes the account answer `403`
    after a single login — which would break the collector, since it logs in on
    every poll.
-4. Starts the bundled NetXMS agent on loopback, so the server's own management
+4. Clears a stale database lock. `netxmsd` takes a lock row and releases it on
+   shutdown; a container that is killed rather than stopped (host reboot, OOM)
+   never gets there, and the next start refuses with *"Database is already
+   locked by another NetXMS server instance"* until someone runs `nxdbmgr
+   unlock` by hand. Only one server uses this database, so a lock found at
+   startup is stale — do not point a second `netxmsd` at the same database,
+   because this would let both run.
+5. Starts the bundled NetXMS agent on loopback, so the server's own management
    node is actually monitored (the role `zabbix-agent` plays for Zabbix).
-5. Runs `netxmsd` in the foreground as PID 1.
+6. Runs `netxmsd` in the foreground as PID 1.
 
 The `HEALTHCHECK` performs the collector's own `POST /v1/login` and requires a
 token back, so "healthy" means the ETL contract works.
