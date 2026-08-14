@@ -203,6 +203,8 @@ services:
   # Zabbix schema never mixes with the dashboard schema).
   zabbix-db:
     image: postgres:15-alpine
+    ports:
+      - "5440:5432"
     environment:
       - POSTGRES_USER=${ZABBIX_DB_USER}
       - POSTGRES_PASSWORD=${ZABBIX_DB_PASSWORD}
@@ -356,6 +358,8 @@ services:
   # Centreon installer checks before it will create its schemas.
   centreon-db:
     image: mariadb:10.11
+    ports:
+      - "3308:3306"
     command:
       - --innodb-file-per-table=1
       - --open-files-limit=32000
