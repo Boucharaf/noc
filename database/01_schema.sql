@@ -16,6 +16,16 @@ CREATE TABLE dim_locality (
   latitude    DECIMAL(9,6),
   longitude   DECIMAL(9,6),
   population  INTEGER DEFAULT 0,
+
+  -- ajouts NOC terrain (v2) — voir app/models/dimension.py::Locality
+  site_type        VARCHAR(30),
+  criticality_tier  VARCHAR(10) DEFAULT 'T3',
+  has_backup_power BOOLEAN DEFAULT FALSE,
+  address          TEXT,
+  access_notes     TEXT,
+  contact_name     VARCHAR(150),
+  contact_phone    VARCHAR(30),
+
   created_at  TIMESTAMP DEFAULT NOW()
 );
 
@@ -27,10 +37,36 @@ CREATE TABLE dim_node (
   node_type    VARCHAR(50)  NOT NULL,
   ip_address   INET,
   source_tool  VARCHAR(20)  NOT NULL
-                 CHECK (source_tool IN ('zabbix','nagios','netxms','centreon','itop')),
+                 CHECK (source_tool IN ('zabbix','nagios','netxms','centreon','nsp','itop')),
   itop_ci_id   VARCHAR(50),
   is_active    BOOLEAN DEFAULT TRUE,
+
+  -- ajouts traçabilité matérielle + topologie (v2) — voir app/models/dimension.py::Node
+  vendor              VARCHAR(100),
+  model               VARCHAR(100),
+  serial_number       VARCHAR(100),
+  firmware_version    VARCHAR(50),
+  installed_at        TIMESTAMP,
+  warranty_expiry_at  TIMESTAMP,
+  criticality_tier    VARCHAR(10) DEFAULT 'T3',
+  parent_node_id      INTEGER REFERENCES dim_node(id),
+  rack_location       VARCHAR(100),
+  last_seen_at        TIMESTAMP,
+
   created_at   TIMESTAMP DEFAULT NOW()
+);
+
+-- Un nœud physique peut être supervisé par plusieurs outils à la fois (ex.
+-- Zabbix pour le temps réel + iTop pour le ticketing) — sert aussi à
+-- détecter les doublons d'équipements entre outils.
+CREATE TABLE dim_node_monitoring_source (
+  id           SERIAL PRIMARY KEY,
+  node_id      INTEGER NOT NULL REFERENCES dim_node(id),
+  tool         VARCHAR(20) NOT NULL CHECK (tool IN ('zabbix','nagios','netxms','centreon','nsp','itop')),
+  external_id  VARCHAR(100) NOT NULL,
+  is_primary   BOOLEAN DEFAULT FALSE,
+  created_at   TIMESTAMP DEFAULT NOW(),
+  UNIQUE(tool, external_id)
 );
 
 CREATE TABLE dim_cause (
@@ -40,13 +76,14 @@ CREATE TABLE dim_cause (
   UNIQUE(category, label)
 );
 
--- Comptes du tableau de bord (§10.1 : admin / analyst / noc_agent)
+-- Comptes du tableau de bord — 4 rôles distincts (Directeur, Chef NOC,
+-- Technicien/Ingénieur, Agent terrain), voir app/models/user.py::VALID_ROLES.
 CREATE TABLE dim_user (
   id             SERIAL PRIMARY KEY,
   username       VARCHAR(50)  UNIQUE NOT NULL,
   full_name      VARCHAR(150) NOT NULL,
-  role           VARCHAR(20)  NOT NULL DEFAULT 'noc_agent'
-                   CHECK (role IN ('admin','analyst','noc_agent')),
+  role           VARCHAR(20)  NOT NULL DEFAULT 'agent_terrain'
+                   CHECK (role IN ('directeur','chef_noc','technicien','agent_terrain')),
   password_hash  VARCHAR(100) NOT NULL,
   -- SHA-256 of the PIN, for fast quick-login lookup by hash (bcrypt is used
   -- for the primary password; a short PIN doesn't warrant adaptive hashing
@@ -54,7 +91,31 @@ CREATE TABLE dim_user (
   pin_hash       VARCHAR(64)  UNIQUE,
   is_active      BOOLEAN DEFAULT TRUE,
   last_login_at  TIMESTAMP,
+
+  -- ajouts scope + organisation (v2) — voir app/models/user.py
+  region_id       INTEGER REFERENCES dim_region(id),
+  locality_id     INTEGER REFERENCES dim_locality(id),
+  phone_number    VARCHAR(30),
+  employee_code   VARCHAR(30),
+  team            VARCHAR(50),
+  mfa_enabled     BOOLEAN DEFAULT FALSE,
+
   created_at     TIMESTAMP DEFAULT NOW()
+);
+
+-- Fenêtre de maintenance planifiée : un incident détecté pendant une fenêtre
+-- active est marqué 'maintenance' plutôt que remonté comme alerte critique.
+-- Placée après dim_user, dont created_by_user_id dépend.
+CREATE TABLE dim_maintenance_window (
+  id                   SERIAL PRIMARY KEY,
+  node_id              INTEGER REFERENCES dim_node(id),
+  locality_id          INTEGER REFERENCES dim_locality(id),
+  reason               TEXT NOT NULL,
+  starts_at            TIMESTAMP NOT NULL,
+  ends_at              TIMESTAMP NOT NULL,
+  suppress_alerts      BOOLEAN DEFAULT TRUE,
+  created_by_user_id   INTEGER NOT NULL REFERENCES dim_user(id),
+  created_at           TIMESTAMP DEFAULT NOW()
 );
 
 -- Table de faits principale
@@ -84,7 +145,44 @@ CREATE TABLE fact_incident (
   ) STORED,
   source_tool      VARCHAR(20) NOT NULL,
   description      TEXT,
+
+  -- ajouts flux de traitement / rôles (v2) — voir app/models/incident.py
+  assigned_to_user_id    INTEGER REFERENCES dim_user(id),
+  escalation_level       INTEGER DEFAULT 0,
+  escalated_at           TIMESTAMP,
+  escalated_to_user_id   INTEGER REFERENCES dim_user(id),
+
+  -- ajouts SLA / pilotage (v2)
+  sla_target_minutes  INTEGER,
+  sla_breached        BOOLEAN DEFAULT FALSE,
+  impact_scope        INTEGER DEFAULT 1,
+  incident_type       VARCHAR(30),
+  parent_incident_id  BIGINT REFERENCES fact_incident(id),
+  reopened_count      INTEGER DEFAULT 0,
+
   created_at       TIMESTAMP DEFAULT NOW()
+);
+
+-- Journal d'audit d'un incident : chaque changement de statut, note,
+-- réassignation ou escalade y laisse une ligne (preuve en cas de
+-- contestation SLA, reconstitution du déroulé par le Chef NOC/Directeur).
+CREATE TABLE fact_incident_timeline (
+  id            BIGSERIAL PRIMARY KEY,
+  incident_id   BIGINT NOT NULL REFERENCES fact_incident(id),
+  user_id       INTEGER REFERENCES dim_user(id),  -- null = événement système/ETL
+  action        VARCHAR(30) NOT NULL,  -- created|acknowledged|assigned|escalated|commented|resolved|reopened|closed
+  note          TEXT,
+  created_at    TIMESTAMP DEFAULT NOW()
+);
+
+-- Objectifs SLA configurables (au lieu d'une valeur codée en dur), par
+-- sévérité et éventuellement par niveau de criticité de site.
+CREATE TABLE dim_sla_target (
+  id                          SERIAL PRIMARY KEY,
+  severity                    VARCHAR(20) NOT NULL,
+  locality_criticality_tier   VARCHAR(10),  -- null = s'applique à tous
+  target_minutes              INTEGER NOT NULL,
+  availability_target_pct     INTEGER DEFAULT 99
 );
 
 CREATE INDEX idx_incident_node ON fact_incident(node_id);
@@ -197,3 +295,64 @@ CREATE TABLE push_subscription (
 );
 
 CREATE INDEX idx_push_subscription_user ON push_subscription(user_id);
+
+-- Interventions terrain — cœur du métier de l'Agent Terrain, voir
+-- app/models/operations.py::FieldIntervention.
+CREATE TABLE fact_field_intervention (
+  id                  BIGSERIAL PRIMARY KEY,
+  incident_id         BIGINT REFERENCES fact_incident(id),  -- nullable : tournée de routine
+  node_id             INTEGER NOT NULL REFERENCES dim_node(id),
+  agent_user_id       INTEGER NOT NULL REFERENCES dim_user(id),
+
+  status              VARCHAR(20) NOT NULL DEFAULT 'scheduled'
+                        CHECK (status IN ('scheduled','en_route','on_site','done','cancelled')),
+  scheduled_at        TIMESTAMP,
+  started_at          TIMESTAMP,
+  completed_at        TIMESTAMP,
+
+  checkin_latitude    DECIMAL(9,6),
+  checkin_longitude   DECIMAL(9,6),
+
+  report_text         TEXT,
+  photo_urls          TEXT,  -- JSON-encodé, liste d'URLs (S3/stockage local)
+
+  created_at          TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_field_intervention_agent ON fact_field_intervention(agent_user_id);
+CREATE INDEX idx_field_intervention_status ON fact_field_intervention(status);
+
+-- Règle déclenchée par le scheduler Celery : si un incident de sévérité X
+-- n'est pas acquitté/résolu après N minutes, il est escaladé automatiquement.
+CREATE TABLE dim_escalation_rule (
+  id                     SERIAL PRIMARY KEY,
+  severity               VARCHAR(20) NOT NULL,
+  trigger_after_minutes  INTEGER NOT NULL,
+  from_escalation_level  INTEGER NOT NULL,
+  escalate_to_role       VARCHAR(20) NOT NULL CHECK (escalate_to_role IN ('chef_noc','directeur')),
+  is_active              BOOLEAN DEFAULT TRUE
+);
+
+-- Trace de ce qui a été envoyé, à qui, sur quel canal — debug push/SMS et
+-- preuve d'audit SLA (une alerte a bien été notifiée).
+CREATE TABLE fact_notification_log (
+  id            BIGSERIAL PRIMARY KEY,
+  user_id       INTEGER NOT NULL REFERENCES dim_user(id),
+  incident_id   BIGINT REFERENCES fact_incident(id),
+  channel       VARCHAR(20) NOT NULL CHECK (channel IN ('push','sms','email')),
+  status        VARCHAR(20) NOT NULL DEFAULT 'sent' CHECK (status IN ('sent','failed','read')),
+  sent_at       TIMESTAMP DEFAULT NOW()
+);
+
+-- Journal transverse (au-delà des incidents) : connexions, création/
+-- modification d'un nœud, changement de rôle, export de rapport... Requis
+-- dès qu'un Directeur ou un client externe peut demander "qui a fait quoi".
+CREATE TABLE audit_log (
+  id           SERIAL PRIMARY KEY,
+  user_id      INTEGER REFERENCES dim_user(id),
+  action       VARCHAR(50) NOT NULL,
+  entity_type  VARCHAR(50),
+  entity_id    VARCHAR(50),
+  ip_address   VARCHAR(50),
+  created_at   TIMESTAMP DEFAULT NOW()
+);

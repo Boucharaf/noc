@@ -4,6 +4,39 @@ from sqlalchemy.orm import Session
 
 from app.services import kpi_service
 
+# Source unique des libellés KPI, utilisée par render_pdf ET render_docx.
+# (Avant : deux dictionnaires quasi identiques, un par renderer — risque de
+# divergence silencieuse à chaque ajout de KPI.)
+KPI_LABELS = {
+    "total_incidents": "Total incidents",
+    "resolved": "Résolus",
+    "open": "Ouverts",
+    "resolution_rate_pct": "Taux de résolution (%)",
+    "avg_mttr_minutes": "MTTR moyen (min)",
+    "network_availability_pct": "Disponibilité réseau (%)",
+    "critical_localities": "Localités critiques",
+    "recurrent_nodes": "Nœuds récurrents",
+    "off_hours_detected": "Incidents hors heures ouvrées",
+}
+
+
+def _fpdf_safe(text: str) -> str:
+    """FPDF core (police Helvetica) ne supporte pas l'UTF-8 : on dégrade les
+    accents pour le PDF plutôt que de dupliquer tout le dict des libellés
+    dans une version ASCII séparée. render_docx utilise KPI_LABELS tel quel."""
+    replacements = {
+        "é": "e", "è": "e", "ê": "e", "ë": "e",
+        "à": "a", "â": "a",
+        "î": "i", "ï": "i",
+        "ô": "o", "ö": "o",
+        "û": "u", "ü": "u", "ù": "u",
+        "ç": "c",
+        "Œ": "OE", "œ": "oe",
+    }
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+    return text
+
 
 def build_report_data(db: Session, month: int, year: int) -> dict:
     summary = kpi_service.get_summary(db, month, year)
@@ -62,21 +95,10 @@ def render_pdf(report: dict) -> bytes:
     pdf.set_text_color(0, 0, 0)
     
     kpi = report["kpi"]
-    labels = {
-        "total_incidents": "Total incidents",
-        "resolved": "Resolus",
-        "open": "Ouverts",
-        "resolution_rate_pct": "Taux de resolution (%)",
-        "avg_mttr_minutes": "MTTR moyen (min)",
-        "network_availability_pct": "Disponibilite reseau (%)",
-        "critical_localities": "Localites critiques",
-        "recurrent_nodes": "Noeuds recurrents",
-        "off_hours_detected": "Incidents hors heures ouvrees",
-    }
-    
-    for key, label in labels.items():
+
+    for key, label in KPI_LABELS.items():
         # Ligne de tableau
-        pdf.cell(110, 8, label, border=1, fill=True)
+        pdf.cell(110, 8, _fpdf_safe(label), border=1, fill=True)
         pdf.set_font("Helvetica", "B", 11)
         pdf.cell(40, 8, str(kpi[key]), border=1, ln=True, align="C")
         pdf.set_font("Helvetica", "", 11)
@@ -130,19 +152,6 @@ def render_pdf(report: dict) -> bytes:
     buffer = io.BytesIO()
     pdf.output(buffer)
     return buffer.getvalue()
-
-
-KPI_LABELS = {
-    "total_incidents": "Total incidents",
-    "resolved": "Résolus",
-    "open": "Ouverts",
-    "resolution_rate_pct": "Taux de résolution (%)",
-    "avg_mttr_minutes": "MTTR moyen (min)",
-    "network_availability_pct": "Disponibilité réseau (%)",
-    "critical_localities": "Localités critiques",
-    "recurrent_nodes": "Nœuds récurrents",
-    "off_hours_detected": "Incidents hors heures ouvrées",
-}
 
 
 def render_docx(report: dict) -> bytes:

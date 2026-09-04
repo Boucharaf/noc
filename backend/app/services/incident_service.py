@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import Integer, func, text, update
+from sqlalchemy import Integer, func, select, text, update
 from sqlalchemy.orm import Session
 
 from app.core.constants import SYNC_MV_REFRESH
@@ -76,14 +76,20 @@ def find_open_duplicate(
     )
 
 
-def ingest_incident(db: Session, payload: IncidentIngestPayload) -> tuple[Incident, bool]:
-    """Returns (incident, created) — created is False when the payload matched
-    an already-open incident and no new row was written."""
+def ingest_incident(
+    db: Session, payload: IncidentIngestPayload
+) -> tuple[Incident, Node, bool]:
+    """Returns (incident, node, created) — created is False when the payload
+    matched an already-open incident and no new row was written.
+
+    The node is returned alongside the incident (rather than making the route
+    call get_node_by_code again) so callers building a broadcast/notification
+    payload don't pay for the same lookup twice on every single ingestion."""
     node = get_node_by_code(db, payload.node_code)
 
     duplicate = find_open_duplicate(db, payload.external_id, payload.source_tool)
     if duplicate is not None:
-        return duplicate, False
+        return duplicate, node, False
 
     cause = get_or_create_cause(db, payload.cause_category, payload.cause_label)
 
@@ -103,7 +109,7 @@ def ingest_incident(db: Session, payload: IncidentIngestPayload) -> tuple[Incide
     db.refresh(incident)
 
     refresh_kpi_view(db)
-    return incident, True
+    return incident, node, True
 
 
 def reconcile_open_incidents(
@@ -307,3 +313,89 @@ def acknowledge_incident(
     db.commit()
     db.refresh(incident)
     return incident
+
+
+def list_incidents(
+    db: Session,
+    *,
+    status: str | None = None,
+    severity: str | None = None,
+    locality_id: int | None = None,
+    node_code: str | None = None,
+    source_tool: str | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    page: int = 1,
+    page_size: int = 25,
+) -> dict:
+    """Paginated, filterable incident history — the /open and /recent alert
+    feeds are deliberately top-N views for the live dashboard; this backs the
+    IncidentTable's "search the whole history" use case (by node, locality,
+    period, ticket…) that neither of those can answer.
+    """
+    query = select(Incident).join(Node, Incident.node_id == Node.id)
+    count_query = select(func.count(Incident.id)).select_from(Incident).join(
+        Node, Incident.node_id == Node.id
+    )
+
+    filters = []
+    if status:
+        filters.append(Incident.status == status)
+    if severity:
+        filters.append(Incident.severity == severity)
+    if locality_id is not None:
+        filters.append(Node.locality_id == locality_id)
+    if node_code:
+        filters.append(Node.code == node_code)
+    if source_tool:
+        filters.append(Incident.source_tool == source_tool)
+    if date_from is not None:
+        filters.append(Incident.detected_at >= _to_naive_utc(date_from))
+    if date_to is not None:
+        filters.append(Incident.detected_at <= _to_naive_utc(date_to))
+
+    for f in filters:
+        query = query.where(f)
+        count_query = count_query.where(f)
+
+    total = db.execute(count_query).scalar() or 0
+
+    page = max(page, 1)
+    page_size = max(min(page_size, 100), 1)
+    rows = (
+        db.execute(
+            query.order_by(Incident.detected_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        .scalars()
+        .all()
+    )
+
+    items = [
+        {
+            "id": r.id,
+            "node_id": r.node_id,
+            "node_code": r.node.code,
+            "node_name": r.node.name,
+            "locality_id": r.node.locality_id,
+            "severity": r.severity,
+            "status": r.status,
+            "source_tool": r.source_tool,
+            "description": r.description,
+            "detected_at": r.detected_at,
+            "acknowledged_at": r.acknowledged_at,
+            "resolved_at": r.resolved_at,
+            "itop_ticket_id": r.itop_ticket_id,
+            "external_id": r.external_id,
+        }
+        for r in rows
+    ]
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": (total + page_size - 1) // page_size if page_size else 0,
+    }

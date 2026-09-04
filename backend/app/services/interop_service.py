@@ -32,7 +32,7 @@ STATUS_KEY = "noc:collector:status"
 # Every tool the ETL can collect from. Fixed here rather than derived from the
 # status payload so a tool that is switched off, or whose collector has never
 # run, still appears on the page as "not configured" instead of vanishing.
-TOOLS = ("zabbix", "nagios", "netxms", "centreon", "itop")
+TOOLS = ("zabbix", "nagios", "netxms", "centreon", "nsp", "itop")
 
 
 def _read_status() -> dict | None:

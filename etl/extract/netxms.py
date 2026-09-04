@@ -31,6 +31,23 @@ alarm id — the backend deduplicates open incidents on
 
 dim_node rows for the real inventory are created by provision_netxms_nodes.py;
 without them every alarm is reported as an unmatched host.
+
+Two extra signals beyond fetch_events(), same reasoning as Zabbix/Centreon —
+"active alarms" undercounts what a NOC dashboard needs:
+
+  * fetch_host_availability()   -> object status right now, independent of
+                                    whether an alarm happens to be open
+  * fetch_maintenance_windows() -> objects currently flagged as under
+                                    maintenance
+
+Both reuse the same /v1/objects listing fetch_events() already reads, so
+they cost one extra request each per poll, not one per node. The exact field
+names they rely on (`status`, `maintenance` / `isInMaintenanceMode`) are
+**not** confirmed against a real ANPTIC response the way the alarms path is
+— NetXMS has moved object status/maintenance representation across major
+versions before. Check a raw GET /v1/objects/{id} on a node you know is down
+and one you know is under maintenance before trusting either signal for a
+KPI.
 """
 
 import json
@@ -41,7 +58,7 @@ import redis
 import requests
 
 import config
-from extract.common import match_node, skip_unmatched
+from extract.common import build_node_index, match_node, skip_unmatched
 from transform.causes import classify
 
 logger = logging.getLogger(__name__)
@@ -180,6 +197,7 @@ def fetch_events(nodes: list[dict]) -> list[dict]:
 
     alarms = _as_list(_get("/v1/alarms", token), "alarms")
 
+    index = build_node_index(nodes)
     resolved_cache: dict = {}
     results = []
     for alarm in alarms:
@@ -200,7 +218,7 @@ def fetch_events(nodes: list[dict]) -> list[dict]:
         if klass and klass not in HOST_CLASSES:
             continue
         host = name or str(source_id or "")
-        node_code = match_node(nodes, host, ip)
+        node_code = match_node(nodes, host, ip, index=index)
         if node_code is None:
             skip_unmatched("netxms", host)
             continue
@@ -223,6 +241,94 @@ def fetch_events(nodes: list[dict]) -> list[dict]:
                 "description": message,
                 "cause_category": category,
                 "cause_label": label,
+            }
+        )
+    return results
+
+
+def fetch_host_availability(nodes: list[dict]) -> list[dict]:
+    """Object status right now, independent of any open alarm.
+
+    A node can be effectively down (connection lost) without necessarily
+    having a currently-active alarm for it — an alarm can be acknowledged
+    and treated as handled elsewhere, or the status flag can lag/lead the
+    alarm depending on how the server's thresholds are configured. This
+    reads the same /v1/objects listing fetch_events() already fetches, so
+    it's one extra request per poll, not one per node.
+    """
+    token = _login()
+    objects = _as_list(_get("/v1/objects", token), "objects")
+
+    index = build_node_index(nodes)
+    results = []
+    for obj in objects:
+        klass = obj.get("class", "")
+        if klass and klass not in HOST_CLASSES:
+            continue
+        name = obj.get("name", "")
+        ip = _object_ip(obj)
+        host = name or str(obj.get("id", ""))
+        node_code = match_node(nodes, host, ip, index=index)
+        if node_code is None:
+            skip_unmatched("netxms", host)
+            continue
+        # status: 0=NORMAL..4=CRITICAL, same scale as alarm severity. Treat
+        # MINOR (2) and above as down — matches the threshold fetch_events()
+        # effectively uses via alarm severity_raw.
+        status_raw = obj.get("status")
+        if status_raw is None:
+            status = "unknown"
+        elif int(status_raw) >= 2:
+            status = "down"
+        else:
+            status = "up"
+        results.append(
+            {
+                "node_code": node_code,
+                "source_tool": "netxms",
+                "status": status,
+                "error": None,
+                "checked_at": datetime.now(tz=timezone.utc).isoformat(),
+            }
+        )
+    return results
+
+
+def fetch_maintenance_windows(nodes: list[dict]) -> list[dict]:
+    """Objects NetXMS currently flags as under maintenance.
+
+    NetXMS exposes maintenance as a per-object on/off flag rather than a
+    scheduled window with start/end times the way Zabbix or Nagios do — there
+    is no active_since/active_till to report here, only that maintenance is
+    on right now. Field name assumed as `maintenance`, with `isInMaintenanceMode`
+    tried as a fallback; confirm the real one on your server (see module
+    docstring) before relying on this for a KPI.
+    """
+    token = _login()
+    objects = _as_list(_get("/v1/objects", token), "objects")
+
+    index = build_node_index(nodes)
+    results = []
+    for obj in objects:
+        klass = obj.get("class", "")
+        if klass and klass not in HOST_CLASSES:
+            continue
+        if not (obj.get("maintenance") or obj.get("isInMaintenanceMode")):
+            continue
+        name = obj.get("name", "")
+        ip = _object_ip(obj)
+        host = name or str(obj.get("id", ""))
+        node_code = match_node(nodes, host, ip, index=index)
+        if node_code is None:
+            skip_unmatched("netxms", host)
+            continue
+        results.append(
+            {
+                "node_code": node_code,
+                "source_tool": "netxms",
+                "maintenance_name": "Maintenance NetXMS",
+                "active_since": None,
+                "active_till": None,
             }
         )
     return results

@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Delete, Lock, User } from "lucide-react";
 import { loginWithPassword, loginWithPin } from "../api/auth";
 import { useAuthStore } from "../store/auth";
+import { getHomeRoute } from "../utils/roleHome";
 import logo from "../assets/images/noc-logo-256.png";
 
 const PIN_LENGTH = 4;
@@ -40,7 +41,7 @@ const PasswordForm = ({ onSubmit, loading, error }) => {
             autoFocus
             value={username}
             onChange={(e) => setUsername(e.target.value)}
-            placeholder="admin"
+            placeholder="identifiant"
             className="w-full bg-transparent text-sm outline-none"
             style={{ color: "var(--color-text-primary)" }}
           />
@@ -201,7 +202,7 @@ const Login = () => {
     return request()
       .then((data) => {
         login(data.access_token, data.user, data.expires_in);
-        navigate("/global", { replace: true });
+        navigate(getHomeRoute(data.user?.role), { replace: true });
       })
       .catch((err) => {
         setError(err.response?.data?.detail ?? "Échec de la connexion");
@@ -280,24 +281,6 @@ const Login = () => {
         ) : (
           <PinForm onSubmit={handleSubmit} loading={loading} error={error} />
         )}
-
-        <div
-          className="mt-6 rounded-lg border p-3 text-xs"
-          style={{
-            borderColor: "var(--color-border)",
-            color: "var(--color-text-muted)",
-          }}
-        >
-          <p
-            className="mb-1 font-semibold"
-            style={{ color: "var(--color-text-secondary)" }}
-          >
-            Comptes de démonstration
-          </p>
-          <p>admin / admin123 · PIN 1234</p>
-          <p>analyst / analyst123 · PIN 2222</p>
-          <p>noc_agent / noc123 · PIN 3333</p>
-        </div>
       </div>
     </div>
   );

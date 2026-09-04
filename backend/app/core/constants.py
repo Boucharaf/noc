@@ -19,6 +19,7 @@ DB_NAME = os.getenv("DB_NAME", "noc_db")
 JWT_SECRET = os.getenv("SECRET_KEY", "dev-secret-key")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 30))
+REFRESH_TOKEN_EXPIRATION_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRATION_DAYS", 7))
 
 # Static bearer key used by supervision tools (Centreon/Zabbix webhooks) to call /api/incidents/ingest
 NOC_API_KEY = os.getenv("NOC_API_KEY")
@@ -76,3 +77,10 @@ RATE_LIMIT_ENABLED = os.getenv("RATE_LIMIT_ENABLED", "true").lower() == "true"
 # the ETL beat task; the synchronous refresh-on-write below keeps small demo
 # datasets interactive. Disable in production.
 SYNC_MV_REFRESH = os.getenv("SYNC_MV_REFRESH", "true").lower() == "true"
+
+# Cookie "Secure" du refresh token (voir app/routes/auth.py) : n'envoyer le
+# cookie que sur HTTPS. Vrai par défaut — c'est le comportement de
+# production correct derrière le reverse proxy TLS. À mettre à "false"
+# uniquement pour un dev local servi en http:// (jamais en production, ni
+# même en staging accessible depuis l'extérieur).
+REFRESH_COOKIE_SECURE = os.getenv("REFRESH_COOKIE_SECURE", "false").lower() == "false"

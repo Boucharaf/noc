@@ -533,7 +533,7 @@ def get_sla(db: Session, month: int, year: int) -> dict:
     core_availability_raw = db.execute(
         select(func.avg(mv.availability_pct)).where(
             mv.month == period_start,
-            mv.source_tool.in_(("centreon", "netxms")),
+            mv.source_tool.in_(("centreon", "netxms", "nsp")),
         )
     ).scalar()
     core_availability = (

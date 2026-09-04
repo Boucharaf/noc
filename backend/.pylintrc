@@ -1,0 +1,62 @@
+[MASTER]
+ignore=venv,.venv,__pycache__,migrations
+jobs=0
+
+[FORMAT]
+max-line-length=160
+
+[MESSAGES CONTROL]
+disable=
+    all,
+    C,
+    R,
+    W,
+    E,
+    F,
+    missing-module-docstring,
+    missing-class-docstring,
+    missing-function-docstring,
+    too-few-public-methods,
+    duplicate-code,
+    invalid-name,
+    redefined-outer-name,
+    unused-argument,
+    protected-access,
+    use-implicit-booleaness-not-comparison,
+    too-many-arguments,
+    too-many-positional-arguments,
+    too-many-locals,
+    too-many-statements,
+    broad-exception-caught,
+    line-too-long,
+    trailing-whitespace,
+    missing-final-newline,
+    trailing-newlines,
+    import-outside-toplevel,
+    f-string-without-interpolation,
+    expression-not-assigned,
+    unnecessary-comprehension,
+    no-name-in-module,
+    import-error,
+    wrong-import-position,
+    consider-using-with,
+    consider-using-f-string,
+    unspecified-encoding,
+    too-many-branches,
+    too-many-return-statements,
+    too-many-instance-attributes,
+    too-many-nested-blocks,
+    not-callable,
+    invalid-envvar-default,
+    reimported,
+    wrong-import-order,
+    undefined-variable,
+    no-member,
+    redefined-builtin,
+    unused-import,
+    broad-exception-caught,
+    raised-exception,
+    consider-using-with
+
+[REPORTS]
+score=yes

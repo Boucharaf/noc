@@ -1,16 +1,28 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { Globe, Map, MapPin, ShieldAlert, Zap, Database } from 'lucide-react';
+import { Globe, ListChecks, Map, MapPin, ShieldAlert, Truck, Zap, Database } from 'lucide-react';
+import { hasPermission, PERMISSIONS } from '../../api/permissions';
+import { useAuthStore } from '../../store/auth';
+
+const ALL_TABS = [
+  { name: 'Vue Globale', path: '/global', icon: Globe, permission: PERMISSIONS.VIEW_KPI_GLOBAL },
+  { name: 'Vue par Localité', path: '/locality', icon: MapPin, permission: PERMISSIONS.VIEW_KPI_LOCALITY },
+  { name: 'Carte', path: '/map', icon: Map, permission: PERMISSIONS.VIEW_KPI_LOCALITY },
+  { name: 'SLA & Alertes', path: '/sla', icon: ShieldAlert, permission: PERMISSIONS.VIEW_SLA },
+  { name: 'Interopérabilité', path: '/interop', icon: Zap, permission: PERMISSIONS.VIEW_INTEROP_STATUS },
+  { name: 'Modèle de Données', path: '/datamodel', icon: Database, permission: PERMISSIONS.VIEW_DATA_MODEL },
+  { name: 'Mes Alertes', path: '/mes-alertes', icon: ListChecks, permission: PERMISSIONS.VIEW_ALERTS },
+  { name: 'Mes Tournées', path: '/mes-tournees', icon: Truck, permission: PERMISSIONS.MANAGE_FIELD_INTERVENTIONS },
+];
 
 const TabNav = () => {
-  const tabs = [
-    { name: 'Vue Globale', path: '/global', icon: Globe },
-    { name: 'Vue par Localité', path: '/locality', icon: MapPin },
-    { name: 'Carte', path: '/map', icon: Map },
-    { name: 'SLA & Alertes', path: '/sla', icon: ShieldAlert },
-    { name: 'Interopérabilité', path: '/interop', icon: Zap },
-    { name: 'Modèle de Données', path: '/datamodel', icon: Database },
-  ];
+  // Un onglet n'est affiché que si le rôle connecté a la permission
+  // correspondante — auparavant tous les onglets étaient visibles à tout le
+  // monde, y compris ceux menant à un écran auquel le rôle n'a pas accès.
+  // hasPermission() (fonction pure) plutôt que useHasPermission() (hook) ici
+  // : un hook ne doit pas être appelé dans un callback .filter().
+  const role = useAuthStore((s) => s.user?.role);
+  const tabs = ALL_TABS.filter((tab) => hasPermission(role, tab.permission));
 
   return (
     <nav

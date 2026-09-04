@@ -75,6 +75,10 @@ services:
       # If only beat has it, the worker keeps the 300s default and the status
       # outlives a dead worker by minutes while still reading as current.
       - ETL_COLLECT_INTERVAL_S=${ETL_COLLECT_INTERVAL_S:-300}
+      - NOC_API_KEY=${NOC_API_KEY}
+      - ETL_ENV=${ETL_ENV:-development}
+      - NOC_API_KEY=${NOC_API_KEY}
+      - ETL_ENV=${ETL_ENV:-development}
       - ETL_HTTP_TIMEOUT_S=${ETL_HTTP_TIMEOUT_S:-15}
       # Supervision tool endpoints — a collector runs only when its URL is set
       - ZABBIX_API_URL=${ZABBIX_API_URL:-}
@@ -127,6 +131,8 @@ services:
       - REDIS_PORT=${REDIS_PORT}
       - CELERY_BROKER_DB=${CELERY_BROKER_DB:-1}
       - ETL_COLLECT_INTERVAL_S=${ETL_COLLECT_INTERVAL_S:-300}
+      - NOC_API_KEY=${NOC_API_KEY}
+      - ETL_ENV=${ETL_ENV:-development}
     depends_on:
       redis:
         condition: service_healthy

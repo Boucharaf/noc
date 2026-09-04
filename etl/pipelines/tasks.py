@@ -5,7 +5,7 @@ from datetime import date, timedelta
 import psycopg2
 
 from celery_app import app
-from config import NOC_API_KEY, NOC_API_URL, REPORTS_DIR, build_dsn
+from config import HTTP_TIMEOUT_S, NOC_API_KEY, NOC_API_URL, REPORTS_DIR, build_dsn
 from extract import enabled_collectors
 from load.api_client import NocApiClient
 from pipelines.collector import load_active_nodes
@@ -14,7 +14,7 @@ from transform.normalize import to_ingest_payload
 
 logger = logging.getLogger(__name__)
 
-api_client = NocApiClient(base_url=NOC_API_URL, api_key=NOC_API_KEY)
+api_client = NocApiClient(base_url=NOC_API_URL, api_key=NOC_API_KEY, timeout=HTTP_TIMEOUT_S)
 
 
 @app.task(name="etl.collect_supervision", bind=True, max_retries=0)
@@ -34,7 +34,15 @@ def collect_supervision(self):
 
     A tool is configured when its *_API_URL env var is set (see etl/config.py);
     tools without an endpoint are skipped. Failures are isolated per tool — one
-    unreachable supervision system never blocks collection from the others.
+    unreachable supervision system, or one failed/malformed ingest response,
+    never blocks collection from the others. This isolation covers the whole
+    per-tool block (fetch AND ingest): an earlier version only wrapped
+    fetch_events() in the try/except below, so a bulk-ingest response missing
+    an expected key raised an uncaught KeyError that killed the pass for every
+    tool the loop hadn't reached yet, and skipped publish_collector_status()
+    entirely. NocApiClient.ingest_incidents_bulk() now also guarantees a safe
+    contract on its own (None on any failure, real dict otherwise) — this
+    try/except is a second line of defense, not the only one.
     """
     collectors = enabled_collectors()
     if not collectors:
@@ -60,30 +68,31 @@ def collect_supervision(self):
         )
         try:
             events = fetch_events(nodes)
+
+            # One request for the whole pass. Posting incident-by-incident costs
+            # a unit of the ingest rate limit each, which a real active-alarm
+            # set (NetXMS reports ~1500) exhausts in the first six.
+            result = api_client.ingest_incidents_bulk(
+                [to_ingest_payload(event) for event in events]
+            )
+            if result is None:
+                ingested = 0
+                resolved = 0
+                failed = len(events)
+            else:
+                ingested = result["created"]
+                # Alerts the tool stopped reporting: the backend treats the
+                # batch as a snapshot and closes them.
+                resolved = result["resolved"]
+                # Already-open incidents are not failures: every collector
+                # re-reports its whole active set each pass, so on a steady
+                # system nearly every event is a duplicate of one already
+                # recorded.
+                failed = result["unknown_node"]
         except Exception as exc:
             logger.error("[%s] collection failed: %s", tool, exc)
             stats[tool] = {"error": str(exc)}
             continue
-
-        # One request for the whole pass. Posting incident-by-incident costs a
-        # unit of the ingest rate limit each, which a real active-alarm set
-        # (NetXMS reports ~1500) exhausts in the first six.
-        result = api_client.ingest_incidents_bulk(
-            [to_ingest_payload(event) for event in events]
-        )
-        if result is None:
-            ingested = 0
-            resolved = 0
-            failed = len(events)
-        else:
-            ingested = result["created"]
-            # Alerts the tool stopped reporting: the backend treats the batch as
-            # a snapshot and closes them.
-            resolved = result["resolved"]
-            # Already-open incidents are not failures: every collector
-            # re-reports its whole active set each pass, so on a steady system
-            # nearly every event is a duplicate of one already recorded.
-            failed = result["unknown_node"]
 
         # No cursor to hold back: every collector reports the problems that are
         # open right now, so whatever failed here is offered again next pass.

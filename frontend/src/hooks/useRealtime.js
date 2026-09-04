@@ -21,13 +21,34 @@ const useAlertSocket = () => {
 
     const connect = () => {
       const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      ws = new WebSocket(`${proto}://${window.location.host}/ws/alerts?token=${token}`);
+      // Le token n'est plus mis dans l'URL : les query strings de WebSocket
+      // finissent typiquement dans les logs d'accès des reverse proxies
+      // (nginx, load balancers) en clair — un JWT valide qui traîne dans des
+      // logs est une fuite de session, pas un détail. On ouvre la connexion
+      // sans credentials puis on s'authentifie via le premier frame envoyé,
+      // qui n'est jamais loggé par un proxy L7.
+      //
+      // ⚠️ Contrepartie backend requise : le handler /ws/alerts doit
+      // accepter la connexion en attente d'un premier message
+      // {"type":"auth","token":"..."} au lieu de valider un ?token= dans le
+      // handshake, et fermer la socket si ce message n'arrive pas sous
+      // quelques secondes ou si le token est invalide.
+      ws = new WebSocket(`${proto}://${window.location.host}/ws/alerts`);
+      ws.onopen = () => {
+        ws.send(JSON.stringify({ type: 'auth', token }));
+      };
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
           if (data.type === 'incident') {
             queryClient.invalidateQueries({ queryKey: ['alerts'] });
             queryClient.invalidateQueries({ queryKey: ['kpi'] });
+          } else if (data.type === 'auth_error') {
+            // Token rejeté par le backend (expiré entre le rendu et l'ouverture
+            // du socket) : pas la peine de retenter avec le même token, autant
+            // fermer proprement et laisser le prochain re-render (nouveau
+            // token après refresh) rouvrir la connexion.
+            ws.close();
           }
         } catch {
           // ignore malformed frames (heartbeats are valid JSON, so this is rare)
@@ -58,7 +79,7 @@ export const useOpenAlerts = (limit = 20, localityId = null) => {
     // localityId is part of the key so the map's per-locality panel does not
     // read the global feed's cached rows (and vice versa).
     queryKey: ['alerts', 'open', limit, localityId],
-    queryFn: () => alertsApi.getOpenAlerts(limit, localityId),
+    queryFn: ({ signal }) => alertsApi.getOpenAlerts(limit, localityId, signal),
     refetchInterval: POLL_INTERVAL_MS,
   });
 };
@@ -70,7 +91,7 @@ export const useRecentNotifications = (limit = 10) => {
   useAlertSocket();
   return useQuery({
     queryKey: ['alerts', 'recent', limit],
-    queryFn: () => alertsApi.getRecentNotifications(limit),
+    queryFn: ({ signal }) => alertsApi.getRecentNotifications(limit, signal),
     refetchInterval: POLL_INTERVAL_MS,
   });
 };
@@ -82,6 +103,10 @@ export const useAcknowledgeIncident = () => {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['alerts'] });
     },
+    // PermissionError (droit insuffisant, détecté côté client avant l'appel)
+    // et 403 (refusé côté serveur) atterrissent tous les deux ici — au
+    // composant appelant de lire error.message / error.isForbidden pour
+    // afficher le bon message plutôt qu'une erreur générique.
   });
 };
 

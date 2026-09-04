@@ -2,19 +2,17 @@ import React from "react";
 import { Bell, Check, Ticket } from "lucide-react";
 import Card from "./Card";
 import { useAcknowledgeIncident, useOpenAlerts } from "../hooks/useRealtime";
-import { useAuthStore } from "../store/auth";
+import { useHasPermission } from "../hooks/usePermission";
+import { PERMISSIONS } from "../api/permissions";
 import { SEVERITY_COLOR } from "../theme/colors";
 import { formatAge } from "../utils/format";
 
 const AlertFeed = () => {
   const { data: alerts = [], isLoading } = useOpenAlerts(20);
   const acknowledge = useAcknowledgeIncident();
-  const role = useAuthStore((state) => state.user?.role);
-  // Analysts are read-only. The backend enforces that with a 403 and remains
-  // the authority; hiding the button here only spares them an action that
-  // could never succeed. Keep both — dropping the server check would make this
-  // the control, and it is trivially bypassed from the browser.
-  const canAcknowledge = role === "admin" || role === "noc_agent";
+  // Le backend fait autorité et renvoie un 403 sinon ; masquer le bouton ici
+  // n'évite qu'une action vouée à l'échec, ce n'est jamais le vrai contrôle.
+  const canAcknowledge = useHasPermission(PERMISSIONS.ACKNOWLEDGE_INCIDENT);
 
   return (
     <Card

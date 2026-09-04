@@ -2,7 +2,8 @@ import React, { useMemo, useState } from "react";
 import { Bell, BellOff, BellRing, Check } from "lucide-react";
 import { useAcknowledgeIncident, useRecentNotifications } from "../hooks/useRealtime";
 import { usePushNotifications } from "../hooks/usePushNotifications";
-import { useAuthStore } from "../store/auth";
+import { useHasPermission } from "../hooks/usePermission";
+import { PERMISSIONS } from "../api/permissions";
 import { SEVERITY_COLOR } from "../theme/colors";
 import { formatAge } from "../utils/format";
 
@@ -16,8 +17,7 @@ const NotificationsBell = () => {
   const { data: notifications = [] } = useRecentNotifications(10);
   const acknowledge = useAcknowledgeIncident();
   const push = usePushNotifications();
-  const role = useAuthStore((state) => state.user?.role);
-  const canAcknowledge = role === "admin" || role === "noc_agent";
+  const canAcknowledge = useHasPermission(PERMISSIONS.ACKNOWLEDGE_INCIDENT);
 
   const [open, setOpen] = useState(false);
   const [lastSeen, setLastSeen] = useState(() => localStorage.getItem(LAST_SEEN_KEY) || "");

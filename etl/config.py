@@ -1,4 +1,7 @@
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 
 def build_dsn() -> str:
@@ -38,8 +41,34 @@ def netxms_dsn() -> str:
     )
 
 
+# development is the only environment allowed to fall back to a known,
+# documented API key (see NOC_API_KEY below) — every other value, including
+# an unset/misspelled one, is treated as production and fails closed instead
+# of silently authenticating with a key anyone reading this file also has.
+ETL_ENV = os.getenv("ETL_ENV", "production").strip().lower()
+
 NOC_API_URL = os.getenv("NOC_API_URL", "http://backend:8000")
-NOC_API_KEY = os.getenv("NOC_API_KEY", "dev-noc-api-key")
+
+NOC_API_KEY = os.getenv("NOC_API_KEY", "").strip()
+if not NOC_API_KEY:
+    if ETL_ENV == "development":
+        NOC_API_KEY = "dev-noc-api-key"
+        logger.warning(
+            "NOC_API_KEY not set — using the local dev-only default because "
+            "ETL_ENV=development. Never rely on this outside a local compose."
+        )
+    else:
+        # Raised at import time, i.e. on worker startup (celery_app.py imports
+        # this module) — the previous version instead defaulted NOC_API_KEY to
+        # "dev-noc-api-key" unconditionally, so a forgotten env var in prod
+        # authenticated successfully with a key documented in this very file,
+        # and nothing here would ever have told you.
+        raise RuntimeError(
+            "NOC_API_KEY is required outside ETL_ENV=development. Set it "
+            "before starting the worker — refusing to start with a known "
+            "default key."
+        )
+
 # How often every configured supervision API is polled. Five minutes is the
 # contracted reporting granularity for this dashboard; it is also about as
 # often as these tools can be polled without the request itself becoming a

@@ -22,8 +22,8 @@ def test_access_token_roundtrip():
     token = auth_service.create_access_token(user)
     payload = auth_service.decode_access_token(token)
     assert payload["sub"] == "1"
-    assert payload["role"] == "admin"
-    assert payload["username"] == "admin"
+    assert payload["role"] == "directeur"
+    assert payload["username"] == "directeur.test"
 
 
 def test_invalid_token_rejected():

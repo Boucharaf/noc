@@ -23,6 +23,43 @@ def no_cache(monkeypatch):
     monkeypatch.setattr("app.services.cache_service.invalidate_prefix", lambda prefix: None)
 
 
+@pytest.fixture(autouse=True)
+def fake_session_store(monkeypatch):
+    """app.core.session_store deliberately lets Redis errors propagate (see
+    its module docstring) rather than degrading session security silently —
+    correct in production, but it means every /api/auth/login|refresh call
+    needs a real Redis here. None is available in tests, so replace it with
+    an in-memory stand-in that preserves the same jti-rotation semantics the
+    routes rely on."""
+    store: dict[str, int] = {}
+
+    def _store(user_id, jti, expire_at):
+        store[jti] = user_id
+
+    def _valid(jti, user_id):
+        return store.get(jti) == user_id
+
+    def _rotate(old_jti, user_id, new_jti, new_expire_at):
+        store.pop(old_jti, None)
+        store[new_jti] = user_id
+
+    def _revoke_one(jti, user_id):
+        store.pop(jti, None)
+
+    def _revoke_all(user_id):
+        for jti in [j for j, uid in store.items() if uid == user_id]:
+            store.pop(jti, None)
+
+    monkeypatch.setattr("app.routes.auth.session_store.store_refresh_session", _store)
+    monkeypatch.setattr("app.routes.auth.session_store.is_refresh_session_valid", _valid)
+    monkeypatch.setattr("app.routes.auth.session_store.rotate_refresh_session", _rotate)
+    monkeypatch.setattr("app.routes.auth.session_store.revoke_refresh_session", _revoke_one)
+    monkeypatch.setattr("app.routes.auth.session_store.revoke_all_sessions", _revoke_all)
+    monkeypatch.setattr("app.routes.auth.session_store.is_pin_locked", lambda ip: None)
+    monkeypatch.setattr("app.routes.auth.session_store.register_pin_failure", lambda ip: None)
+    monkeypatch.setattr("app.routes.auth.session_store.clear_pin_failures", lambda ip: None)
+
+
 @pytest.fixture
 def fake_summary(monkeypatch):
     monkeypatch.setattr(kpi_routes.kpi_service, "get_summary", lambda db, m, y: SUMMARY)
@@ -37,25 +74,41 @@ def test_refresh_requires_a_valid_token(client):
     assert client.post("/api/auth/refresh").status_code == 401
 
 
-def test_refresh_returns_a_new_token_and_its_lifetime(client, admin_headers):
-    response = client.post("/api/auth/refresh", headers=admin_headers)
+def test_refresh_returns_a_new_token_and_its_lifetime(client, monkeypatch):
+    """Le refresh se fait via le cookie httpOnly posé au login, pas via le
+    header Authorization (voir la note d'architecture dans
+    app/routes/auth.py) — donc on se connecte d'abord pour obtenir ce
+    cookie, que TestClient conserve automatiquement pour l'appel suivant."""
+    monkeypatch.setattr(
+        "app.routes.auth.auth_service.authenticate_with_password",
+        lambda db, username, password: SimpleNamespace(
+            id=1, username="directeur.test", full_name="Directeur NOC", role="directeur"
+        ),
+    )
+    login_response = client.post(
+        "/api/auth/login", json={"username": "directeur.test", "password": "x"}
+    )
+    assert login_response.status_code == 200
+    assert "noc_refresh" in login_response.cookies
+
+    response = client.post("/api/auth/refresh")
     assert response.status_code == 200
     body = response.json()
     assert body["access_token"]
     # The client renews ahead of expiry using this, rather than parsing the JWT.
     assert body["expires_in"] > 0
-    assert body["user"]["username"] == "admin"
+    assert body["user"]["username"] == "directeur.test"
 
 
 def test_login_reports_token_lifetime(client, monkeypatch):
     monkeypatch.setattr(
         "app.routes.auth.auth_service.authenticate_with_password",
         lambda db, username, password: SimpleNamespace(
-            id=1, username="admin", full_name="Admin NOC", role="admin"
+            id=1, username="directeur.test", full_name="Directeur NOC", role="directeur"
         ),
     )
     body = client.post(
-        "/api/auth/login", json={"username": "admin", "password": "x"}
+        "/api/auth/login", json={"username": "directeur.test", "password": "x"}
     ).json()
     assert body["expires_in"] > 0
 
@@ -128,6 +181,12 @@ FAKE_INCIDENT = SimpleNamespace(
     description="Perte de connectivité",
 )
 
+# incident_service.ingest_incident renvoie (incident, node, created) — le
+# node est réutilisé pour le broadcast/la notification sans second aller-
+# retour DB (voir la docstring du service) ; fake_ingest doit fournir le
+# même tuple à trois éléments.
+FAKE_NODE = SimpleNamespace(code="DED-001", name="DREP Dédougou")
+
 
 @pytest.fixture
 def fake_incident_service(monkeypatch):
@@ -182,12 +241,7 @@ def fake_ingest(monkeypatch):
     monkeypatch.setattr(
         incidents_routes.incident_service,
         "ingest_incident",
-        lambda db, payload: (FAKE_INCIDENT, True),
-    )
-    monkeypatch.setattr(
-        incidents_routes.incident_service,
-        "get_node_by_code",
-        lambda db, code: SimpleNamespace(code=code, name="DREP Dédougou"),
+        lambda db, payload: (FAKE_INCIDENT, FAKE_NODE, True),
     )
     monkeypatch.setattr(
         incidents_routes.alert_broadcaster, "publish_alert", published.append
@@ -234,7 +288,7 @@ def test_ingest_non_critical_does_not_notify(client, fake_ingest, monkeypatch):
     monkeypatch.setattr(
         incidents_routes.incident_service,
         "ingest_incident",
-        lambda db, payload: (medium_incident, True),
+        lambda db, payload: (medium_incident, FAKE_NODE, True),
     )
     payload = {**INGEST_PAYLOAD, "severity": "medium"}
     response = client.post("/api/incidents/ingest", json=payload, headers=API_KEY_HEADERS)
@@ -249,7 +303,7 @@ def test_ingest_duplicate_is_idempotent(client, fake_ingest, monkeypatch):
     monkeypatch.setattr(
         incidents_routes.incident_service,
         "ingest_incident",
-        lambda db, payload: (FAKE_INCIDENT, False),
+        lambda db, payload: (FAKE_INCIDENT, FAKE_NODE, False),
     )
     response = client.post(
         "/api/incidents/ingest", json=INGEST_PAYLOAD, headers=API_KEY_HEADERS

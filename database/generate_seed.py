@@ -387,6 +387,11 @@ def main():
         ("admin", "Admin NOC", "admin", "admin123", "1234"),
         ("analyst", "Analyste ANPTIC", "analyst", "analyst123", "2222"),
         ("noc_agent", "Agent NOC", "noc_agent", "noc123", "3333"),
+#1) directeur: ("admin", "Admin NOC", "directeur", "admin123", "1234"),
+#2)chef noc: ("chefnoc", "Chef NOC", "chef_noc", "chef1234", "2222"),
+#3) technicien("noc_technicien", "Technicien NOC", "technicien", "tech123", "3333"),
+#4) agent_terrain: ("noc_agent", "Agent NOC", "agent_terrain", "noc123", "4444")
+
     ]
     user_rows = [
         (i, username, full_name, role, bcrypt_hash(password), pin_hash(pin))

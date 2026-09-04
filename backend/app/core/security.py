@@ -1,67 +1,97 @@
-from fastapi import Depends, Header, HTTPException
+"""Compatibilité de sécurité pour les modules legacy encore présents.
+
+Les routes et services actifs du projet utilisent désormais
+app.dependencies.auth et app.services.auth_service. Ce module expose les
+fonctions attendues par le code héritage afin d'éviter les imports cassés.
+"""
+
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.core.constants import NOC_API_KEY
 from app.db.session import get_db
-from app.models.user import User
-from app.services.auth_service import decode_access_token
+from app.dependencies.auth import get_current_user as _get_current_user
+from app.dependencies.auth import require_role as _require_role
 
-
-def verify_api_key(authorization: str = Header(default="")) -> None:
-    """Static bearer key required on supervision-tool webhooks (Centreon/Zabbix -> /ingest).
-
-    Deliberately a shared static key rather than per-caller credentials: the
-    callers are monitoring daemons configured by hand, with no way to refresh
-    a token and no user behind them to re-authenticate. The trade-off is that
-    the key never expires, so it must be treated as a secret with a rotation
-    story of its own — changing it means editing every webhook definition.
-    """
-    expected = f"Bearer {NOC_API_KEY}"
-    if authorization != expected:
-        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+bearer_scheme = HTTPBearer(auto_error=True)
 
 
 def get_current_user(
-    authorization: str = Header(default=""), db: Session = Depends(get_db)
-) -> User:
-    """JWT-bearer auth for dashboard-driven actions (e.g. acknowledge/resolve)."""
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    token = authorization.removeprefix("Bearer ")
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+):
+    """Compatibility wrapper for legacy imports."""
+    return _get_current_user(credentials=credentials, db=db)
+
+
+def require_role(*allowed_roles: str):
+    """Compatibility wrapper for legacy imports."""
+    return _require_role(*allowed_roles)
+
+
+def verify_secret(raw: str, hashed: str) -> bool:
+    """Legacy alias kept for older code paths."""
+    from app.services.auth_service import verify_password
+
+    return verify_password(raw, hashed)
+
+
+def hash_secret(raw: str) -> str:
+    """Legacy alias kept for older code paths."""
+    from app.services.auth_service import hash_password
+
+    return hash_password(raw)
+
+
+def decode_token(token: str, expected_type: str) -> dict:
+    """Legacy alias kept for older code paths."""
+    from app.services.auth_service import decode_access_token
+
     payload = decode_access_token(token)
-    user = db.get(User, int(payload["sub"]))
-    if user is None or not user.is_active:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    return user
+    if payload.get("type") != expected_type:
+        raise HTTPException(status_code=401, detail="Type de token invalide.")
+    return payload
 
 
-def require_role(*roles: str):
-    """Restrict an endpoint to the given roles.
+def verify_api_key(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+) -> None:
+    """Gate for the ETL/webhook ingest endpoints (POST /api/incidents/ingest[/bulk]).
 
-    The three roles and what they may do: admin reads and writes, analyst
-    reads only, noc_agent reads and acknowledges. Enforcement lives here, on
-    the server; the frontend hides actions a role cannot perform, but that is
-    a courtesy to the user and never the control.
+    These are called by the supervision-tool collectors and Centreon
+    webhooks, never by a logged-in dashboard user — so the credential is the
+    single static NOC_API_KEY (see app/core/constants.py), not a JWT. A JWT
+    presented here simply won't match the string comparison below and is
+    correctly rejected with 401, same as a missing/wrong key.
+    """
+    if not NOC_API_KEY or credentials.credentials != NOC_API_KEY:
+        raise HTTPException(status_code=401, detail="Clé API invalide.")
+
+
+def require_role_or_api_key(*allowed_roles: str):
+    """Usage: Depends(require_role_or_api_key("directeur", "chef_noc"))
+
+    Accepts either the static NOC_API_KEY (the ETL beat container downloading
+    the scheduled monthly report) or a dashboard user's JWT whose role is in
+    allowed_roles. Whichever the Authorization header actually carries is
+    tried first as the API key (cheap string comparison); only when that
+    fails is it decoded as a JWT, so a malformed/expired JWT from the ETL
+    side never masks a legitimate api-key failure behind a decode error.
     """
 
-    def dependency(current_user: User = Depends(get_current_user)) -> User:
-        if current_user.role not in roles:
+    def _check(
+        credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+        db: Session = Depends(get_db),
+    ):
+        if NOC_API_KEY and credentials.credentials == NOC_API_KEY:
+            return None
+        user = _get_current_user(credentials=credentials, db=db)
+        if user.role not in allowed_roles:
             raise HTTPException(
                 status_code=403,
-                detail=f"Role '{current_user.role}' is not allowed for this action",
+                detail=f"Le rôle '{user.role}' n'a pas accès à cette action.",
             )
-        return current_user
+        return user
 
-    return dependency
-
-
-def verify_user_or_api_key(
-    authorization: str = Header(default=""), db: Session = Depends(get_db)
-) -> None:
-    """Accept either a dashboard JWT or the static NOC API key.
-
-    Used on /api/report/monthly so the scheduled ETL export (which only holds
-    the webhook API key) can pull the end-of-month report."""
-    if authorization == f"Bearer {NOC_API_KEY}":
-        return
-    get_current_user(authorization, db)
+    return _check

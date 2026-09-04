@@ -3,16 +3,20 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.core.rate_limit import read_rate_limit
-from app.core.security import verify_user_or_api_key
+from app.core.security import require_role_or_api_key
 from app.db.session import get_db
 from app.services import report_service
 
-# Accepts a dashboard JWT or the static API key (used by the scheduled
-# end-of-month export running in the ETL beat container).
+# Rapport mensuel réservé au Directeur et au Chef NOC côté dashboard ; la clé
+# API statique (export planifié depuis le conteneur ETL beat) continue de
+# passer sans restriction de rôle — voir require_role_or_api_key.
 router = APIRouter(
     prefix="/api/report",
     tags=["report"],
-    dependencies=[Depends(verify_user_or_api_key), Depends(read_rate_limit)],
+    dependencies=[
+        Depends(require_role_or_api_key("directeur", "chef_noc")),
+        Depends(read_rate_limit),
+    ],
 )
 
 MEDIA_TYPES = {
