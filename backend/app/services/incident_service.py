@@ -1,13 +1,25 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
 from sqlalchemy import Integer, func, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.core.constants import SYNC_MV_REFRESH
-from app.models.dimension import Cause, Node
+from app.models.dimension import Cause, Node, NodeMonitoringSource
 from app.models.incident import Incident
 from app.schemas.incidents import IncidentIngestPayload
+
+# Fenêtre à l'intérieur de laquelle deux événements sur le même nœud, en
+# provenance de deux outils différents, sont considérés comme le même
+# incident réel plutôt que deux incidents indépendants. C'est le problème de
+# doublons d'équipements évoqué dès le départ : Zabbix et NetXMS qui
+# surveillent le même routeur lèvent chacun leur propre alerte à quelques
+# secondes d'écart. 10 minutes est un compromis — assez large pour absorber
+# le décalage entre deux polls à 5 minutes d'intervalle, assez court pour ne
+# pas rattacher deux pannes réellement distinctes survenues à des heures
+# différentes sur le même nœud.
+CORRELATION_WINDOW = timedelta(minutes=10)
 
 
 def _to_naive_utc(dt: datetime | None) -> datetime | None:
@@ -76,6 +88,65 @@ def find_open_duplicate(
     )
 
 
+def _remember_monitoring_source(
+    db: Session, node_id: int, source_tool: str, external_id: str | None
+) -> None:
+    """Record that `node_id` is also seen by `source_tool` under
+    `external_id`, in dim_node_monitoring_source.
+
+    This table existed in the schema before this change but nothing wrote to
+    it — see the audit that led to this fix. Populating it here, on every
+    ingestion, costs nothing extra to call (node_code, source_tool and
+    external_id are already known at this point) and is what lets
+    find_correlated_incident() below recognize "this external_id belongs to
+    a node already monitored by another tool" without needing a separate
+    reconciliation job. `manual` incidents and events without an external_id
+    are not monitoring sources and are skipped.
+    """
+    if not external_id or source_tool == "manual":
+        return
+    stmt = (
+        pg_insert(NodeMonitoringSource)
+        .values(node_id=node_id, tool=source_tool, external_id=external_id)
+        .on_conflict_do_nothing(index_elements=["tool", "external_id"])
+    )
+    db.execute(stmt)
+
+
+def find_correlated_incident(
+    db: Session, node_id: int, source_tool: str, detected_at: datetime
+) -> Incident | None:
+    """An already-open incident on the *same node*, from a *different tool*,
+    detected within CORRELATION_WINDOW of this new event.
+
+    This is the cross-tool duplicate-equipment problem: two monitoring tools
+    covering the same physical device each raise their own alert for the same
+    real-world failure. find_open_duplicate() above only catches a tool
+    re-reporting its *own* alert; it does nothing when Zabbix and NetXMS both
+    report the same outage under their own, unrelated external_ids. When
+    found, the caller links the new row to this one via parent_incident_id
+    instead of treating it as an independent root cause — see
+    fact_incident.parent_incident_id (already in the schema, previously only
+    used for a WAN outage fanning out into per-service alerts, which is the
+    same "child of a root" shape).
+    """
+    naive_detected = _to_naive_utc(detected_at)
+    window_start = naive_detected - CORRELATION_WINDOW
+    window_end = naive_detected + CORRELATION_WINDOW
+    return (
+        db.query(Incident)
+        .filter(
+            Incident.node_id == node_id,
+            Incident.source_tool != source_tool,
+            Incident.status.in_(("open", "acknowledged")),
+            Incident.parent_incident_id.is_(None),  # rattacher à la racine, pas à un enfant
+            Incident.detected_at.between(window_start, window_end),
+        )
+        .order_by(Incident.detected_at.asc())
+        .first()
+    )
+
+
 def ingest_incident(
     db: Session, payload: IncidentIngestPayload
 ) -> tuple[Incident, Node, bool]:
@@ -92,6 +163,9 @@ def ingest_incident(
         return duplicate, node, False
 
     cause = get_or_create_cause(db, payload.cause_category, payload.cause_label)
+    correlated = find_correlated_incident(
+        db, node.id, payload.source_tool, payload.detected_at
+    )
 
     incident = Incident(
         node_id=node.id,
@@ -103,8 +177,10 @@ def ingest_incident(
         detected_at=_to_naive_utc(payload.detected_at),
         description=payload.description,
         itop_ticket_id=payload.itop_ticket_id,
+        parent_incident_id=correlated.id if correlated else None,
     )
     db.add(incident)
+    _remember_monitoring_source(db, node.id, payload.source_tool, payload.external_id)
     db.commit()
     db.refresh(incident)
 
@@ -230,19 +306,30 @@ def ingest_incidents_bulk(
             continue
 
         cause = get_or_create_cause(db, payload.cause_category, payload.cause_label)
-        db.add(
-            Incident(
-                node_id=node_id,
-                cause_id=cause.id if cause else None,
-                external_id=payload.external_id,
-                source_tool=payload.source_tool,
-                severity=payload.severity,
-                status=payload.status,
-                detected_at=_to_naive_utc(payload.detected_at),
-                description=payload.description,
-                itop_ticket_id=payload.itop_ticket_id,
-            )
+        correlated = find_correlated_incident(
+            db, node_id, payload.source_tool, payload.detected_at
         )
+        incident = Incident(
+            node_id=node_id,
+            cause_id=cause.id if cause else None,
+            external_id=payload.external_id,
+            source_tool=payload.source_tool,
+            severity=payload.severity,
+            status=payload.status,
+            detected_at=_to_naive_utc(payload.detected_at),
+            description=payload.description,
+            itop_ticket_id=payload.itop_ticket_id,
+            parent_incident_id=correlated.id if correlated else None,
+        )
+        db.add(incident)
+        _remember_monitoring_source(db, node_id, payload.source_tool, payload.external_id)
+        # Flushed (not committed) so a later payload *in this same batch*, on
+        # the same node from a different tool, can still be correlated
+        # against this one via find_correlated_incident()'s db.query() above
+        # — the session is created with autoflush=False (see db/session.py),
+        # so without this an incident added earlier in this loop stays
+        # invisible to that query until the transaction commits.
+        db.flush()
         if payload.external_id:
             open_keys.add(key)
         created += 1

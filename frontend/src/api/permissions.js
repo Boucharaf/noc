@@ -20,25 +20,36 @@ export const ROLES = Object.freeze({
 // Ajouter une permission ici la rend automatiquement disponible à
 // hasPermission()/useHasPermission() partout dans l'app.
 export const PERMISSIONS = Object.freeze({
-  // Vue d'ensemble / KPI
-  VIEW_KPI_GLOBAL: [ROLES.DIRECTEUR, ROLES.CHEF_NOC],
-  VIEW_KPI_LOCALITY: [ROLES.DIRECTEUR, ROLES.CHEF_NOC, ROLES.TECHNICIEN, ROLES.AGENT_TERRAIN],
+  // Tableaux de bord par profil (un seul écran d'accueil par rôle)
+  VIEW_DECIDEUR_DASHBOARD: [ROLES.DIRECTEUR],
+  VIEW_CHEF_NOC_DASHBOARD: [ROLES.DIRECTEUR, ROLES.CHEF_NOC],
+  VIEW_INCIDENT_QUEUE: [ROLES.CHEF_NOC, ROLES.TECHNICIEN],
+  VIEW_FIELD_OPS: [ROLES.AGENT_TERRAIN],
+
+  // KPI / supervision transverses
   VIEW_SLA: [ROLES.DIRECTEUR, ROLES.CHEF_NOC, ROLES.TECHNICIEN],
   VIEW_INTEROP_STATUS: [ROLES.DIRECTEUR, ROLES.CHEF_NOC, ROLES.TECHNICIEN],
+  VIEW_NETWORK_METRICS: [ROLES.DIRECTEUR, ROLES.CHEF_NOC, ROLES.TECHNICIEN],
+  VIEW_COVERAGE: [ROLES.DIRECTEUR, ROLES.CHEF_NOC, ROLES.TECHNICIEN],
+  VIEW_EQUIPMENT_DETAIL: [ROLES.DIRECTEUR, ROLES.CHEF_NOC, ROLES.TECHNICIEN],
 
   // Incidents / alertes
   VIEW_ALERTS: [ROLES.DIRECTEUR, ROLES.CHEF_NOC, ROLES.TECHNICIEN, ROLES.AGENT_TERRAIN],
+  VIEW_INCIDENT_HISTORY: [ROLES.DIRECTEUR, ROLES.CHEF_NOC, ROLES.TECHNICIEN],
   ACKNOWLEDGE_INCIDENT: [ROLES.CHEF_NOC, ROLES.TECHNICIEN, ROLES.AGENT_TERRAIN],
   RESOLVE_INCIDENT: [ROLES.CHEF_NOC, ROLES.TECHNICIEN],
-  BULK_ACKNOWLEDGE: [ROLES.CHEF_NOC, ROLES.TECHNICIEN],
+  CREATE_MANUAL_INCIDENT: [ROLES.DIRECTEUR, ROLES.CHEF_NOC, ROLES.TECHNICIEN, ROLES.AGENT_TERRAIN],
+
+  // Maintenance planifiée
+  VIEW_MAINTENANCE_WINDOWS: [ROLES.DIRECTEUR, ROLES.CHEF_NOC, ROLES.TECHNICIEN],
+  CREATE_MAINTENANCE_WINDOW: [ROLES.DIRECTEUR, ROLES.CHEF_NOC, ROLES.TECHNICIEN],
 
   // Rapports
   DOWNLOAD_REPORT: [ROLES.DIRECTEUR, ROLES.CHEF_NOC],
 
-  // Administration
-  MANAGE_USERS: [ROLES.DIRECTEUR],
-  VIEW_AUDIT_LOG: [ROLES.DIRECTEUR, ROLES.CHEF_NOC],
-  VIEW_DATA_MODEL: [ROLES.DIRECTEUR, ROLES.CHEF_NOC, ROLES.TECHNICIEN],
+  // Administration — le backend autorise directeur ET chef_noc
+  // (voir app/routes/users.py::_MANAGE_USERS), pas seulement directeur.
+  MANAGE_USERS: [ROLES.DIRECTEUR, ROLES.CHEF_NOC],
 
   // Terrain — propre à l'Agent Terrain (tournées/interventions)
   MANAGE_FIELD_INTERVENTIONS: [ROLES.AGENT_TERRAIN],
@@ -61,16 +72,10 @@ export class PermissionError extends Error {
  * Vérification pure, sans dépendance au store — testable isolément.
  *
  * `permission` est la VALEUR d'une entrée de PERMISSIONS (un tableau de
- * rôles), pas sa clé — c'est l'usage réel dans tout le code (voir
- * api/alerts.js, hooks/usePermission.js) : hasPermission(role,
- * PERMISSIONS.ACKNOWLEDGE_INCIDENT), jamais hasPermission(role,
- * "ACKNOWLEDGE_INCIDENT"). Une implémentation antérieure faisait
- * PERMISSIONS[permission] (donc attendait la clé) : incohérent avec tous
- * ses appelants, qui échouaient silencieusement (fail-closed) — corrigé ici.
+ * rôles), pas sa clé.
  */
 export function hasPermission(role, allowedRoles) {
   if (!Array.isArray(allowedRoles)) {
-    // Permission mal référencée = on refuse par défaut (fail-closed), pas l'inverse.
     console.warn(`[permissions] Permission invalide référencée :`, allowedRoles);
     return false;
   }

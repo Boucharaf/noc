@@ -39,15 +39,23 @@ _redis = redis.Redis(
 )
 
 
-def publish_collector_status(stats: dict) -> None:
-    """Record one pass. `stats` is what collect_supervision returns."""
+def publish_collector_status(stats: dict, key_suffix: str | None = None) -> None:
+    """Record one pass. `stats` is what collect_supervision (or one of the
+    other collection tasks) returns.
+
+    `key_suffix` writes to a separate Redis key (`noc:collector:status:<suffix>`)
+    instead of the main one — used by collect_metrics so a metrics-poll
+    failure doesn't overwrite/blend with the incidents-poll status that
+    GET /api/interop/status was built to report on.
+    """
+    key = f"{STATUS_KEY}:{key_suffix}" if key_suffix else STATUS_KEY
     payload = {
         "collected_at": datetime.now(timezone.utc).isoformat(),
         "interval_seconds": config.COLLECT_INTERVAL_S,
         "tools": stats,
     }
     try:
-        _redis.set(STATUS_KEY, json.dumps(payload), ex=STATUS_TTL_S)
+        _redis.set(key, json.dumps(payload), ex=STATUS_TTL_S)
     except redis.RedisError as exc:
         # Never let status reporting break collection — the incidents matter
         # more than the display of how they were gathered.

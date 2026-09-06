@@ -4,7 +4,7 @@ import { Delete, Lock, User } from "lucide-react";
 import { loginWithPassword, loginWithPin } from "../api/auth";
 import { useAuthStore } from "../store/auth";
 import { getHomeRoute } from "../utils/roleHome";
-import logo from "../assets/images/noc-logo-256.png";
+import Logo from "../components/Logo";
 
 const PIN_LENGTH = 4;
 
@@ -224,11 +224,7 @@ const Login = () => {
         }}
       >
         <div className="mb-6 flex flex-col items-center text-center">
-          <img
-            src={logo}
-            alt="NOC ANPTIC"
-            className="mb-3 h-14 w-14 rounded-xl"
-          />
+          <Logo size={56} className="mb-3" />
           <h1
             className="text-lg font-bold"
             style={{ color: "var(--color-text-primary)" }}

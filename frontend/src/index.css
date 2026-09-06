@@ -22,6 +22,20 @@
   --color-accent: #2a78d6;
   --color-accent-soft: rgba(42, 120, 214, 0.12);
   --shadow-elevate: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.06);
+
+  /* Ops-room signal accent — reserved for "live"/broadcast indicators (the
+     ticker dot, the wall-clock seconds, an active-collector pulse). Never
+     used as a second brand color or on a button: one signal light per room,
+     not scattered decoration. Amber rather than the accent blue so a live
+     indicator never gets mistaken for a clickable/selected state. */
+  --color-signal: #c97a12;
+  --color-signal-soft: rgba(201, 122, 18, 0.14);
+  --font-mono: ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, Consolas,
+    'Liberation Mono', monospace;
+  /* Sharper than the 12px (rounded-xl) used on floating surfaces (modals,
+     dropdowns, KPI tiles): dense operational panels — tables, the incident
+     queue, the node grid — read as instrumentation, not a SaaS card kit. */
+  --radius-panel: 3px;
 }
 
 .dark {
@@ -34,9 +48,11 @@
   --color-text-primary: #f1f5f9;
   --color-text-secondary: #94a3b8;
   --color-text-muted: #64748b;
-  --color-accent: #003478;
-  --color-accent-soft: rgba(0, 52, 120, 0.16);
+  --color-accent: #2f6fb3;
+  --color-accent-soft: rgba(47, 111, 179, 0.16);
   --shadow-elevate: 0 1px 2px rgba(0, 0, 0, 0.2), 0 12px 32px rgba(0, 0, 0, 0.35);
+  --color-signal: #e0a030;
+  --color-signal-soft: rgba(224, 160, 48, 0.14);
 }
 
 body {
@@ -49,6 +65,57 @@ body {
   background-color: var(--color-page);
   color: var(--color-text-primary);
   transition: background-color 0.15s ease;
+}
+
+/* ---- Operations-room chrome ---------------------------------------------
+   The panel grid (dense KPI/telemetry surfaces) intentionally does not reuse
+   .rounded-xl + shadow — that combination is reserved for floating surfaces
+   (menus, the login card, modals). Panels sit flush, bordered, with a status
+   bar on top instead of a shadow underneath: closer to a wallboard tile than
+   a SaaS card. */
+.noc-panel {
+  border-radius: var(--radius-panel);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  position: relative;
+}
+.noc-panel::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  border-radius: var(--radius-panel) var(--radius-panel) 0 0;
+  background: var(--panel-accent, transparent);
+}
+
+.noc-live-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--color-signal);
+  box-shadow: 0 0 0 0 var(--color-signal-soft);
+  animation: noc-live-pulse 2s ease-in-out infinite;
+}
+@keyframes noc-live-pulse {
+  0% { box-shadow: 0 0 0 0 var(--color-signal-soft); }
+  70% { box-shadow: 0 0 0 6px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+/* Ticker: a single continuous marquee, not a per-item slide-in — a wallboard
+   readout scrolls at one constant speed regardless of how many rows feed it. */
+.noc-ticker-track {
+  display: flex;
+  width: max-content;
+  animation: noc-ticker-scroll linear infinite;
+}
+@keyframes noc-ticker-scroll {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .noc-ticker-track { animation: none; }
 }
 
 ::-webkit-scrollbar {

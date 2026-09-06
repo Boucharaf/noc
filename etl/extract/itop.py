@@ -138,6 +138,24 @@ def _query(**params) -> dict:
     return data
 
 
+def _query_class(itop_class: str, **params) -> dict:
+    """Same as _query() but for an arbitrary CI class, not just Incident —
+    used by fetch_all_assets() below, which needs the CMDB's equipment
+    classes rather than tickets."""
+    payload = {"operation": "core/get", "class": itop_class, **params}
+    r = requests.post(
+        config.ITOP_API_URL,
+        data={"json_data": json.dumps(payload)},
+        auth=(config.ITOP_USER, config.ITOP_PASSWORD),
+        timeout=config.HTTP_TIMEOUT_S,
+    )
+    r.raise_for_status()
+    data = r.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"iTop API error ({itop_class}): {data.get('message')}")
+    return data
+
+
 def _match_node(nodes: list[dict], fields: dict) -> str | None:
     ci_list = fields.get("functionalcis_list") or []
 
@@ -295,4 +313,58 @@ def fetch_resolved_events(nodes: list[dict], since_hours: int | None = None) -> 
                 "origin_external_id": origin_external_id,
             }
         )
+    return results
+
+
+# CI classes counted as "equipment that should show up in the coverage
+# referential" — the standard iTop hardware classes. A custom datamodel may
+# use different or additional classes (e.g. NetworkDevice subclasses like
+# Router/Switch/Firewall directly); override via config.ITOP_ASSET_CLASSES
+# (comma-separated) once you know which ones this instance actually uses —
+# `SELECT Server` etc. on a raw core/get call is the fastest way to check.
+DEFAULT_ASSET_CLASSES = ["Server", "NetworkDevice", "PC"]
+
+
+def fetch_all_assets(nodes: list[dict] | None = None) -> list[dict]:
+    """Full CMDB equipment inventory, independent of whether anything
+    monitors it — the referential fetch_events()/fetch_resolved_events()
+    cannot provide, because both only ever see CIs a ticket already
+    mentions. This is what a supervision-coverage KPI ("X% of the park is
+    monitored") has to be computed against: the total park, not the subset
+    the monitoring tools already know about.
+
+    `nodes` is accepted (unused) only so this fits the same
+    `fetch(nodes) -> list[dict]` shape every other collector callable uses in
+    extract/__init__.py's _EXTRA_COLLECTORS registry.
+
+    Returns one row per CI regardless of monitoring status; the backend
+    (asset_service.sync_assets_bulk) is what reconciles each row against
+    dim_node to set is_monitored/node_id — this collector does not attempt
+    that matching itself, since a CI's own record rarely carries the same
+    identifiers (hostid, alarm source id...) the monitoring tools use.
+    """
+    classes = getattr(config, "ITOP_ASSET_CLASSES", None) or DEFAULT_ASSET_CLASSES
+    results = []
+    for itop_class in classes:
+        try:
+            data = _query_class(
+                itop_class,
+                key=f"SELECT {itop_class}",
+                output_fields="id,name,org_id,location_id,status",
+            )
+        except (requests.RequestException, RuntimeError) as exc:
+            logger.warning("[itop] could not list class %s: %s", itop_class, exc)
+            continue
+        for obj in (data.get("objects") or {}).values():
+            fields = obj.get("fields", {})
+            results.append(
+                {
+                    "itop_ci_id": str(obj.get("key")),
+                    "name": fields.get("name") or f"{itop_class}-{obj.get('key')}",
+                    "asset_type": itop_class,
+                    "org_name": (fields.get("org_id_friendlyname") or None),
+                    "location_name": (fields.get("location_id_friendlyname") or None),
+                    "status": fields.get("status"),
+                }
+            )
     return results

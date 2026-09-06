@@ -26,3 +26,12 @@ export const formatAge = (minutes) => {
   const value = years < 10 ? years.toFixed(1).replace(".", ",") : Math.round(years);
   return `il y a ${value} ans`;
 };
+
+/** ISO bounds [premier jour 00:00, premier jour du mois suivant 00:00) pour un
+ * mois calendaire donné — utilisé pour scoper une requête `date_from/date_to`
+ * (ex. GET /api/incidents) sur le même mois que le sélecteur de période global. */
+export const monthBounds = (month, year) => {
+  const from = new Date(Date.UTC(year, month - 1, 1));
+  const to = new Date(Date.UTC(month === 12 ? year + 1 : year, month === 12 ? 0 : month, 1));
+  return { dateFrom: from.toISOString(), dateTo: to.toISOString() };
+};

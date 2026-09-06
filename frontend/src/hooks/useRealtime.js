@@ -120,3 +120,41 @@ export const useResolveIncident = () => {
     },
   });
 };
+
+// Historique paginé/filtrable (GET /api/incidents) — alimente la file
+// d'incidents et l'onglet "Historique", distinct du flux temps réel
+// ci-dessus qui ne couvre que les alertes ouvertes.
+export const useIncidentsList = (filters = {}) => {
+  useAlertSocket();
+  return useQuery({
+    queryKey: ['incidents', 'list', filters],
+    queryFn: ({ signal }) => alertsApi.listIncidents(filters, signal),
+    refetchInterval: POLL_INTERVAL_MS,
+    placeholderData: (prev) => prev,
+  });
+};
+
+export const useCreateManualIncident = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: alertsApi.createManualIncident,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['alerts'] });
+      queryClient.invalidateQueries({ queryKey: ['incidents'] });
+      queryClient.invalidateQueries({ queryKey: ['kpi'] });
+    },
+  });
+};
+
+// Comptage bon marché (page_size=1, on ne lit que `.total`) pour une tuile KPI
+// scoped-période — ex. "incidents critiques ce mois-ci" sur la Vue Décideur,
+// qui n'existe pas comme champ direct dans KPISummaryValues.
+export const useIncidentsCount = (filters = {}) => {
+  return useQuery({
+    queryKey: ['incidents', 'count', filters],
+    queryFn: async ({ signal }) => {
+      const data = await alertsApi.listIncidents({ ...filters, page: 1, pageSize: 1 }, signal);
+      return data.total;
+    },
+  });
+};

@@ -103,3 +103,63 @@ class NocApiClient:
         except requests.RequestException as exc:
             logger.warning("Report download failed for %s-%s: %s", year, month, exc)
             return None
+
+    def _post_bulk(self, path: str, body_key: str, payloads: list[dict]) -> dict | None:
+        """Shared plumbing for the three "post a batch, get counts back"
+        endpoints below — same fail-closed contract as ingest_incidents_bulk:
+        None on any failure, never a partial/garbage dict, so callers only
+        ever need `if result is None`."""
+        if not payloads:
+            return {"received": 0}
+        try:
+            r = requests.post(
+                f"{self.base_url}{path}",
+                json={body_key: payloads},
+                headers=self._headers(),
+                timeout=max(self.timeout, 60),
+            )
+            r.raise_for_status()
+            result = r.json()
+        except requests.RequestException as exc:
+            logger.warning("%s of %d item(s) failed: %s", path, len(payloads), exc)
+            return None
+        if not isinstance(result, dict):
+            logger.error("%s returned a non-object response — treating as failed", path)
+            return None
+        return result
+
+    def ingest_metrics_bulk(self, payloads: list[dict]) -> dict | None:
+        """Batch of fact_metric rows (performance + availability readings) —
+        see transform/normalize.to_metric_payload()."""
+        return self._post_bulk("/api/metrics/ingest/bulk", "metrics", payloads)
+
+    def ingest_maintenance_windows_bulk(self, payloads: list[dict]) -> dict | None:
+        """Batch of auto-imported maintenance windows — see
+        transform/normalize.to_maintenance_window_payload()."""
+        return self._post_bulk(
+            "/api/maintenance-windows/ingest/bulk", "windows", payloads
+        )
+
+    def sync_assets_bulk(self, payloads: list[dict]) -> dict | None:
+        """Full CMDB asset inventory snapshot for the coverage referential —
+        see transform/normalize.to_asset_payload(). Larger timeout floor than
+        the other two: this can carry the whole park in one call, run only
+        once a day (see pipelines/tasks.sync_asset_inventory)."""
+        if not payloads:
+            return {"received": 0}
+        try:
+            r = requests.post(
+                f"{self.base_url}/api/assets/sync/bulk",
+                json={"assets": payloads},
+                headers=self._headers(),
+                timeout=max(self.timeout, 180),
+            )
+            r.raise_for_status()
+            result = r.json()
+        except requests.RequestException as exc:
+            logger.warning("Asset sync of %d item(s) failed: %s", len(payloads), exc)
+            return None
+        if not isinstance(result, dict):
+            logger.error("Asset sync returned a non-object response — treating as failed")
+            return None
+        return result

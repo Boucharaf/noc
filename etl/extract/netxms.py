@@ -74,6 +74,30 @@ TERMINATED_STATE = 2
 # Container, ...) is not a host and is skipped without a warning.
 HOST_CLASSES = {"Node", "Cluster", "MobileDevice", "AccessPoint", "Sensor", "Chassis"}
 
+# DCI (Data Collection Item) *description* substrings used to recognize a
+# performance metric, matched case-insensitively — NetXMS has no standard key
+# scheme the way Zabbix does, only whatever label the template/policy author
+# gave the DCI. NOT confirmed against a real ANPTIC NetXMS 5.0.8 response —
+# same caveat as fetch_maintenance_windows() above: check a raw
+# GET /v1/objects/{id}/data-collection on a node you know reports these before
+# trusting fetch_operational_metrics() for a KPI. Override via
+# config.NETXMS_DCI_NAME_PATTERNS (same shape) once confirmed.
+DEFAULT_DCI_NAME_PATTERNS = {
+    "cpu_pct": ["cpu"],
+    "ram_pct": ["memory", "physical memory"],
+    "bandwidth_in_bps": ["traffic in", "in octets", "rx bytes"],
+    "bandwidth_out_bps": ["traffic out", "out octets", "tx bytes"],
+    "latency_ms": ["ping", "response time", "icmp"],
+    "packet_loss_pct": ["packet loss"],
+}
+
+# DCI listing per node is one request per node (no bulk "all DCIs" endpoint) —
+# cached in Redis for the same reason as the object identity cache above: at
+# ~1400 nodes that is 1400 extra requests a pass without it. DCI definitions
+# change far less often than alarms, so the cache is keyed and expired the
+# same way.
+_DCI_LIST_KEY = "noc:netxms:dci_list:{}"
+
 # ── object identity cache ───────────────────────────────────────────────────
 # Resolving alarm sources is by far the most expensive part of a poll: because
 # /v1/objects lists only the root containers (see the module docstring), each
@@ -331,4 +355,109 @@ def fetch_maintenance_windows(nodes: list[dict]) -> list[dict]:
                 "active_till": None,
             }
         )
+    return results
+
+
+def _cached_dci_list(node_obj_id, token: str) -> list[dict]:
+    try:
+        raw = _redis.get(_DCI_LIST_KEY.format(node_obj_id))
+        if raw:
+            return json.loads(raw)
+    except (redis.RedisError, ValueError, TypeError) as exc:
+        logger.warning("[netxms] DCI list cache read failed for %s: %s", node_obj_id, exc)
+
+    try:
+        payload = _get(f"/v1/objects/{node_obj_id}/data-collection", token)
+    except requests.RequestException as exc:
+        logger.warning("[netxms] could not list DCIs for object %s: %s", node_obj_id, exc)
+        return []
+    dcis = _as_list(payload, "dciList") or _as_list(payload, "items") or []
+    try:
+        _redis.set(
+            _DCI_LIST_KEY.format(node_obj_id),
+            json.dumps(dcis),
+            ex=config.NETXMS_OBJECT_CACHE_TTL_S,
+        )
+    except redis.RedisError:
+        pass
+    return dcis
+
+
+def _metric_name_for_dci(description: str, patterns: dict) -> str | None:
+    lowered = (description or "").lower()
+    for name, needles in patterns.items():
+        if any(needle in lowered for needle in needles):
+            return name
+    return None
+
+
+def fetch_operational_metrics(nodes: list[dict]) -> list[dict]:
+    """Latest CPU / RAM / bandwidth / latency / packet-loss DCI value per node.
+
+    Iterates every Node/Cluster object (same /v1/objects listing fetch_events()
+    already reads), lists its DCIs (cached — see _DCI_LIST_KEY above), matches
+    each DCI's description against DEFAULT_DCI_NAME_PATTERNS, and reads the
+    latest value for the ones that match via
+    GET /v1/objects/{id}/data-collection/{dciId}/values/latest.
+
+    Cost: one DCI-list request per node on a cold cache (or cache miss), plus
+    one values request per *matched* DCI (typically 3-6 per node, not every
+    DCI it has) — bounded, unlike a naive per-DCI-per-poll history fetch.
+    Endpoint paths are NOT confirmed against a real NetXMS 5.0.8 response
+    (NetXMS's REST API has changed data-collection endpoints across major
+    versions more than once) — verify both paths against your instance first;
+    on a mismatch this fails closed (logs and returns nothing) rather than
+    raising and taking down the rest of the poll.
+    """
+    token = _login()
+    objects = _as_list(_get("/v1/objects", token), "objects")
+    patterns = getattr(config, "NETXMS_DCI_NAME_PATTERNS", DEFAULT_DCI_NAME_PATTERNS)
+
+    index = build_node_index(nodes)
+    results = []
+    for obj in objects:
+        klass = obj.get("class", "")
+        if klass and klass not in HOST_CLASSES:
+            continue
+        name = obj.get("name", "")
+        ip = _object_ip(obj)
+        host = name or str(obj.get("id", ""))
+        node_code = match_node(nodes, host, ip, index=index)
+        if node_code is None:
+            skip_unmatched("netxms", host)
+            continue
+
+        obj_id = obj.get("id")
+        for dci in _cached_dci_list(obj_id, token):
+            metric_name = _metric_name_for_dci(dci.get("description", ""), patterns)
+            if metric_name is None:
+                continue
+            dci_id = dci.get("id")
+            try:
+                latest = _get(
+                    f"/v1/objects/{obj_id}/data-collection/{dci_id}/values/latest", token
+                )
+            except requests.RequestException as exc:
+                logger.warning(
+                    "[netxms] could not read latest value for DCI %s on %s: %s",
+                    dci_id, obj_id, exc,
+                )
+                continue
+            value = latest.get("value") if isinstance(latest, dict) else None
+            if value is None:
+                continue
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                continue
+            results.append(
+                {
+                    "node_code": node_code,
+                    "source_tool": "netxms",
+                    "metric": metric_name,
+                    "value": value,
+                    "unit": dci.get("unit"),
+                    "collected_at": datetime.now(tz=timezone.utc).isoformat(),
+                }
+            )
     return results

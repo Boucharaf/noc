@@ -4,7 +4,7 @@ import os
 from celery import Celery
 from celery.schedules import crontab
 
-from config import COLLECT_INTERVAL_S, broker_url
+from config import COLLECT_INTERVAL_S, METRICS_COLLECT_INTERVAL_S, broker_url
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -40,6 +40,26 @@ app.conf.update(
         "generate-monthly-report": {
             "task": "etl.generate_monthly_report",
             "schedule": crontab(day_of_month=1, hour=2, minute=30),
+        },
+        # performance/availability metrics — own cadence, see
+        # config.METRICS_COLLECT_INTERVAL_S for why it's not tighter by default.
+        "collect-metrics": {
+            "task": "etl.collect_metrics",
+            "schedule": float(METRICS_COLLECT_INTERVAL_S),
+            "options": {"expires": METRICS_COLLECT_INTERVAL_S},
+        },
+        # maintenance windows currently active in each tool, same cadence as
+        # incident collection (see collect_maintenance_windows docstring).
+        "collect-maintenance-windows": {
+            "task": "etl.collect_maintenance_windows",
+            "schedule": float(COLLECT_INTERVAL_S),
+            "options": {"expires": COLLECT_INTERVAL_S},
+        },
+        # full CMDB equipment inventory (iTop) for the coverage KPI — once a
+        # day, well off the incident-collection cadence (see task docstring).
+        "sync-asset-inventory-daily": {
+            "task": "etl.sync_asset_inventory",
+            "schedule": crontab(hour=3, minute=0),
         },
     },
 )

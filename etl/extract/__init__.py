@@ -41,17 +41,27 @@ _EXTRA_COLLECTORS = {
     "centreon": {
         "host_availability": centreon.fetch_host_availability,
         "maintenance_windows": centreon.fetch_maintenance_windows,
+        "operational_metrics": centreon.fetch_operational_metrics,
     },
     "nagios": {
         "service_availability": nagios.fetch_service_availability,
         "maintenance_windows": nagios.fetch_maintenance_windows,
+        "operational_metrics": nagios.fetch_operational_metrics,
     },
     "netxms": {
         "host_availability": netxms.fetch_host_availability,
         "maintenance_windows": netxms.fetch_maintenance_windows,
+        "operational_metrics": netxms.fetch_operational_metrics,
     },
     "itop": {
         "resolved_events": itop.fetch_resolved_events,
+        # Not an "extra signal" on incidents the way the others are — this is
+        # the full CMDB inventory used to build the coverage referential. It
+        # runs on its own, slower cadence (see pipelines/tasks.sync_asset_inventory)
+        # rather than every collect_supervision pass; kept in this registry
+        # anyway so enabled_extra_collectors() stays the single source of
+        # truth for "what can this tool provide beyond fetch_events()".
+        "asset_inventory": itop.fetch_all_assets,
     },
 }
 

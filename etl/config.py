@@ -75,6 +75,13 @@ if not NOC_API_KEY:
 # load problem on the monitoring servers. Raising it delays detection by the
 # same amount, since nothing else drives collection.
 COLLECT_INTERVAL_S = int(os.getenv("ETL_COLLECT_INTERVAL_S", "300"))
+# Metrics/availability poll interval. Deliberately defaulted to the same
+# cadence as incident collection rather than something tighter (e.g. 60s):
+# fact_metric is append-only and grows one row per node per metric per poll,
+# so a shorter interval multiplies storage directly. Safe to lower once
+# fact_metric sits on TimescaleDB (or a retention job exists) — see
+# database/02_kpi_extensions.sql's comment on that table.
+METRICS_COLLECT_INTERVAL_S = int(os.getenv("ETL_METRICS_COLLECT_INTERVAL_S", "300"))
 # Where the scheduled end-of-month exports are written (mounted volume).
 REPORTS_DIR = os.getenv("REPORTS_DIR", "/reports")
 

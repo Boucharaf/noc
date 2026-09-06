@@ -1,17 +1,16 @@
 import { ROLES } from "../api/permissions";
 
-// Où atterrir juste après connexion, et où rediriger "/". Chaque rôle a un
-// écran qui lui est réellement utile en premier — /global exige
-// VIEW_KPI_GLOBAL, que Technicien et Agent terrain n'ont pas, donc les y
-// envoyer produirait un écran vide/à accès refusé plutôt qu'un atterrissage
-// utile.
+// Où atterrir juste après connexion, et où rediriger "/" — l'écran d'accueil
+// de chaque rôle correspond au niveau du document KPI métier qui le concerne
+// (Décideur / Chef NOC / Agent NOC / terrain), pas à une liste d'onglets
+// génériques identiques pour tout le monde.
 const HOME_BY_ROLE = {
-  [ROLES.DIRECTEUR]: "/global",
-  [ROLES.CHEF_NOC]: "/global",
-  [ROLES.TECHNICIEN]: "/mes-alertes",
-  [ROLES.AGENT_TERRAIN]: "/mes-tournees",
+  [ROLES.DIRECTEUR]: "/decideur",
+  [ROLES.CHEF_NOC]: "/chef-noc",
+  [ROLES.TECHNICIEN]: "/incidents",
+  [ROLES.AGENT_TERRAIN]: "/tournees",
 };
 
 export function getHomeRoute(role) {
-  return HOME_BY_ROLE[role] ?? "/global";
+  return HOME_BY_ROLE[role] ?? "/decideur";
 }

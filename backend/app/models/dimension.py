@@ -39,6 +39,38 @@ class Region(Base):
     localities = relationship("Locality", back_populates="region")
 
 
+class Province(Base):
+    """Découpage administratif intermédiaire région → province → site,
+    nécessaire pour le drill-down demandé (KPI global → ministère → province
+    → site → équipement → incident). Voir database/02_kpi_extensions.sql."""
+
+    __tablename__ = "dim_province"
+
+    id = Column(Integer, primary_key=True)
+    region_id = Column(Integer, ForeignKey("dim_region.id"), nullable=False)
+    code = Column(String(10), unique=True, nullable=False)
+    name = Column(String(100), nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+    region = relationship("Region")
+    localities = relationship("Locality", back_populates="province")
+
+
+class Organisation(Base):
+    """Ministère / structure rattachée propriétaire d'un site — permet
+    "disponibilité par ministère", absent du schéma initial."""
+
+    __tablename__ = "dim_organisation"
+
+    id = Column(Integer, primary_key=True)
+    code = Column(String(20), unique=True, nullable=False)
+    name = Column(String(200), nullable=False)
+    org_type = Column(String(30))
+    created_at = Column(DateTime, server_default=func.now())
+
+    localities = relationship("Locality", back_populates="organisation")
+
+
 class Locality(Base):
     __tablename__ = "dim_locality"
 
@@ -59,9 +91,15 @@ class Locality(Base):
     contact_name = Column(String(150))
     contact_phone = Column(String(30))
 
+    # --- ajouts hiérarchie organisationnelle ---
+    province_id = Column(Integer, ForeignKey("dim_province.id"))
+    organisation_id = Column(Integer, ForeignKey("dim_organisation.id"))
+
     created_at = Column(DateTime, server_default=func.now())
 
     region = relationship("Region", back_populates="localities")
+    province = relationship("Province", back_populates="localities")
+    organisation = relationship("Organisation", back_populates="localities")
     nodes = relationship("Node", back_populates="locality")
 
 
@@ -133,6 +171,14 @@ class MaintenanceWindow(Base):
     """Fenêtre de maintenance planifiée. Un incident détecté sur un nœud/site
     dont la fenêtre est active doit être marqué 'maintenance' plutôt que
     remonté comme alerte critique (évite le bruit et les faux SLA breach).
+
+    Deux origines possibles depuis l'extension 02_kpi_extensions.sql :
+    - manuelle (created_by_user_id renseigné, source_tool/external_id nuls) —
+      créée depuis le dashboard par un opérateur ;
+    - importée automatiquement par l'ETL (source_tool/external_id renseignés,
+      created_by_user_id nul) — détectée dans Zabbix/Centreon/NetXMS.
+    Le CHECK chk_maintenance_origin en base impose l'un ou l'autre, jamais
+    un mélange incohérent des deux.
     """
 
     __tablename__ = "dim_maintenance_window"
@@ -144,5 +190,7 @@ class MaintenanceWindow(Base):
     starts_at = Column(DateTime, nullable=False)
     ends_at = Column(DateTime, nullable=False)
     suppress_alerts = Column(Boolean, default=True)
-    created_by_user_id = Column(Integer, ForeignKey("dim_user.id"), nullable=False)
+    created_by_user_id = Column(Integer, ForeignKey("dim_user.id"), nullable=True)
+    source_tool = Column(String(20))  # NULL = créée manuellement
+    external_id = Column(String(100))  # NULL = créée manuellement
     created_at = Column(DateTime, server_default=func.now())

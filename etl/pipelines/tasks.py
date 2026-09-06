@@ -6,15 +6,36 @@ import psycopg2
 
 from celery_app import app
 from config import HTTP_TIMEOUT_S, NOC_API_KEY, NOC_API_URL, REPORTS_DIR, build_dsn
-from extract import enabled_collectors
+from extract import enabled_collectors, enabled_extra_collectors
 from load.api_client import NocApiClient
 from pipelines.collector import load_active_nodes
 from pipelines.status import publish_collector_status
-from transform.normalize import to_ingest_payload
+from transform.normalize import (
+    to_asset_payload,
+    to_ingest_payload,
+    to_maintenance_window_payload,
+    to_metric_payload,
+)
 
 logger = logging.getLogger(__name__)
 
 api_client = NocApiClient(base_url=NOC_API_URL, api_key=NOC_API_KEY, timeout=HTTP_TIMEOUT_S)
+
+# Signal names from extract/__init__.py's _EXTRA_COLLECTORS that feed
+# fact_metric — operational_metrics reports real performance numbers,
+# host_availability/service_availability report an up/down reading that
+# normalize.to_metric_payload() folds onto the same "availability" metric
+# type (see that function's docstring).
+_METRIC_SIGNALS = ("operational_metrics", "host_availability", "service_availability")
+
+
+def _nodes_for_tool(all_nodes: list[dict], tool: str) -> list[dict]:
+    """Same subsetting collect_supervision uses: iTop's signals reference CIs
+    across the whole park, every other tool only ever reports on nodes it is
+    itself the source for."""
+    if tool == "itop":
+        return all_nodes
+    return [n for n in all_nodes if n["source_tool"] == tool]
 
 
 @app.task(name="etl.collect_supervision", bind=True, max_retries=0)
@@ -120,6 +141,110 @@ def collect_supervision(self):
     publish_collector_status(stats)
 
     return stats
+
+
+@app.task(name="etl.collect_metrics", bind=True, max_retries=0)
+def collect_metrics(self):
+    """Batch collection pass for performance/availability metrics.
+
+    Separate task and separate beat schedule from collect_supervision on
+    purpose: metrics are a much higher-volume, lower-stakes signal (a missed
+    CPU reading is a gap in a graph, not an undetected outage), and coupling
+    them to the same task would mean one slow tool's metrics poll delays
+    incident collection behind it. Same per-tool failure isolation as
+    collect_supervision — see that task's docstring.
+    """
+    extra = enabled_extra_collectors()
+    if not extra:
+        publish_collector_status({}, key_suffix="metrics")
+        return {"configured": 0}
+
+    all_nodes = load_active_nodes(build_dsn())
+    stats = {}
+    for tool, signals in extra.items():
+        fetch = next((signals[name] for name in _METRIC_SIGNALS if name in signals), None)
+        if fetch is None:
+            continue
+        nodes = _nodes_for_tool(all_nodes, tool)
+        try:
+            events = fetch(nodes)
+            payloads = [
+                p for p in (to_metric_payload(e) for e in events) if p is not None
+            ]
+            result = api_client.ingest_metrics_bulk(payloads)
+            failed = 0 if result is not None else len(payloads)
+        except Exception as exc:
+            logger.error("[%s] metrics collection failed: %s", tool, exc)
+            stats[tool] = {"error": str(exc)}
+            continue
+        stats[tool] = {"fetched": len(events), "ingested": len(payloads) - failed, "failed": failed}
+        logger.info("[%s] metrics fetched=%d ingested=%d", tool, len(events), len(payloads) - failed)
+
+    publish_collector_status(stats, key_suffix="metrics")
+    return stats
+
+
+@app.task(name="etl.collect_maintenance_windows", bind=True, max_retries=0)
+def collect_maintenance_windows(self):
+    """Batch import of maintenance windows currently active in each tool.
+
+    Same 5-minute cadence as collect_supervision (a stale maintenance window
+    either suppresses alerts too long or not long enough) but kept as its own
+    task for the same isolation reason as collect_metrics.
+    """
+    extra = enabled_extra_collectors()
+    if not extra:
+        return {"configured": 0}
+
+    all_nodes = load_active_nodes(build_dsn())
+    stats = {}
+    for tool, signals in extra.items():
+        fetch = signals.get("maintenance_windows")
+        if fetch is None:
+            continue
+        nodes = _nodes_for_tool(all_nodes, tool)
+        try:
+            events = fetch(nodes)
+            payloads = [to_maintenance_window_payload(e) for e in events]
+            result = api_client.ingest_maintenance_windows_bulk(payloads)
+            failed = 0 if result is not None else len(payloads)
+        except Exception as exc:
+            logger.error("[%s] maintenance-window collection failed: %s", tool, exc)
+            stats[tool] = {"error": str(exc)}
+            continue
+        stats[tool] = {"fetched": len(events), "ingested": len(payloads) - failed, "failed": failed}
+
+    return stats
+
+
+@app.task(name="etl.sync_asset_inventory", bind=True, max_retries=2, default_retry_delay=300)
+def sync_asset_inventory(self):
+    """Daily full sync of the CMDB equipment inventory (iTop), for the
+    supervision-coverage KPI — see extract/itop.py's fetch_all_assets()
+    docstring for why this needs its own referential rather than reusing
+    dim_node. Runs once a day, not every poll: the total park size changes on
+    the scale of procurement/decommission, not every five minutes, and a
+    full-CMDB query is heavier than any other single collector call here.
+    """
+    extra = enabled_extra_collectors()
+    fetch = extra.get("itop", {}).get("asset_inventory")
+    if fetch is None:
+        logger.info("[itop] asset inventory sync skipped — ITOP_API_URL not configured")
+        return {"configured": 0}
+
+    try:
+        assets = fetch(None)
+        payloads = [to_asset_payload(a) for a in assets]
+        result = api_client.sync_assets_bulk(payloads)
+    except Exception as exc:
+        logger.error("[itop] asset inventory sync failed: %s", exc)
+        raise self.retry(exc=exc)
+
+    if result is None:
+        raise self.retry(exc=RuntimeError("Asset sync bulk endpoint failed"))
+
+    logger.info("[itop] asset inventory synced: %d asset(s) fetched", len(assets))
+    return {"fetched": len(assets), **result}
 
 
 @app.task(name="etl.refresh_kpi_view", bind=True, max_retries=2, default_retry_delay=60)

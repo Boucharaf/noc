@@ -50,6 +50,23 @@ STATUS_SEVERITY = {"CRITICAL": "critical", "UNKNOWN": "high", "DOWN": "critical"
 
 _PAGE_LIMIT = 100
 
+# Service *name* substrings used to recognize a performance metric on a
+# Centreon service, matched case-insensitively. Centreon templates vary a lot
+# between plugin packs (centreon-plugins vs legacy Nagios plugins vs custom),
+# so — same caveat as Zabbix's DEFAULT_ITEM_KEY_PATTERNS — this is a
+# best-effort default, override via config.CENTREON_SERVICE_NAME_PATTERNS
+# (same shape) once you know your real service names. Verified against
+# Centreon 22.10's default "Linux/Windows" and "Network" templates; confirm
+# against your instance before trusting this for a KPI.
+DEFAULT_SERVICE_NAME_PATTERNS = {
+    "cpu_pct": ["cpu"],
+    "ram_pct": ["memory", "ram"],
+    "bandwidth_in_bps": ["traffic-in", "traffic in", "if-in"],
+    "bandwidth_out_bps": ["traffic-out", "traffic out", "if-out"],
+    "latency_ms": ["ping", "rta"],
+    "packet_loss_pct": ["ping", "packet loss", "pl"],
+}
+
 
 def _base_url() -> str:
     return config.CENTREON_API_URL.rstrip("/")
@@ -226,6 +243,73 @@ def fetch_maintenance_windows(nodes: list[dict]) -> list[dict]:
                 "maintenance_name": "Downtime Centreon",
                 "active_since": None,
                 "active_till": None,
+            }
+        )
+    return results
+
+
+def _metric_name_for_service(service_name: str, patterns: dict) -> str | None:
+    lowered = service_name.lower()
+    for name, needles in patterns.items():
+        if any(needle in lowered for needle in needles):
+            return name
+    return None
+
+
+def fetch_operational_metrics(nodes: list[dict]) -> list[dict]:
+    """Latest CPU / RAM / bandwidth / latency / packet-loss reading per node.
+
+    Centreon has no single "give me all metrics" call — a resource's current
+    numeric reading lives on its *service*, keyed by service name (see
+    DEFAULT_SERVICE_NAME_PATTERNS). This lists every service resource once via
+    /monitoring/resources (which already carries the last check's output and,
+    on recent Centreon versions, a `metrics` array with current values — no
+    per-service dedicated call needed), then maps each matched service onto a
+    metric type and its parent host onto a dim_node.
+
+    Needs validation against your instance: the `metrics` field's shape (name/
+    current_value/unit) has moved between Centreon API versions. If it comes
+    back empty for services you know report perfdata, fall back to parsing
+    `res["information"]` (the plugin's human-readable output line), which is
+    far less reliable but present on every version.
+    """
+    token = _auth_token()
+    resources = _paginated_resources(
+        token, {"types": '["service"]', "status": '["ok", "warning", "critical", "unknown"]'}
+    )
+
+    patterns = getattr(config, "CENTREON_SERVICE_NAME_PATTERNS", DEFAULT_SERVICE_NAME_PATTERNS)
+    index = build_node_index(nodes)
+    results = []
+    for res in resources:
+        service_name = res.get("name") or ""
+        metric_name = _metric_name_for_service(service_name, patterns)
+        if metric_name is None:
+            continue
+
+        metrics = res.get("metrics") or []
+        if not metrics:
+            continue  # nothing numeric on this service — see docstring fallback note
+        value = metrics[0].get("current_value")
+        unit = metrics[0].get("unit")
+        if value is None:
+            continue
+
+        parent = res.get("parent") or {}
+        host = parent.get("name") or ""
+        node_code = match_node(nodes, host, index=index)
+        if node_code is None:
+            skip_unmatched("centreon", host)
+            continue
+
+        results.append(
+            {
+                "node_code": node_code,
+                "source_tool": "centreon",
+                "metric": metric_name,
+                "value": value,
+                "unit": unit,
+                "collected_at": datetime.now(tz=timezone.utc).isoformat(),
             }
         )
     return results
