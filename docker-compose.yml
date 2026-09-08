@@ -6,17 +6,33 @@ services:
     ports:
       - "8000"
     environment:
-      - REDIS_HOST=${REDIS_HOST}
-      - REDIS_PORT=${REDIS_PORT}
-      - CACHE_TTL=${CACHE_TTL}
-      - DB_HOST=${POSTGRES_HOST}
-      - DB_PORT=${POSTGRES_PORT}
-      - DB_USER=${POSTGRES_USER}
-      - DB_PASSWORD=${POSTGRES_PASSWORD}
-      - DB_NAME=${POSTGRES_DB}
+      # UNE seule variable de base, partagée avec l'ETL : les deux services
+      # lisent et écrivent le même entrepôt. Les anciennes variables DB_*
+      # restent acceptées en repli par backend/app/core/config.py, mais
+      # NOC_WAREHOUSE_DSN est la référence.
+      - NOC_WAREHOUSE_DSN=postgresql://${POSTGRES_USER:-noc}:${POSTGRES_PASSWORD:-noc}@postgres:5432/${POSTGRES_DB:-noc_warehouse}
+      - REDIS_URL=redis://redis:6379/0
+      - CACHE_TTL=${CACHE_TTL:-300}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - SECRET_KEY=${SECRET_KEY}
-      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES}
-      - NOC_API_KEY=${NOC_API_KEY}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      - REFRESH_TOKEN_EXPIRATION_DAYS=${REFRESH_TOKEN_EXPIRATION_DAYS:-7}
+      # false derrière le nginx local servi en http:// ; true en production.
+      # À true sur une origine http, le navigateur refuse le cookie de
+      # refresh et la session tombe au bout de 30 minutes.
+      - REFRESH_COOKIE_SECURE=${REFRESH_COOKIE_SECURE:-false}
+      # Clé partagée avec l'ETL pour les routes /api/internal/*.
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      # Veilleur d'incidents : remplace l'ancienne ingestion par webhook.
+      # UN SEUL conteneur backend doit l'activer, sinon les alertes partent
+      # en double.
+      - WATCHER_ENABLED=${WATCHER_ENABLED:-true}
+      - WATCHER_INTERVAL_S=${WATCHER_INTERVAL_S:-30}
+      - COLLECT_INTERVAL_S=${COLLECT_INTERVAL_S:-300}
+      - SUPERVISION_TOOLS=${SUPERVISION_TOOLS:-zabbix,itop,netxms,centreon,nagios,nsp}
+      - REPORT_OUTPUT_DIR=/reports
+      - REPORT_ORGANISATION=${REPORT_ORGANISATION:-ANPTIC — RESINA}
+      - TZ=${TZ:-Africa/Ouagadougou}
       - VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
       - VAPID_PRIVATE_KEY=${VAPID_PRIVATE_KEY:-}
       - VAPID_CLAIMS_EMAIL=${VAPID_CLAIMS_EMAIL:-noc@anptic.bf}
@@ -37,102 +53,131 @@ services:
       - NOC_EMAIL_RECIPIENTS=${NOC_EMAIL_RECIPIENTS:-}
       - DASHBOARD_URL=${DASHBOARD_URL:-}
       - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
-      - SYNC_MV_REFRESH=${SYNC_MV_REFRESH:-true}
+    volumes:
+      # Partagé avec l'ETL : le rapport mensuel est généré par le backend
+      # mais déclenché par le planificateur Celery.
+      - reports:/reports
     depends_on:
       redis:
         condition: service_healthy
       postgres:
         condition: service_healthy
     healthcheck:
+      # /api/health et non / : la racine répond même quand l'entrepôt est
+      # injoignable, ce qui ferait passer pour sain un backend incapable
+      # de servir la moindre donnée.
       test:
         [
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8000/')",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')",
         ]
-      interval: 10s
+      interval: 15s
       timeout: 5s
+      start_period: 30s
       retries: 5
 
+  # Worker Celery de l'ETL : exécute la collecte des six outils.
+  #
+  # Les variables sont celles lues par etl/config.py — un connecteur ne
+  # s'active que si son <OUTIL>_API_URL est renseignée. Les anciens noms
+  # (ZABBIX_USER, NOC_API_KEY…) ne sont plus lus par personne : l'ETL
+  # n'appelle plus le backend pour ingérer, il écrit dans l'entrepôt.
   etl-worker:
     build: ./etl
-    command: celery -A celery_app worker --loglevel=${LOG_LEVEL:-INFO} --concurrency=2
+    command: celery -A etl.celery_app worker --loglevel=${LOG_LEVEL:-INFO} --concurrency=2
     environment:
-      - DB_HOST=${POSTGRES_HOST}
-      - DB_PORT=${POSTGRES_PORT}
-      - DB_USER=${POSTGRES_USER}
-      - DB_PASSWORD=${POSTGRES_PASSWORD}
-      - DB_NAME=${POSTGRES_DB}
-      - NOC_API_URL=http://backend:8000
-      - NOC_API_KEY=${NOC_API_KEY}
-      - REDIS_HOST=${REDIS_HOST}
-      - REDIS_PORT=${REDIS_PORT}
-      - CELERY_BROKER_DB=${CELERY_BROKER_DB:-1}
-      - REPORTS_DIR=/reports
-      # Must match etl-beat's value: beat uses it to schedule the collection,
-      # the worker to set the lifetime of the collector-status key it writes.
-      # If only beat has it, the worker keeps the 300s default and the status
-      # outlives a dead worker by minutes while still reading as current.
-      - ETL_COLLECT_INTERVAL_S=${ETL_COLLECT_INTERVAL_S:-300}
-      - NOC_API_KEY=${NOC_API_KEY}
-      - ETL_ENV=${ETL_ENV:-development}
-      - NOC_API_KEY=${NOC_API_KEY}
-      - ETL_ENV=${ETL_ENV:-development}
-      - ETL_HTTP_TIMEOUT_S=${ETL_HTTP_TIMEOUT_S:-15}
-      # Supervision tool endpoints — a collector runs only when its URL is set
+      - NOC_WAREHOUSE_DSN=postgresql://${POSTGRES_USER:-noc}:${POSTGRES_PASSWORD:-noc}@postgres:5432/${POSTGRES_DB:-noc_warehouse}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      # Doit valoir la même chose que pour etl-beat : beat s'en sert pour
+      # cadencer la collecte, le worker pour fixer la durée de vie de la
+      # clé de statut qu'il publie dans Redis. Si seul beat l'a, le statut
+      # d'un worker mort continue d'être lu comme frais.
+      - COLLECT_INTERVAL_S=${COLLECT_INTERVAL_S:-300}
+      # Déclenchement du rapport mensuel via l'API interne du backend
+      # (etl/report_trigger.py). Sans ces deux variables, la tâche du 1er
+      # du mois se contente de journaliser qu'elle n'a rien pu faire.
+      - BACKEND_INTERNAL_URL=http://backend:8000
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - TZ=${TZ:-Africa/Ouagadougou}
+      # --- Zabbix ---
+      - ZABBIX_API_ENABLED=${ZABBIX_API_ENABLED:-true}
       - ZABBIX_API_URL=${ZABBIX_API_URL:-}
-      - ZABBIX_USER=${ZABBIX_USER:-}
-      - ZABBIX_PASSWORD=${ZABBIX_PASSWORD:-}
+      - ZABBIX_API_USER=${ZABBIX_API_USER:-}
+      - ZABBIX_API_PASSWORD=${ZABBIX_API_PASSWORD:-}
       - ZABBIX_API_TOKEN=${ZABBIX_API_TOKEN:-}
-      - NAGIOS_API_URL=${NAGIOS_API_URL:-}
-      - NAGIOS_USER=${NAGIOS_USER:-}
-      - NAGIOS_PASSWORD=${NAGIOS_PASSWORD:-}
-      - NAGIOS_API_KEY=${NAGIOS_API_KEY:-}
-      - NETXMS_API_URL=${NETXMS_API_URL:-}
-      - NETXMS_USER=${NETXMS_USER:-}
-      - NETXMS_PASSWORD=${NETXMS_PASSWORD:-}
-      # How long an alarm source's name/IP/class is trusted without re-asking
-      # NetXMS. Lower it if nodes are renamed often; 0 is not supported.
-      - NETXMS_OBJECT_CACHE_TTL_S=${NETXMS_OBJECT_CACHE_TTL_S:-86400}
-      - CENTREON_API_URL=${CENTREON_API_URL:-}
-      - CENTREON_USER=${CENTREON_USER:-}
-      - CENTREON_PASSWORD=${CENTREON_PASSWORD:-}
-      - CENTREON_API_KEY=${CENTREON_API_KEY:-}
+      - ZABBIX_VERIFY_SSL=${ZABBIX_VERIFY_SSL:-true}
+      - ZABBIX_DB_RESTORE_ENABLED=${ZABBIX_DB_RESTORE_ENABLED:-false}
+      - ZABBIX_DB_DSN=${ZABBIX_DB_DSN:-}
+      # --- iTop ---
+      - ITOP_API_ENABLED=${ITOP_API_ENABLED:-true}
       - ITOP_API_URL=${ITOP_API_URL:-}
-      - ITOP_USER=${ITOP_USER:-}
-      - ITOP_PASSWORD=${ITOP_PASSWORD:-}
-      # NetXMS database, for rebuild_geography.py only — the administrative
-      # reference tables (donnebase) have no API. Collectors use NETXMS_API_URL.
-      - NETXMS_DB_HOST=netxms-db
-      - NETXMS_DB_NAME=${NETXMS_DB_NAME:-}
-      - NETXMS_DB_USER=${NETXMS_DB_USER:-}
-      - NETXMS_DB_PASSWORD=${NETXMS_DB_PASSWORD:-}
+      - ITOP_API_USER=${ITOP_API_USER:-}
+      - ITOP_API_PASSWORD=${ITOP_API_PASSWORD:-}
+      - ITOP_VERIFY_SSL=${ITOP_VERIFY_SSL:-true}
+      - ITOP_DB_RESTORE_ENABLED=${ITOP_DB_RESTORE_ENABLED:-false}
+      - ITOP_DB_DSN=${ITOP_DB_DSN:-}
+      # --- NetXMS ---
+      - NETXMS_API_ENABLED=${NETXMS_API_ENABLED:-true}
+      - NETXMS_API_URL=${NETXMS_API_URL:-}
+      - NETXMS_API_USER=${NETXMS_API_USER:-}
+      - NETXMS_API_PASSWORD=${NETXMS_API_PASSWORD:-}
+      - NETXMS_VERIFY_SSL=${NETXMS_VERIFY_SSL:-true}
+      - NETXMS_DB_RESTORE_ENABLED=${NETXMS_DB_RESTORE_ENABLED:-false}
+      - NETXMS_DB_DSN=${NETXMS_DB_DSN:-}
+      # --- Centreon ---
+      - CENTREON_API_ENABLED=${CENTREON_API_ENABLED:-true}
+      - CENTREON_API_URL=${CENTREON_API_URL:-}
+      - CENTREON_API_USER=${CENTREON_API_USER:-}
+      - CENTREON_API_PASSWORD=${CENTREON_API_PASSWORD:-}
+      - CENTREON_VERIFY_SSL=${CENTREON_VERIFY_SSL:-true}
+      - CENTREON_DB_RESTORE_ENABLED=${CENTREON_DB_RESTORE_ENABLED:-false}
+      - CENTREON_DB_DSN=${CENTREON_DB_DSN:-}
+      # --- Nagios (mode à confirmer : livestatus | xi | ndoutils) ---
+      - NAGIOS_MODE=${NAGIOS_MODE:-unknown}
+      - NAGIOS_API_ENABLED=${NAGIOS_API_ENABLED:-true}
+      - NAGIOS_API_URL=${NAGIOS_API_URL:-}
+      - NAGIOS_API_USER=${NAGIOS_API_USER:-}
+      - NAGIOS_API_PASSWORD=${NAGIOS_API_PASSWORD:-}
+      - NAGIOS_VERIFY_SSL=${NAGIOS_VERIFY_SSL:-true}
+      # --- Nokia NSP (mode à confirmer : classic | yang) ---
+      - NSP_FM_MODE=${NSP_FM_MODE:-unknown}
+      - NSP_API_ENABLED=${NSP_API_ENABLED:-true}
+      - NSP_API_URL=${NSP_API_URL:-}
+      - NSP_API_USER=${NSP_API_USER:-}
+      - NSP_API_PASSWORD=${NSP_API_PASSWORD:-}
+      - NSP_VERIFY_SSL=${NSP_VERIFY_SSL:-true}
     volumes:
       - reports:/reports
     depends_on:
-      backend:
-        condition: service_healthy
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
     healthcheck:
-      # CMD-SHELL so $HOSTNAME is expanded by the container shell
+      # CMD-SHELL pour que $HOSTNAME soit développé par le shell du conteneur.
       test:
-        ["CMD-SHELL", "celery -A celery_app inspect ping -d celery@$$HOSTNAME"]
+        ["CMD-SHELL", "celery -A etl.celery_app inspect ping -d celery@$$HOSTNAME"]
       interval: 30s
       timeout: 10s
+      start_period: 30s
       retries: 3
 
+  # Planificateur Celery : déclenche la collecte, le recalcul de couverture
+  # (02 h 00) et le rapport mensuel (1er du mois, 02 h 30).
   etl-beat:
     build: ./etl
-    command: celery -A celery_app beat --loglevel=${LOG_LEVEL:-INFO}
+    command: celery -A etl.celery_app beat --loglevel=${LOG_LEVEL:-INFO}
     environment:
-      - REDIS_HOST=${REDIS_HOST}
-      - REDIS_PORT=${REDIS_PORT}
-      - CELERY_BROKER_DB=${CELERY_BROKER_DB:-1}
-      - ETL_COLLECT_INTERVAL_S=${ETL_COLLECT_INTERVAL_S:-300}
-      - NOC_API_KEY=${NOC_API_KEY}
-      - ETL_ENV=${ETL_ENV:-development}
+      - NOC_WAREHOUSE_DSN=postgresql://${POSTGRES_USER:-noc}:${POSTGRES_PASSWORD:-noc}@postgres:5432/${POSTGRES_DB:-noc_warehouse}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - COLLECT_INTERVAL_S=${COLLECT_INTERVAL_S:-300}
+      - TZ=${TZ:-Africa/Ouagadougou}
     depends_on:
       redis:
         condition: service_healthy
@@ -158,22 +203,41 @@ services:
       timeout: 5s
       retries: 5
 
+  # Entrepôt NOC — base UNIQUE de l'ETL et du backend.
+  #
+  # Image TimescaleDB et non postgres : etl/sql/schema_timescale.sql exécute
+  # `CREATE EXTENSION timescaledb`, `create_hypertable()` et des agrégats
+  # continus. Sur une image PostgreSQL nue, la toute première instruction
+  # échoue et AUCUNE métrique ne peut être stockée.
   postgres:
-    image: postgres:15-alpine
+    image: timescale/timescaledb:2.17.2-pg16
     environment:
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER:-noc}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-noc}
+      - POSTGRES_DB=${POSTGRES_DB:-noc_warehouse}
     ports:
       - "5436:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./database:/docker-entrypoint-initdb.d
+      # Schéma appliqué au PREMIER démarrage seulement (base vide), dans
+      # l'ordre imposé par les dépendances : dimensions → faits →
+      # hypertables → extensions backend (qui référencent les trois).
+      #
+      # Les fichiers sont montés un par un et non via le répertoire
+      # `./database` : celui-ci contient l'ancien schéma et un dump NetXMS
+      # de 370 Mo, que docker-entrypoint-initdb.d exécuterait sur la base
+      # du dashboard. C'était la cause d'un démarrage interminable suivi
+      # d'un schéma incohérent.
+      - ./etl/sql/schema_dimensions.sql:/docker-entrypoint-initdb.d/10_dimensions.sql:ro
+      - ./etl/sql/schema_facts.sql:/docker-entrypoint-initdb.d/20_facts.sql:ro
+      - ./etl/sql/schema_timescale.sql:/docker-entrypoint-initdb.d/30_timescale.sql:ro
+      - ./backend/sql/01_backend_extensions.sql:/docker-entrypoint-initdb.d/40_backend.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test:
+        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-noc} -d ${POSTGRES_DB:-noc_warehouse}"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   nginx:
     build: ./nginx
@@ -201,13 +265,31 @@ services:
       timeout: 5s
       retries: 5
 
-  # ─────────────── Supervision / ITSM servers (local instances) ───────────────
+  # ─────────── Outils de supervision / ITSM en instances locales ───────────
+  #
+  # PROFIL « tools » : ces services ne démarrent PAS avec `docker compose up`.
+  # Ils pèsent plusieurs gigaoctets et mettent de longues minutes à
+  # s'installer, alors qu'ils ne servent qu'à disposer de sources de données
+  # de test. Pour les lancer :
+  #
+  #     docker compose --profile tools up -d
+  #
+  # ⚠️ `netxms`, `netxms-webui` et `centreon` se construisent depuis
+  # `backend/docker-images/`, un répertoire absent de l'arborescence
+  # actuelle (supprimé lors de la refonte). Le restaurer avant d'utiliser
+  # le profil :
+  #
+  #     git checkout backend/docker-images
+  #
+  # Sans lui, seuls Zabbix, Nagios et iTop démarrent ; les trois autres
+  # échouent à la construction.
   # These are the tools the ETL collectors poll. Each collector activates as
   # soon as its *_API_URL is set in .env (see docs/integrations.md).
 
   # Zabbix — dedicated PostgreSQL (kept separate from the NOC database so the
   # Zabbix schema never mixes with the dashboard schema).
   zabbix-db:
+    profiles: ["tools"]
     image: postgres:15-alpine
     ports:
       - "5440:5432"
@@ -228,6 +310,7 @@ services:
       retries: 5
 
   zabbix-server:
+    profiles: ["tools"]
     image: zabbix/zabbix-server-pgsql:alpine-7.0-latest
     environment:
       - DB_SERVER_HOST=zabbix-db
@@ -243,6 +326,7 @@ services:
   # Zabbix UI + JSON-RPC API — http://localhost:8081 (default login Admin/zabbix).
   # The ETL polls http://zabbix-web:8080/api_jsonrpc.php on the compose network.
   zabbix-web:
+    profiles: ["tools"]
     image: zabbix/zabbix-web-nginx-pgsql:alpine-7.0-latest
     environment:
       - ZBX_SERVER_HOST=zabbix-server
@@ -268,6 +352,7 @@ services:
   # least one live host. In the Zabbix UI, point the "Zabbix server" host's
   # agent interface at DNS name "zabbix-agent" to activate it.
   zabbix-agent:
+    profiles: ["tools"]
     image: zabbix/zabbix-agent2:alpine-7.0-latest
     environment:
       - ZBX_HOSTNAME=Zabbix server
@@ -278,10 +363,11 @@ services:
   # Nagios Core — UI http://localhost:8083 (login: NAGIOS_USER/NAGIOS_PASSWORD).
   # The ETL polls http://nagios/cgi-bin/statusjson.cgi with Basic auth.
   nagios:
+    profiles: ["tools"]
     image: jasonrivers/nagios:latest
     environment:
-      - NAGIOSADMIN_USER=${NAGIOS_USER:-nagiosadmin}
-      - NAGIOSADMIN_PASS=${NAGIOS_PASSWORD:-nagios}
+      - NAGIOSADMIN_USER=${NAGIOS_API_USER:-nagiosadmin}
+      - NAGIOSADMIN_PASS=${NAGIOS_API_PASSWORD:-nagios}
     ports:
       - "8083:80"
     volumes:
@@ -301,6 +387,7 @@ services:
   # (donnebase, equipementinfastructure) whose geometry columns need the
   # extension to restore.
   netxms-db:
+    profiles: ["tools"]
     image: postgis/postgis:15-3.5-alpine
     environment:
       - POSTGRES_USER=${NETXMS_DB_USER}
@@ -327,6 +414,7 @@ services:
   # set for the built-in "admin" account when the schema is first created, so
   # NETXMS_USER must be "admin" for the local instance.
   netxms:
+    profiles: ["tools"]
     build: ./backend/docker-images/netxms
     hostname: netxms # names the server's own management node
     environment:
@@ -334,7 +422,7 @@ services:
       - NETXMS_DB_NAME=${NETXMS_DB_NAME}
       - NETXMS_DB_LOGIN=${NETXMS_DB_USER}
       - NETXMS_DB_PASSWORD=${NETXMS_DB_PASSWORD}
-      - NETXMS_ADMIN_PASSWORD=${NETXMS_PASSWORD}
+      - NETXMS_ADMIN_PASSWORD=${NETXMS_API_PASSWORD:-netxms}
     ports:
       - "8085:8000" # Web API (REST v1)
       - "4701:4701" # NetXMS console / nxmc
@@ -347,10 +435,11 @@ services:
     # POST /v1/login and requires a token back.
 
   # NetXMS web console (nxmc) — http://localhost:8086, login admin /
-  # $NETXMS_PASSWORD. NetXMS ships the console separately from the server, as a
+  # $NETXMS_API_PASSWORD. NetXMS ships the console separately from the server, as a
   # WAR for a servlet container; the image drops it into Tomcat and connects to
   # netxmsd over NXCP (4701), not over the REST API.
   netxms-webui:
+    profiles: ["tools"]
     build: ./backend/docker-images/netxms-webui
     environment:
       - NETXMS_SERVER=netxms
@@ -363,6 +452,7 @@ services:
   # Centreon — dedicated MariaDB. The two settings below are prerequisites the
   # Centreon installer checks before it will create its schemas.
   centreon-db:
+    profiles: ["tools"]
     image: mariadb:10.11
     ports:
       - "3308:3306"
@@ -390,6 +480,7 @@ services:
   # compose network. The install runs by itself on first start and takes a few
   # minutes — the container only reports healthy once the API answers a login.
   centreon:
+    profiles: ["tools"]
     build: ./backend/docker-images/centreon
     hostname: centreon # names the host the central creates for itself
     environment:
@@ -419,6 +510,7 @@ services:
   # setup wizard with DB server "localhost", login "admin", password
   # $ITOP_DB_PASSWORD. The backend does not integrate with it.
   itop:
+    profiles: ["tools"]
     image: vbkunin/itop:3.2.2
     environment:
       - MYSQL_PASS=${ITOP_DB_PASSWORD:-itop_db_pass} # embedded MariaDB 'admin' user

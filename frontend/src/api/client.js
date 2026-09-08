@@ -1,21 +1,18 @@
 import axios from "axios";
-import { useAuthStore } from "../store/auth";
+
 import { BASE_URL } from "./config";
+import { useAuthStore } from "../store/auth";
 
 const apiClient = axios.create({
   baseURL: BASE_URL,
-  timeout: 10000,
-  // Nécessaire seulement si le refresh token circule via cookie httpOnly
-  // (recommandé — voir note de sécurité). Sans effet si vous restez 100% Bearer.
+  timeout: 20000,
+  // Le refresh token circule en cookie httpOnly : sans ce drapeau, le
+  // navigateur ne le joindrait pas à /auth/refresh et toute session
+  // expirerait au bout de la durée du jeton d'accès (30 min).
   withCredentials: true,
 });
 
-// --- Corrélation / audit ---------------------------------------------------
-// Un id unique par requête facilite le rapprochement des logs frontend
-// (Sentry, console) avec les logs backend/iTop lors d'une investigation
-// d'incident — utile dès qu'on a plusieurs rôles et donc plusieurs acteurs
-// possibles sur une même donnée.
-function generateRequestId() {
+function requestId() {
   return typeof crypto !== "undefined" && crypto.randomUUID
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -24,20 +21,19 @@ function generateRequestId() {
 apiClient.interceptors.request.use((config) => {
   const { token } = useAuthStore.getState();
   if (token) config.headers.Authorization = `Bearer ${token}`;
-  config.headers["X-Request-Id"] = generateRequestId();
+  // Corrélation frontend ↔ journaux backend lors d'une investigation.
+  config.headers["X-Request-Id"] = requestId();
   return config;
 });
 
-// --- Rafraîchissement de session sans race condition ------------------------
-// Problème du code d'origine : si 5 requêtes échouent en 401 en même temps
-// (cas fréquent au chargement d'un dashboard multi-widgets), chacune
-// déclenchait potentiellement son propre logout/refresh. On sérialise le
-// refresh et on met les requêtes en attente derrière une seule promesse.
+// Un dashboard NOC lance 10 à 15 requêtes au montage. Si le jeton vient
+// d'expirer, elles échouent toutes en 401 en même temps : sans
+// sérialisation, chacune déclencherait son propre /auth/refresh, et la
+// rotation du refresh token en invaliderait toutes sauf une — ce qui
+// déconnecterait l'utilisateur alors que sa session est valide.
 let refreshPromise = null;
 
-function isAuthEndpoint(url = "") {
-  return url.includes("/auth/");
-}
+const isAuthEndpoint = (url = "") => url.includes("/auth/");
 
 apiClient.interceptors.response.use(
   (response) => response,
@@ -45,43 +41,53 @@ apiClient.interceptors.response.use(
     const { response, config } = error;
 
     if (!response) {
-      // Timeout, coupure réseau, CORS... distinct d'une erreur applicative.
-      return Promise.reject({ ...error, isNetworkError: true });
+      // Coupure réseau, timeout, CORS : à distinguer d'une erreur
+      // applicative, l'interface affiche « backend injoignable » et non
+      // « erreur ».
+      return Promise.reject(Object.assign(error, { isNetworkError: true }));
     }
 
-    const status = response.status;
-    const store = useAuthStore.getState();
-
-    // 401 sur un endpoint non-auth : tenter un refresh unique, une seule fois.
-    if (status === 401 && !isAuthEndpoint(config?.url) && !config._retried) {
+    if (response.status === 401 && !isAuthEndpoint(config?.url) && !config._retried) {
       config._retried = true;
       try {
         if (!refreshPromise) {
-          refreshPromise = store.refresh().finally(() => {
-            refreshPromise = null;
-          });
+          refreshPromise = useAuthStore
+            .getState()
+            .refresh()
+            .finally(() => {
+              refreshPromise = null;
+            });
         }
-        const newToken = await refreshPromise;
-        config.headers.Authorization = `Bearer ${newToken}`;
+        const token = await refreshPromise;
+        config.headers.Authorization = `Bearer ${token}`;
         return apiClient(config);
       } catch (refreshError) {
-        // store.refresh() a déjà appelé logout("expired") en cas d'échec
-        // définitif — rien à refaire ici, juste propager l'erreur.
+        // store.refresh() a déjà appelé logout("expired").
         return Promise.reject(refreshError);
       }
     }
 
-    // 403 : session valide mais rôle insuffisant. À NE PAS confondre avec un
-    // 401 — ici il ne faut surtout pas déconnecter l'utilisateur. On se
-    // contente de marquer l'erreur ; c'est au composant appelant (mutation
-    // onError, cf. useAcknowledgeIncident/useResolveIncident) d'afficher le
-    // message "vous n'avez pas les droits pour ceci".
-    if (status === 403) {
-      return Promise.reject({ ...error, isForbidden: true });
+    // 403 : session valide, rôle insuffisant. Surtout ne pas déconnecter —
+    // c'est le cas normal quand un agent terrain atteint un écran réservé.
+    if (response.status === 403) {
+      return Promise.reject(Object.assign(error, { isForbidden: true }));
     }
 
     return Promise.reject(error);
   },
 );
+
+/** Message lisible pour l'utilisateur à partir d'une erreur axios. */
+export function errorMessage(error, fallback = "Une erreur est survenue.") {
+  if (!error) return fallback;
+  if (error.isNetworkError) return "Backend injoignable. Vérifiez la connexion.";
+  const detail = error.response?.data?.detail;
+  if (typeof detail === "string") return detail;
+  // Erreur de validation FastAPI : liste d'objets {loc, msg}.
+  if (Array.isArray(detail) && detail.length) {
+    return detail.map((d) => d.msg).join(" · ");
+  }
+  return error.message || fallback;
+}
 
 export default apiClient;

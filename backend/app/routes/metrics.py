@@ -1,64 +1,100 @@
-from datetime import datetime, timedelta, timezone
+"""
+Métriques réseau.
 
+Lecture seule : la route d'ingestion de l'ancien backend a disparu avec
+la table `fact_metric`. L'ETL alimente désormais `metric_value`
+directement.
+"""
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.core.rate_limit import ingest_rate_limit, read_rate_limit
-from app.core.security import get_current_user, verify_api_key
+from app.core.rate_limit import read_rate_limit
 from app.db.session import get_db
+from app.dependencies.auth import get_current_user
+from app.models.operations import User
 from app.schemas.metrics import (
-    MetricBulkIngestPayload,
-    MetricBulkIngestResponse,
+    METRIC_TYPE_PATTERN,
+    MetricPointOut,
     NetworkKpiOut,
+    NetworkSeriesPointOut,
     NodeDownOut,
+    TopNodeMetricOut,
 )
-from app.services import cache_service, metrics_service
+from app.services import metrics_service
 
-router = APIRouter(prefix="/api/metrics", tags=["metrics"])
-
-
-@router.post(
-    "/ingest/bulk",
-    response_model=MetricBulkIngestResponse,
+router = APIRouter(
+    prefix="/api/metrics",
+    tags=["métriques"],
+    dependencies=[Depends(read_rate_limit)],
 )
-def ingest_metrics_bulk(
-    payload: MetricBulkIngestPayload,
-    db: Session = Depends(get_db),
-    _: None = Depends(verify_api_key),
-    __: None = Depends(ingest_rate_limit),
-):
-    """Batch d'un pass de collecte de métriques — voir
-    etl/pipelines/tasks.collect_metrics. Pas de notification/broadcast : une
-    lecture de métrique n'est jamais un événement à faire remonter à un
-    humain en direct, seulement une donnée pour les KPI et les graphes."""
-    result = metrics_service.ingest_metrics_bulk(db, payload.metrics)
-    if result["created"]:
-        cache_service.invalidate_prefix("kpi:")
-    return result
 
 
-@router.get(
-    "/network",
-    response_model=NetworkKpiOut,
-    dependencies=[Depends(get_current_user), Depends(read_rate_limit)],
-)
+@router.get("/network", response_model=NetworkKpiOut)
 def get_network_kpi(
-    hours: int = Query(1, ge=1, le=720, description="Fenêtre d'agrégation, en heures"),
+    hours: int = Query(24, ge=1, le=8760),
+    locality_id: int | None = None,
     db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
 ):
-    """KPI réseau (disponibilité, perte de paquets, latence, bande passante)
-    agrégés sur les `hours` dernières heures — le bloc de KPI que fact_metric
-    rend possible pour la première fois (voir l'audit du schéma)."""
-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
-    return metrics_service.get_network_kpi(db, since=since.replace(tzinfo=None))
+    return metrics_service.get_network_kpi(db, hours, locality_id)
 
 
-@router.get(
-    "/nodes/down",
-    response_model=list[NodeDownOut],
-    dependencies=[Depends(get_current_user), Depends(read_rate_limit)],
-)
-def list_nodes_down(db: Session = Depends(get_db)):
-    """Équipements dont la dernière lecture de disponibilité connue est DOWN
-    — la liste détaillée derrière le compteur `nodes_down` de /network."""
-    return metrics_service.list_nodes_down(db)
+@router.get("/network/series", response_model=list[NetworkSeriesPointOut])
+def get_network_series(
+    metric_type: str = Query(pattern=METRIC_TYPE_PATTERN),
+    hours: int = Query(24, ge=1, le=8760),
+    locality_id: int | None = None,
+    ministry_id: int | None = None,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """Courbe d'une métrique agrégée sur le parc — la vue « santé réseau »."""
+    return metrics_service.get_network_series(
+        db, metric_type, hours, locality_id, ministry_id
+    )
+
+
+@router.get("/top", response_model=list[TopNodeMetricOut])
+def get_top_nodes(
+    metric_type: str = Query(pattern=METRIC_TYPE_PATTERN),
+    hours: int = Query(24, ge=1, le=8760),
+    limit: int = Query(10, ge=1, le=50),
+    locality_id: int | None = None,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """Classement des équipements sur une métrique.
+
+    Le sens du tri suit la métrique : latence et pertes du pire au
+    meilleur, disponibilité l'inverse (voir metrics_service._WORST_IS_HIGH).
+    """
+    return metrics_service.get_top_nodes(db, metric_type, hours, limit, locality_id)
+
+
+@router.get("/nodes/down", response_model=list[NodeDownOut])
+def get_nodes_down(
+    locality_id: int | None = None,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    return metrics_service.get_nodes_down(db, locality_id)
+
+
+@router.get("/nodes/{node_id}/series", response_model=list[MetricPointOut])
+def get_node_series(
+    node_id: int,
+    metric_type: str = Query(pattern=METRIC_TYPE_PATTERN),
+    hours: int = Query(24, ge=1, le=8760),
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    return metrics_service.get_node_series(db, node_id, metric_type, hours)
+
+
+@router.get("/nodes/{node_id}/latest")
+def get_node_latest(
+    node_id: int,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    return metrics_service.get_node_latest(db, node_id)

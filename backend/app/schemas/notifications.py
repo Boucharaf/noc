@@ -1,3 +1,6 @@
+"""Schémas des notifications navigateur."""
+from __future__ import annotations
+
 from pydantic import BaseModel
 
 
@@ -12,12 +15,11 @@ class PushSubscriptionPayload(BaseModel):
 
 
 class PushUnsubscribePayload(BaseModel):
-    """Removing a subscription only needs its endpoint, which identifies it.
+    """Le désabonnement n'a besoin que de l'endpoint, qui l'identifie.
 
-    Separate from PushSubscriptionPayload so callers are not made to invent
-    encryption keys they do not have — the browser discards them once the
-    subscription is gone, and requiring them here invited sending empty
-    strings that the server would then have had to ignore.
+    Distinct de PushSubscriptionPayload pour ne pas obliger l'appelant à
+    inventer des clés de chiffrement dont il ne dispose plus : le
+    navigateur les efface dès l'abonnement révoqué.
     """
 
     endpoint: str

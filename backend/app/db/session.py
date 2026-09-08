@@ -1,19 +1,30 @@
-from urllib.parse import quote_plus
+"""
+Session SQLAlchemy sur l'entrepôt NOC.
 
+Une seule base, celle de l'ETL. Le backend y est LECTEUR pour tout ce que
+l'ETL produit (dim_*, fact_incident, metric_value) et ÉCRIVAIN uniquement
+sur ses propres tables `ops_*` — plus l'exception documentée des incidents
+manuels, écrits dans fact_incident avec source_tool='manual', une clé que
+l'ETL ne produit jamais (contrainte UNIQUE (source_tool, external_id)).
+"""
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-from app.core.constants import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
+from app.core.config import DB_MAX_OVERFLOW, DB_POOL_SIZE, WAREHOUSE_DSN
 
-# Credentials are URL-quoted: passwords generated for this project include
-# characters (e.g. "@") that would otherwise be misparsed as URL delimiters.
-DATABASE_URL = (
-    f"postgresql+psycopg2://{quote_plus(DB_USER)}:{quote_plus(DB_PASSWORD)}"
-    f"@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+# psycopg2 est le driver utilisé aussi par l'ETL : même famille de types,
+# mêmes conversions de dates, moins de surprises entre les deux côtés.
+DATABASE_URL = WAREHOUSE_DSN.replace("postgresql://", "postgresql+psycopg2://", 1)
+
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,      # la connexion peut avoir été coupée entre deux collectes
+    pool_size=DB_POOL_SIZE,
+    max_overflow=DB_MAX_OVERFLOW,
+    future=True,
 )
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
 Base = declarative_base()
 
 

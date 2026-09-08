@@ -1,59 +1,37 @@
 """
-Cause taxonomy derived from what the supervision tools actually report.
+Classification de la cause d'un incident à partir de sa description brute
+(champ texte fourni par chaque outil : `name` Zabbix, `message` NetXMS,
+`output` Centreon, `description`/`probableCause` NSP...).
 
-The seeded demo dimension listed causes a human would write on a ticket
-("Groupe électrogène en panne", "Coupure fibre optique"). Nothing produces
-those: a monitoring alarm says what was *observed*, not why it happened, and no
-collector has ever been able to fill them in — every real incident ingested so
-far carried a NULL cause.
-
-So the taxonomy here is the observable one, read off the message text NetXMS
-actually sends. It is honest about being a symptom rather than a root cause:
-"Nœud injoignable (ICMP)" is what the tool knows. Attributing that to a
-délestage or a coupure fibre is the NOC's job, on the ticket, in iTop — which
-is where the root-cause vocabulary belongs and where a human can be held to it.
-
-RULES is ordered: the first pattern matching the message wins, so put the
-specific ones above the general. A message nothing matches stays uncategorised
-rather than being forced into a bucket — an "Autre" catch-all would quietly
-grow into the largest cause on the dashboard and mean nothing.
+Approche par règles regex volontairement simple et transparente : chaque
+règle est explicite, testable, et ordonnée (la première qui matche
+gagne). Préférée à un modèle de classification pour rester auditable par
+les agents NOC (traçabilité = un agent doit pouvoir comprendre pourquoi
+un incident a été catégorisé ainsi).
 """
+from __future__ import annotations
 
 import re
 
-# (compiled pattern, category, label). Patterns are matched case-insensitively
-# against the alarm message.
-RULES = [
-    (r"unreachable by ICMP", "Connectivité", "Nœud injoignable (ICMP)"),
-    (r"\bNode down\b", "Connectivité", "Nœud hors service"),
-    (r"\bNode added\b|\bNode created\b", "Inventaire", "Nœud ajouté"),
-    (r"Interface .* changed state to DOWN", "Réseau", "Interface hors service"),
-    (r"Interface .* changed state to (UP|TESTING)", "Réseau", "Interface instable"),
-    (r"SNMP agent is not responding", "Supervision", "Agent SNMP muet"),
-    (r"agent is not responding|agent is unreachable", "Supervision", "Agent injoignable"),
-    (r"Notification channel .* is down", "Supervision", "Canal de notification indisponible"),
-    (r"Network service .* is not responding", "Service", "Service réseau injoignable"),
-    (r"Business service changed state to failed", "Service", "Service métier en échec"),
-    (r"Business service changed state to degraded", "Service", "Service métier dégradé"),
-    (r"Threshold reached", "Seuil", "Seuil dépassé"),
-    (r"Threshold rearmed", "Seuil", "Seuil rétabli"),
-    (r"restarted|rebooted", "Équipement", "Redémarrage détecté"),
-    (r"power supply|alimentation", "Énergie", "Alimentation en défaut"),
-    (r"temperature|surchauffe", "Équipement", "Température anormale"),
+# (catégorie, motif) — ordre = priorité
+_RULES: list[tuple[str, re.Pattern]] = [
+    ("lien_down", re.compile(r"\b(link|interface).{0,20}(down|unreachable)\b", re.I)),
+    ("perte_paquets", re.compile(r"\b(packet loss|perte de paquets)\b", re.I)),
+    ("latence", re.compile(r"\b(latency|latence|round trip|rta)\b", re.I)),
+    ("cpu", re.compile(r"\bcpu\b", re.I)),
+    ("memoire", re.compile(r"\b(memory|ram|mémoire)\b", re.I)),
+    ("alimentation", re.compile(r"\b(power|alimentation|psu)\b", re.I)),
+    ("equipement_down", re.compile(r"\b(host down|node down|unreachable|hors service)\b", re.I)),
+    ("seuil_trafic", re.compile(r"\b(bandwidth|traffic|bande passante|trafic)\b", re.I)),
 ]
 
-_COMPILED = [(re.compile(pattern, re.IGNORECASE), cat, label) for pattern, cat, label in RULES]
-
-# Every (category, label) the rules can produce, in rule order — used to seed
-# dim_cause so the dimension exists before the first incident references it.
-TAXONOMY = list(dict.fromkeys((cat, label) for _, cat, label in RULES))
+DEFAULT_CATEGORY = "non_identifie"
 
 
-def classify(message: str | None) -> tuple[str | None, str | None]:
-    """(category, label) for an alarm message, (None, None) when nothing fits."""
-    if not message:
-        return None, None
-    for pattern, category, label in _COMPILED:
-        if pattern.search(message):
-            return category, label
-    return None, None
+def classify(description: str) -> str:
+    if not description:
+        return DEFAULT_CATEGORY
+    for category, pattern in _RULES:
+        if pattern.search(description):
+            return category
+    return DEFAULT_CATEGORY

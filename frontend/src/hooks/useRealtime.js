@@ -1,160 +1,159 @@
-import { useEffect } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
-import * as alertsApi from '../api/alerts';
-import { useAuthStore } from '../store/auth';
+import { realtimeUrl } from "../api/config";
+import { useAuthStore } from "../store/auth";
 
-const POLL_INTERVAL_MS = 15000;
-const WS_RETRY_MS = 10000;
+/**
+ * Flux d'alertes temps réel (WebSocket).
+ *
+ * Points de conception, chacun issu d'une contrainte du backend
+ * (`app/routes/ws.py`) :
+ *
+ * · L'authentification passe par la PREMIÈRE TRAME, pas par `?token=` :
+ *   un navigateur ne peut pas poser d'en-tête Authorization sur une
+ *   poignée de main WebSocket, et un jeton dans l'URL finit en clair dans
+ *   les journaux du reverse proxy.
+ * · Le serveur envoie un ping toutes les 20 s. Si rien n'arrive pendant
+ *   plus de 60 s, la socket est considérée morte même si le navigateur
+ *   la croit ouverte — cas classique derrière un proxy qui a coupé le
+ *   flux sans envoyer de FIN. Sans ce chien de garde, l'écran reste
+ *   « connecté » et n'affiche plus rien.
+ * · Reconnexion en repli exponentiel plafonné à 30 s : un backend qui
+ *   redémarre ne doit pas être martelé par vingt onglets ouverts.
+ *
+ * Le WebSocket n'est PAS la seule source de vérité : les hooks de
+ * `queries.js` continuent d'interroger l'API. La socket sert à réagir
+ * dans la seconde ; le poll garantit qu'un écran reste juste même si la
+ * socket est tombée sans qu'on s'en aperçoive.
+ */
 
-// Pushes /ws/alerts events into the react-query cache: each new incident
-// invalidates the alerts + KPI queries so every view refreshes immediately.
-const useAlertSocket = () => {
+const MAX_EVENTS = 60;
+const WATCHDOG_MS = 60_000;
+const MAX_BACKOFF_MS = 30_000;
+
+export function useRealtime({ onAlert } = {}) {
+  const token = useAuthStore((s) => s.token);
   const queryClient = useQueryClient();
-  const token = useAuthStore((state) => state.token);
+
+  const [status, setStatus] = useState("connecting"); // connecting|live|offline
+  const [events, setEvents] = useState([]);
+  const [lastMessageAt, setLastMessageAt] = useState(null);
+
+  const socketRef = useRef(null);
+  const retryRef = useRef(0);
+  const watchdogRef = useRef(null);
+  const reconnectRef = useRef(null);
+  const onAlertRef = useRef(onAlert);
+  onAlertRef.current = onAlert;
+
+  const clearTimers = useCallback(() => {
+    if (watchdogRef.current) clearTimeout(watchdogRef.current);
+    if (reconnectRef.current) clearTimeout(reconnectRef.current);
+    watchdogRef.current = null;
+    reconnectRef.current = null;
+  }, []);
 
   useEffect(() => {
-    if (!token) return undefined;
-    let ws;
-    let retryTimer;
+    if (!token) {
+      setStatus("offline");
+      return undefined;
+    }
+
     let disposed = false;
 
     const connect = () => {
-      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      // Le token n'est plus mis dans l'URL : les query strings de WebSocket
-      // finissent typiquement dans les logs d'accès des reverse proxies
-      // (nginx, load balancers) en clair — un JWT valide qui traîne dans des
-      // logs est une fuite de session, pas un détail. On ouvre la connexion
-      // sans credentials puis on s'authentifie via le premier frame envoyé,
-      // qui n'est jamais loggé par un proxy L7.
-      //
-      // ⚠️ Contrepartie backend requise : le handler /ws/alerts doit
-      // accepter la connexion en attente d'un premier message
-      // {"type":"auth","token":"..."} au lieu de valider un ?token= dans le
-      // handshake, et fermer la socket si ce message n'arrive pas sous
-      // quelques secondes ou si le token est invalide.
-      ws = new WebSocket(`${proto}://${window.location.host}/ws/alerts`);
-      ws.onopen = () => {
-        ws.send(JSON.stringify({ type: 'auth', token }));
-      };
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.type === 'incident') {
-            queryClient.invalidateQueries({ queryKey: ['alerts'] });
-            queryClient.invalidateQueries({ queryKey: ['kpi'] });
-          } else if (data.type === 'auth_error') {
-            // Token rejeté par le backend (expiré entre le rendu et l'ouverture
-            // du socket) : pas la peine de retenter avec le même token, autant
-            // fermer proprement et laisser le prochain re-render (nouveau
-            // token après refresh) rouvrir la connexion.
-            ws.close();
+      if (disposed) return;
+      setStatus((current) => (current === "live" ? current : "connecting"));
+
+      let socket;
+      try {
+        socket = new WebSocket(realtimeUrl());
+      } catch {
+        scheduleReconnect();
+        return;
+      }
+      socketRef.current = socket;
+
+      const armWatchdog = () => {
+        if (watchdogRef.current) clearTimeout(watchdogRef.current);
+        watchdogRef.current = setTimeout(() => {
+          // Silence prolongé : on ferme nous-mêmes pour forcer le cycle
+          // de reconnexion plutôt que d'afficher un faux « live ».
+          try {
+            socket.close();
+          } catch {
+            /* déjà fermée */
           }
+        }, WATCHDOG_MS);
+      };
+
+      socket.onopen = () => {
+        socket.send(JSON.stringify({ type: "auth", token }));
+        retryRef.current = 0;
+        setStatus("live");
+        armWatchdog();
+      };
+
+      socket.onmessage = (event) => {
+        armWatchdog();
+        setLastMessageAt(Date.now());
+
+        let payload;
+        try {
+          payload = JSON.parse(event.data);
         } catch {
-          // ignore malformed frames (heartbeats are valid JSON, so this is rare)
+          return;
         }
+
+        if (payload.type === "ping") return;
+        if (payload.type === "auth_error") {
+          setStatus("offline");
+          return;
+        }
+
+        setStatus("live");
+        setEvents((current) => [payload, ...current].slice(0, MAX_EVENTS));
+        onAlertRef.current?.(payload);
+
+        // Une alerte poussée rend immédiatement fausses les vues « temps
+        // réel ». On les invalide plutôt que d'insérer l'événement à la
+        // main dans le cache : le backend calcule des compteurs dérivés
+        // (non assignés, plus ancien non acquitté) qu'on ne saurait pas
+        // recalculer correctement côté client.
+        queryClient.invalidateQueries({ queryKey: ["alerts"] });
+        queryClient.invalidateQueries({ queryKey: ["incidents"] });
+        queryClient.invalidateQueries({ queryKey: ["nodes"] });
       };
-      ws.onclose = () => {
-        if (!disposed) retryTimer = setTimeout(connect, WS_RETRY_MS);
+
+      socket.onerror = () => {
+        /* onclose suit toujours : la reconnexion est traitée là. */
       };
+
+      socket.onclose = () => {
+        if (disposed) return;
+        setStatus("offline");
+        scheduleReconnect();
+      };
+    };
+
+    const scheduleReconnect = () => {
+      if (disposed) return;
+      const attempt = Math.min(retryRef.current++, 6);
+      const delay = Math.min(1000 * 2 ** attempt, MAX_BACKOFF_MS);
+      reconnectRef.current = setTimeout(connect, delay);
     };
 
     connect();
+
     return () => {
       disposed = true;
-      clearTimeout(retryTimer);
-      ws?.close();
+      clearTimers();
+      const socket = socketRef.current;
+      socketRef.current = null;
+      if (socket && socket.readyState <= WebSocket.OPEN) socket.close();
     };
-  }, [token, queryClient]);
-};
+  }, [token, queryClient, clearTimers]);
 
-// WebSocket push, with 15s polling deliberately kept alongside it rather than
-// as a replacement: corporate proxies and older reverse-proxy configurations
-// silently refuse the /ws upgrade, and a NOC wall display that quietly stopped
-// updating is worse than one that updates a little late. The poll is cheap and
-// the socket makes it redundant when it works.
-export const useOpenAlerts = (limit = 20, localityId = null) => {
-  useAlertSocket();
-  return useQuery({
-    // localityId is part of the key so the map's per-locality panel does not
-    // read the global feed's cached rows (and vice versa).
-    queryKey: ['alerts', 'open', limit, localityId],
-    queryFn: ({ signal }) => alertsApi.getOpenAlerts(limit, localityId, signal),
-    refetchInterval: POLL_INTERVAL_MS,
-  });
-};
-
-// Notification bell dropdown: last N critical/high incidents, newest first,
-// regardless of status. Shares the same WebSocket invalidation as
-// useOpenAlerts (both queries live under the ['alerts', ...] key prefix).
-export const useRecentNotifications = (limit = 10) => {
-  useAlertSocket();
-  return useQuery({
-    queryKey: ['alerts', 'recent', limit],
-    queryFn: ({ signal }) => alertsApi.getRecentNotifications(limit, signal),
-    refetchInterval: POLL_INTERVAL_MS,
-  });
-};
-
-export const useAcknowledgeIncident = () => {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (id) => alertsApi.acknowledgeIncident(id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['alerts'] });
-    },
-    // PermissionError (droit insuffisant, détecté côté client avant l'appel)
-    // et 403 (refusé côté serveur) atterrissent tous les deux ici — au
-    // composant appelant de lire error.message / error.isForbidden pour
-    // afficher le bon message plutôt qu'une erreur générique.
-  });
-};
-
-export const useResolveIncident = () => {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, notes }) => alertsApi.resolveIncident(id, notes),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['alerts'] });
-      queryClient.invalidateQueries({ queryKey: ['kpi'] });
-    },
-  });
-};
-
-// Historique paginé/filtrable (GET /api/incidents) — alimente la file
-// d'incidents et l'onglet "Historique", distinct du flux temps réel
-// ci-dessus qui ne couvre que les alertes ouvertes.
-export const useIncidentsList = (filters = {}) => {
-  useAlertSocket();
-  return useQuery({
-    queryKey: ['incidents', 'list', filters],
-    queryFn: ({ signal }) => alertsApi.listIncidents(filters, signal),
-    refetchInterval: POLL_INTERVAL_MS,
-    placeholderData: (prev) => prev,
-  });
-};
-
-export const useCreateManualIncident = () => {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: alertsApi.createManualIncident,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['alerts'] });
-      queryClient.invalidateQueries({ queryKey: ['incidents'] });
-      queryClient.invalidateQueries({ queryKey: ['kpi'] });
-    },
-  });
-};
-
-// Comptage bon marché (page_size=1, on ne lit que `.total`) pour une tuile KPI
-// scoped-période — ex. "incidents critiques ce mois-ci" sur la Vue Décideur,
-// qui n'existe pas comme champ direct dans KPISummaryValues.
-export const useIncidentsCount = (filters = {}) => {
-  return useQuery({
-    queryKey: ['incidents', 'count', filters],
-    queryFn: async ({ signal }) => {
-      const data = await alertsApi.listIncidents({ ...filters, page: 1, pageSize: 1 }, signal);
-      return data.total;
-    },
-  });
-};
+  return { status, events, lastMessageAt };
+}

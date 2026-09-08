@@ -1,43 +1,40 @@
 """
-Browser/PWA Web Push notifications on critical incidents.
+Notifications Web Push (navigateur / PWA).
 
-Runs as a FastAPI background task (see routes/incidents.py), so it opens its
-own DB session rather than reusing the request-scoped one, which is already
-closed by the time the task runs. Degrades gracefully like notification_service:
-VAPID not configured, no subscriptions, or a delivery failure must never break
-incident ingestion. A 404/410 response means the browser dropped the
-subscription (uninstalled, permission revoked) — prune it so we stop retrying.
+Ouvre sa propre session : appelé depuis le veilleur, hors du cycle de vie
+d'une requête HTTP. Une réponse 404 ou 410 signifie que le navigateur a
+abandonné l'abonnement (application désinstallée, permission retirée) —
+on le purge alors pour cesser de réessayer indéfiniment.
 """
+from __future__ import annotations
 
 import json
 import logging
 
-from pywebpush import WebPushException, webpush
 from sqlalchemy.orm import Session
 
-from app.core.constants import VAPID_CLAIMS_EMAIL, VAPID_PRIVATE_KEY, VAPID_PUBLIC_KEY
+from app.core.config import VAPID_CLAIMS_EMAIL, VAPID_PRIVATE_KEY, VAPID_PUBLIC_KEY
 from app.db.session import SessionLocal
-from app.models.push_subscription import PushSubscription
-from app.schemas.notifications import PushSubscriptionPayload
+from app.models.operations import PushSubscription
 
 logger = logging.getLogger(__name__)
 
 
-def _vapid_configured() -> bool:
+def vapid_configured() -> bool:
     return bool(VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY)
 
 
-def save_subscription(db: Session, user_id: int, payload: PushSubscriptionPayload) -> PushSubscription:
-    sub = db.query(PushSubscription).filter(PushSubscription.endpoint == payload.endpoint).first()
-    if sub is None:
-        sub = PushSubscription(endpoint=payload.endpoint, user_id=user_id)
-        db.add(sub)
-    sub.user_id = user_id
-    sub.p256dh = payload.keys.p256dh
-    sub.auth = payload.keys.auth
+def save_subscription(db: Session, user_id: int, endpoint: str, p256dh: str, auth: str) -> None:
+    subscription = (
+        db.query(PushSubscription).filter(PushSubscription.endpoint == endpoint).first()
+    )
+    if subscription is None:
+        subscription = PushSubscription(endpoint=endpoint, user_id=user_id)
+        db.add(subscription)
+    subscription.user_id = user_id
+    subscription.p256dh = p256dh
+    subscription.auth = auth
     db.commit()
-    db.refresh(sub)
-    return sub
 
 
 def remove_subscription(db: Session, endpoint: str) -> None:
@@ -45,12 +42,14 @@ def remove_subscription(db: Session, endpoint: str) -> None:
     db.commit()
 
 
-def _send_one(db: Session, sub: PushSubscription, title: str, body: str) -> None:
+def _send_one(db: Session, subscription: PushSubscription, title: str, body: str) -> None:
+    from pywebpush import WebPushException, webpush
+
     try:
         webpush(
             subscription_info={
-                "endpoint": sub.endpoint,
-                "keys": {"p256dh": sub.p256dh, "auth": sub.auth},
+                "endpoint": subscription.endpoint,
+                "keys": {"p256dh": subscription.p256dh, "auth": subscription.auth},
             },
             data=json.dumps({"title": title, "body": body}),
             vapid_private_key=VAPID_PRIVATE_KEY,
@@ -60,31 +59,31 @@ def _send_one(db: Session, sub: PushSubscription, title: str, body: str) -> None
     except WebPushException as exc:
         status_code = getattr(exc.response, "status_code", None)
         if status_code in (404, 410):
-            logger.info("Pruning expired push subscription id=%s", sub.id)
-            db.delete(sub)
+            logger.info("Abonnement push expiré, purge de l'id=%s", subscription.id)
+            db.delete(subscription)
             db.commit()
         else:
-            logger.error("Push delivery failed for subscription id=%s: %s", sub.id, exc)
+            logger.error("Push échoué pour l'abonnement id=%s : %s", subscription.id, exc)
 
 
 def notify_critical_incident_push(
-    incident_id: int, node_code: str, node_name: str, severity: str, description: str | None
+    *, incident_id: int, node_code: str, node_name: str, severity: str, description: str | None
 ) -> None:
-    """Push a browser notification to every subscribed device. Never raises."""
-    if not _vapid_configured():
-        logger.info("VAPID not configured, skipping push notification")
+    if not vapid_configured():
+        logger.info("VAPID non configuré, push ignoré")
         return
+
     db = SessionLocal()
     try:
-        subs = db.query(PushSubscription).all()
-        if not subs:
+        subscriptions = db.query(PushSubscription).all()
+        if not subscriptions:
             return
         title = f"[NOC] Incident {severity.upper()} — {node_code}"
         body = description or f"Incident détecté sur {node_name}"
-        for sub in subs:
-            _send_one(db, sub, title, body)
-        logger.info("Critical incident #%s pushed to %d subscription(s)", incident_id, len(subs))
-    except Exception as exc:  # push failures must never break ingestion
-        logger.exception("Push notification for incident #%s failed: %s", incident_id, exc)
+        for subscription in subscriptions:
+            _send_one(db, subscription, title, body)
+        logger.info("Incident #%s poussé vers %d abonnement(s)", incident_id, len(subscriptions))
+    except Exception as exc:
+        logger.exception("Push de l'incident #%s en échec : %s", incident_id, exc)
     finally:
         db.close()

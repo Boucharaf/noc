@@ -1,227 +1,616 @@
 @import "tailwindcss";
 
-@custom-variant dark (&:where(.dark, .dark *));
+/* =====================================================================
+   Système visuel — console NOC RESINA
+   ---------------------------------------------------------------------
+   Contraintes qui ont dicté ces choix, et qui expliquent pourquoi ça ne
+   ressemble pas à un dashboard SaaS :
 
-/*
-  Design tokens — validated against the dataviz skill's six-check palette
-  validator (categorical + status colors pass contrast/CVD/lightness-band
-  checks against these exact surfaces). Dark is the primary, default theme
-  for this NOC command-center dashboard; light is a secondary, fully
-  supported alternative reached via the header toggle.
-*/
+   1. Un exploitant passe 8 heures devant cet écran. Le fond est donc
+      sombre par DÉFAUT (pas une option), les aplats blancs sont bannis,
+      et la couleur saturée est réservée à ce qui doit arracher le regard
+      — une alerte critique, rien d'autre. Un bouton bleu vif à côté d'un
+      compteur d'incidents critiques rouge, et l'œil ne sait plus où
+      aller.
+   2. La densité prime sur l'aération. Base 13 px, lignes de tableau à
+      28 px : on veut 25 incidents à l'écran, pas 6 cartes arrondies.
+   3. Tous les chiffres sont en chasse fixe et tabulaires. Une colonne de
+      MTTR qui danse d'un pixel à chaque rafraîchissement est illisible
+      en vision périphérique, et la vision périphérique est le mode de
+      lecture normal d'un mur d'écrans.
+   4. Rien ne bouge sans raison. La seule animation permanente est le
+      point « live » et le ticker d'alertes ; les deux portent une
+      information (le flux temps réel est vivant). Tout le reste est
+      statique, et `prefers-reduced-motion` coupe même ceux-là.
+   ===================================================================== */
+
+@custom-variant light (&:where(.light, .light *));
+
 :root {
-  --color-page: #f8fafc;
-  --color-surface: #ffffff;
-  --color-surface-2: #f1f5f9;
-  --color-surface-3: #e2e8f0;
-  --color-border: rgba(15, 23, 42, 0.09);
-  --color-border-strong: rgba(15, 23, 42, 0.16);
-  --color-text-primary: #0f172a;
-  --color-text-secondary: #475569;
-  --color-text-muted: #94a3b8;
-  --color-accent: #2a78d6;
-  --color-accent-soft: rgba(42, 120, 214, 0.12);
-  --shadow-elevate: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.06);
+  /* Surfaces — le thème sombre est la base, pas la variante. */
+  --page: #0a0d14;
+  --surface: #111722;
+  --surface-2: #161f2e;
+  --surface-3: #1e2939;
+  --surface-inset: #0c111a;
+  --border: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.14);
 
-  /* Ops-room signal accent — reserved for "live"/broadcast indicators (the
-     ticker dot, the wall-clock seconds, an active-collector pulse). Never
-     used as a second brand color or on a button: one signal light per room,
-     not scattered decoration. Amber rather than the accent blue so a live
-     indicator never gets mistaken for a clickable/selected state. */
-  --color-signal: #c97a12;
-  --color-signal-soft: rgba(201, 122, 18, 0.14);
-  --font-mono: ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, Consolas,
-    'Liberation Mono', monospace;
-  /* Sharper than the 12px (rounded-xl) used on floating surfaces (modals,
-     dropdowns, KPI tiles): dense operational panels — tables, the incident
-     queue, the node grid — read as instrumentation, not a SaaS card kit. */
-  --radius-panel: 3px;
+  --ink: #e6edf6;
+  --ink-2: #93a2b8;
+  --ink-3: #5d6b80;
+
+  --accent: #3d7fc4;
+  --accent-ink: #8ab8ec;
+  --accent-soft: rgba(61, 127, 196, 0.15);
+
+  /* Sévérités — même valeur dans les deux thèmes : ce sont des codes,
+     pas des couleurs d'habillage. Un critique doit être le même rouge
+     sur le mur d'écrans que sur le portable de l'astreinte. */
+  --sev-critical: #e5484d;
+  --sev-high: #ef7c22;
+  --sev-medium: #d9a33a;
+  --sev-low: #3aa675;
+  --sev-info: #5d80a6;
+  --sev-unknown: #6b7280;
+
+  --state-up: #2f9e5f;
+  --state-down: #e5484d;
+  --state-degraded: #ef7c22;
+  --state-silent: #6b7280;
+  --state-maintenance: #8b7cf0;
+  --state-inactive: #4b5563;
+
+  --signal: #e0a030;
+  --signal-soft: rgba(224, 160, 48, 0.16);
+
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono",
+    Menlo, Consolas, "Liberation Mono", monospace;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+
+  /* Angles quasi droits : un panneau d'instrumentation, pas une carte. */
+  --radius: 3px;
+  --radius-lg: 5px;
+
+  --topbar-h: 46px;
+  --ticker-h: 26px;
+  --rail-w: 208px;
+  --rail-w-collapsed: 52px;
 }
 
-.dark {
-  --color-page: #080b13;
-  --color-surface: #0f1626;
-  --color-surface-2: #151d31;
-  --color-surface-3: #1c2740;
-  --color-border: rgba(255, 255, 255, 0.08);
-  --color-border-strong: rgba(255, 255, 255, 0.14);
-  --color-text-primary: #f1f5f9;
-  --color-text-secondary: #94a3b8;
-  --color-text-muted: #64748b;
-  --color-accent: #2f6fb3;
-  --color-accent-soft: rgba(47, 111, 179, 0.16);
-  --shadow-elevate: 0 1px 2px rgba(0, 0, 0, 0.2), 0 12px 32px rgba(0, 0, 0, 0.35);
-  --color-signal: #e0a030;
-  --color-signal-soft: rgba(224, 160, 48, 0.14);
+.light {
+  --page: #eef1f6;
+  --surface: #ffffff;
+  --surface-2: #f5f7fa;
+  --surface-3: #e8edf3;
+  --surface-inset: #f0f3f8;
+  --border: rgba(15, 23, 42, 0.1);
+  --border-strong: rgba(15, 23, 42, 0.2);
+
+  --ink: #0f1a2b;
+  --ink-2: #4a5a70;
+  --ink-3: #8494a8;
+
+  --accent: #2265ac;
+  --accent-ink: #1b5390;
+  --accent-soft: rgba(34, 101, 172, 0.1);
+
+  --sev-critical: #cc2f34;
+  --sev-high: #cf6412;
+  --sev-medium: #a97c15;
+  --sev-low: #237d51;
+  --sev-info: #3f6288;
+
+  --state-up: #1f7a47;
+  --state-down: #cc2f34;
+  --state-degraded: #cf6412;
+  --state-silent: #64748b;
+  --state-maintenance: #6247c9;
+  --state-inactive: #94a3b8;
+
+  --signal: #a86a10;
+  --signal-soft: rgba(168, 106, 16, 0.12);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
 }
 
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
+  font-family: var(--font-sans);
+  /* 13 px : la densité visée est celle d'une console, pas d'un site. */
+  font-size: 13px;
+  line-height: 1.45;
+  background: var(--page);
+  color: var(--ink);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background-color: var(--color-page);
-  color: var(--color-text-primary);
-  transition: background-color 0.15s ease;
+  overscroll-behavior: none;
 }
 
-/* ---- Operations-room chrome ---------------------------------------------
-   The panel grid (dense KPI/telemetry surfaces) intentionally does not reuse
-   .rounded-xl + shadow — that combination is reserved for floating surfaces
-   (menus, the login card, modals). Panels sit flush, bordered, with a status
-   bar on top instead of a shadow underneath: closer to a wallboard tile than
-   a SaaS card. */
-.noc-panel {
-  border-radius: var(--radius-panel);
-  border: 1px solid var(--color-border);
-  background: var(--color-surface);
-  position: relative;
-}
-.noc-panel::before {
-  content: '';
-  position: absolute;
-  inset: 0 0 auto 0;
-  height: 2px;
-  border-radius: var(--radius-panel) var(--radius-panel) 0 0;
-  background: var(--panel-accent, transparent);
+::selection {
+  background: var(--accent-soft);
 }
 
-.noc-live-dot {
+/* Barres de défilement discrètes : dans une interface dense, une barre
+   claire de 15 px coupe visuellement chaque tableau en deux. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 99px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* --- Chiffres --------------------------------------------------------
+   `tabular-nums` est obligatoire partout où une valeur se rafraîchit :
+   sans lui, « 1 249 » et « 1 111 » n'ont pas la même largeur et la
+   colonne tremble à chaque poll. */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* --- Panneau ---------------------------------------------------------
+   Bloc de base de toutes les pages. Bordure franche, pas d'ombre : une
+   ombre portée simule une élévation qui n'a pas de sens sur un mur
+   d'instruments où tout est au même plan. */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  border-radius: var(--radius) var(--radius) 0 0;
+  min-height: 34px;
+}
+
+.panel-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.panel-body {
+  padding: 10px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.panel-body-flush {
+  padding: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* --- Tableaux --------------------------------------------------------
+   28 px de haut, en-tête collant, pas de zébrures (elles gênent le
+   balayage vertical d'une colonne de valeurs). */
+.tbl {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12.5px;
+}
+
+.tbl thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface-2);
+  color: var(--ink-3);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.tbl thead th.sortable {
+  cursor: pointer;
+}
+.tbl thead th.sortable:hover {
+  color: var(--ink);
+}
+
+.tbl tbody td {
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  height: 28px;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.tbl tbody tr:hover td {
+  background: var(--surface-2);
+}
+
+.tbl tbody tr.row-clickable {
+  cursor: pointer;
+}
+
+.tbl tbody tr.row-selected td {
+  background: var(--accent-soft);
+}
+
+.tbl td.wrap,
+.tbl th.wrap {
+  white-space: normal;
+}
+
+/* Liseré de gravité en tête de ligne : lisible à 3 mètres, là où le
+   texte « critique » ne l'est pas. */
+.sev-edge {
+  border-left: 3px solid var(--sev-unknown);
+}
+.sev-edge-critical { border-left-color: var(--sev-critical); }
+.sev-edge-high     { border-left-color: var(--sev-high); }
+.sev-edge-medium   { border-left-color: var(--sev-medium); }
+.sev-edge-low      { border-left-color: var(--sev-low); }
+.sev-edge-info     { border-left-color: var(--sev-info); }
+
+/* --- Pastilles / badges --------------------------------------------- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: var(--radius);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 99px;
+  flex: none;
   display: inline-block;
+}
+
+/* --- Contrôles ------------------------------------------------------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.btn:hover:not(:disabled) {
+  background: var(--surface-3);
+  border-color: var(--ink-3);
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.btn-primary:hover:not(:disabled) {
+  filter: brightness(1.12);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.btn-danger {
+  background: transparent;
+  border-color: var(--sev-critical);
+  color: var(--sev-critical);
+}
+.btn-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--sev-critical) 14%, transparent);
+  border-color: var(--sev-critical);
+}
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ink-2);
+}
+.btn-ghost:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--ink);
+}
+.btn-sm {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 11.5px;
+}
+
+.input,
+.select,
+.textarea {
+  height: 28px;
+  padding: 0 8px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-inset);
+  color: var(--ink);
+  font-size: 12.5px;
+  font-family: inherit;
+  width: 100%;
+  min-width: 0;
+}
+.textarea {
+  height: auto;
+  padding: 6px 8px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.input:focus,
+.select:focus,
+.textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.input::placeholder,
+.textarea::placeholder {
+  color: var(--ink-3);
+}
+.select {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--ink-3) 50%),
+    linear-gradient(135deg, var(--ink-3) 50%, transparent 50%);
+  background-position: calc(100% - 14px) 12px, calc(100% - 9px) 12px;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 24px;
+}
+
+.field-label {
+  display: block;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin-bottom: 3px;
+}
+
+/* Segmented control — période, fenêtre temporelle, filtres d'état. */
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface-inset);
+}
+.seg > button {
+  height: 26px;
+  padding: 0 9px;
+  font-size: 11.5px;
+  font-weight: 500;
+  font-family: inherit;
+  background: transparent;
+  color: var(--ink-2);
+  border: none;
+  border-right: 1px solid var(--border);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.seg > button:last-child {
+  border-right: none;
+}
+.seg > button:hover {
+  color: var(--ink);
+  background: var(--surface-2);
+}
+.seg > button[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+/* --- Navigation ------------------------------------------------------ */
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 30px;
+  padding: 0 9px;
+  border-radius: var(--radius);
+  color: var(--ink-2);
+  font-size: 12.5px;
+  text-decoration: none;
+  white-space: nowrap;
+  border-left: 2px solid transparent;
+}
+.nav-item:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+.nav-item.active {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  border-left-color: var(--accent);
+  font-weight: 600;
+}
+.nav-section {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  padding: 12px 11px 4px;
+}
+
+/* --- Indicateur « live » -------------------------------------------- */
+.live-dot {
   width: 6px;
   height: 6px;
-  border-radius: 999px;
-  background: var(--color-signal);
-  box-shadow: 0 0 0 0 var(--color-signal-soft);
-  animation: noc-live-pulse 2s ease-in-out infinite;
+  border-radius: 99px;
+  background: var(--signal);
+  box-shadow: 0 0 0 0 var(--signal-soft);
+  animation: live-pulse 2.4s ease-out infinite;
+  flex: none;
 }
-@keyframes noc-live-pulse {
-  0% { box-shadow: 0 0 0 0 var(--color-signal-soft); }
-  70% { box-shadow: 0 0 0 6px transparent; }
+@keyframes live-pulse {
+  0% { box-shadow: 0 0 0 0 var(--signal-soft); }
+  70% { box-shadow: 0 0 0 5px transparent; }
   100% { box-shadow: 0 0 0 0 transparent; }
 }
 
-/* Ticker: a single continuous marquee, not a per-item slide-in — a wallboard
-   readout scrolls at one constant speed regardless of how many rows feed it. */
-.noc-ticker-track {
+/* --- Ticker d'alertes ------------------------------------------------
+   Un seul défilement continu, vitesse constante quel que soit le nombre
+   d'éléments : c'est ce que fait un bandeau de salle de contrôle. */
+.ticker-track {
   display: flex;
   width: max-content;
-  animation: noc-ticker-scroll linear infinite;
+  animation: ticker-scroll linear infinite;
 }
-@keyframes noc-ticker-scroll {
+@keyframes ticker-scroll {
   from { transform: translateX(0); }
   to { transform: translateX(-50%); }
 }
+.ticker-track:hover {
+  animation-play-state: paused;
+}
+
+/* Clignotement réservé aux critiques NON acquittés. Volontairement lent
+   (2 s) et faible en amplitude : un clignotement rapide devient un bruit
+   de fond qu'on cesse de voir au bout d'une heure. */
+.blink-critical {
+  animation: blink-crit 2s steps(1, end) infinite;
+}
+@keyframes blink-crit {
+  0%, 60% { opacity: 1; }
+  61%, 100% { opacity: 0.45; }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .noc-ticker-track { animation: none; }
+  .ticker-track,
+  .live-dot,
+  .blink-critical {
+    animation: none !important;
+  }
 }
 
-::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+/* --- Squelettes de chargement ---------------------------------------- */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--surface-2) 25%,
+    var(--surface-3) 37%,
+    var(--surface-2) 63%
+  );
+  background-size: 400% 100%;
+  animation: skeleton-shimmer 1.4s ease infinite;
+  border-radius: var(--radius);
 }
-::-webkit-scrollbar-track {
-  background: transparent;
+@keyframes skeleton-shimmer {
+  0% { background-position: 100% 50%; }
+  100% { background-position: 0 50%; }
 }
-::-webkit-scrollbar-thumb {
-  background: var(--color-border-strong);
-  border-radius: 999px;
-}
-
-/* ---- Leaflet / OpenStreetMap theming ------------------------------------ */
-/* OSM raster tiles are only published in one (light, colorful) cartography.
-   Rather than fork a tile server, dark mode applies a CSS filter to the tile
-   pane only — markers/popups sit in a separate pane and are left untouched. */
-.leaflet-dark-map .leaflet-tile-pane {
-  filter: invert(1) hue-rotate(180deg) brightness(0.95) contrast(0.9) saturate(0.8);
-}
-
-.leaflet-container {
-  background: var(--color-surface-2);
-  font-family: inherit;
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; }
 }
 
-.leaflet-control-zoom {
-  border: 1px solid var(--color-border-strong) !important;
-  box-shadow: var(--shadow-elevate) !important;
+/* --- Divers ---------------------------------------------------------- */
+.hairline {
+  border-color: var(--border);
+}
+
+.mono-xs {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.truncate-cell {
+  max-width: 1px;
+  width: 100%;
   overflow: hidden;
-}
-.leaflet-control-zoom a {
-  background: var(--color-surface) !important;
-  color: var(--color-text-primary) !important;
-  border-color: var(--color-border) !important;
-}
-.leaflet-control-zoom a:hover {
-  background: var(--color-surface-2) !important;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+.scroll-y {
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* Carte Leaflet : le fond clair par défaut est aveuglant sur un thème
+   sombre. On désature et on assombrit la tuile plutôt que de charger un
+   fond de carte différent (une tuile sombre suppose un service tiers
+   supplémentaire, donc une dépendance réseau de plus). */
+.leaflet-container {
+  background: var(--surface-inset);
+  font-family: var(--font-sans);
+}
+:root:not(.light) .leaflet-tile {
+  filter: grayscale(0.85) brightness(0.62) contrast(1.05) invert(0.92) hue-rotate(180deg);
+}
 .leaflet-control-attribution {
-  background: color-mix(in srgb, var(--color-surface) 85%, transparent) !important;
-  color: var(--color-text-muted) !important;
-  font-size: 10px !important;
+  background: rgba(0, 0, 0, 0.4) !important;
+  color: var(--ink-3) !important;
+  font-size: 9px !important;
 }
 .leaflet-control-attribution a {
-  color: var(--color-text-secondary) !important;
+  color: var(--ink-2) !important;
 }
 
-.leaflet-popup-content-wrapper {
-  background: var(--color-surface) !important;
-  color: var(--color-text-primary) !important;
-  box-shadow: var(--shadow-elevate) !important;
-  border-radius: 10px !important;
+/* Mode mur d'écrans : agrandit tout d'un cran, l'écran est à 3 mètres. */
+.wallboard {
+  font-size: 15px;
 }
-.leaflet-popup-tip {
-  background: var(--color-surface) !important;
+.wallboard .tbl {
+  font-size: 15px;
 }
-.leaflet-popup-content {
-  margin: 10px 12px !important;
-  font-size: 13px !important;
+.wallboard .tbl tbody td {
+  height: 34px;
 }
-
-.leaflet-div-icon {
-  background: transparent;
-  border: none;
-}
-
-.leaflet-tooltip {
-  background: var(--color-surface) !important;
-  color: var(--color-text-primary) !important;
-  border: 1px solid var(--color-border-strong) !important;
-  box-shadow: var(--shadow-elevate) !important;
-  border-radius: 8px !important;
-  padding: 6px 9px !important;
-}
-.leaflet-tooltip-top::before {
-  border-top-color: var(--color-border-strong) !important;
-}
-
-.noc-marker {
-  display: block;
-  cursor: pointer;
-  border-radius: 999px;
-  border: 2px solid var(--color-surface);
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.15);
-}
-.noc-marker.is-selected {
-  border-color: var(--color-accent);
-  border-width: 3px;
-}
-.noc-marker-pulse {
-  border-radius: 999px;
-  animation: noc-pulse 2.4s ease-out infinite;
-}
-@keyframes noc-pulse {
-  0%   { transform: scale(0.9); opacity: 0.55; }
-  70%  { transform: scale(2.1); opacity: 0; }
-  100% { transform: scale(2.1); opacity: 0; }
-}
-
-.map-zoom-hint {
-  animation: noc-fade-in 0.2s ease-out;
-}
-@keyframes noc-fade-in {
-  from { opacity: 0; }
-  to   { opacity: 1; }
+.wallboard .panel-title {
+  font-size: 13px;
 }

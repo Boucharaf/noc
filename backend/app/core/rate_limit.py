@@ -1,25 +1,18 @@
 """
-Per-IP fixed-window rate limiting backed by Redis: 100 req/min on read
-endpoints, 10 req/min on /ingest.
+Limitation de débit par IP, fenêtre fixe d'une minute, stockée dans Redis.
 
-The ingest limit is the tighter of the two because it is the only unauthenticated-
-by-user path — a supervision tool holding the static API key — and because a
-looping webhook is the realistic way this service gets flooded. Read traffic
-comes from logged-in dashboards, which are bounded by how many people are
-looking at them.
-
-Fails open: if Redis is unavailable the request goes through — availability of
-the dashboard matters more than strict quota enforcement.
+Échoue en mode ouvert : si Redis est indisponible, la requête passe. La
+disponibilité du dashboard prime sur l'application stricte du quota.
 """
 import logging
 import time
 
 from fastapi import HTTPException, Request
 
-from app.core.constants import (
+from app.core.config import (
     RATE_LIMIT_ENABLED,
-    RATE_LIMIT_INGEST_PER_MIN,
     RATE_LIMIT_READ_PER_MIN,
+    RATE_LIMIT_WRITE_PER_MIN,
 )
 from app.db.redis_client import redis_client
 
@@ -27,10 +20,9 @@ logger = logging.getLogger(__name__)
 
 
 def _client_ip(request: Request) -> str:
-    # Behind the nginx reverse proxy the real client is in X-Real-IP.
-    return (
-        request.headers.get("x-real-ip")
-        or (request.client.host if request.client else "unknown")
+    # Derrière le reverse proxy nginx, l'IP réelle est dans X-Real-IP.
+    return request.headers.get("x-real-ip") or (
+        request.client.host if request.client else "unknown"
     )
 
 
@@ -45,12 +37,12 @@ def rate_limit(scope: str, limit: int):
             if count == 1:
                 redis_client.expire(key, 60)
         except Exception as exc:
-            logger.warning("Rate limit check failed (%s), allowing request: %s", key, exc)
+            logger.warning("Contrôle de débit indisponible (%s), requête acceptée : %s", key, exc)
             return
         if count > limit:
             raise HTTPException(
                 status_code=429,
-                detail=f"Rate limit exceeded ({limit} requests/min)",
+                detail=f"Limite de débit dépassée ({limit} requêtes/min)",
                 headers={"Retry-After": "60"},
             )
 
@@ -58,4 +50,4 @@ def rate_limit(scope: str, limit: int):
 
 
 read_rate_limit = rate_limit("read", RATE_LIMIT_READ_PER_MIN)
-ingest_rate_limit = rate_limit("ingest", RATE_LIMIT_INGEST_PER_MIN)
+write_rate_limit = rate_limit("write", RATE_LIMIT_WRITE_PER_MIN)

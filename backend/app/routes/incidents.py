@@ -1,178 +1,63 @@
-from datetime import datetime, timezone
+"""
+Incidents : consultation et actions humaines.
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query, Response, status
+Il n'y a plus de route d'ingestion (`POST /api/incidents/ingest` et sa
+variante bulk ont disparu) : le nouvel ETL écrit directement dans
+fact_incident. Voir services/incident_service pour le détail.
+"""
+import csv
+import io
+from datetime import UTC, datetime
+
+from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy.orm import Session
 
-from app.core.rate_limit import ingest_rate_limit, read_rate_limit
-from app.core.security import get_current_user, require_role, verify_api_key
+from app.core.rate_limit import read_rate_limit, write_rate_limit
 from app.db.session import get_db
-from app.models.user import User
+from app.dependencies.auth import get_current_user, require_role
+from app.models.operations import User
 from app.schemas.incidents import (
-    AcknowledgePayload,
-    IncidentBulkIngestPayload,
-    IncidentBulkIngestResponse,
-    IncidentIngestPayload,
-    IncidentIngestResponse,
+    SEVERITY_PATTERN,
+    STATUS_PATTERN,
+    AssignPayload,
+    CommentPayload,
+    EscalatePayload,
+    IncidentDetail,
     IncidentListResponse,
+    IncidentTimelineEntry,
+    IncidentWorkloadOut,
     ManualIncidentPayload,
     ResolvePayload,
 )
-from app.services import (
-    alert_broadcaster,
-    cache_service,
-    incident_service,
-    notification_service,
-    push_service,
-)
+from app.services import incident_service
 
 router = APIRouter(prefix="/api/incidents", tags=["incidents"])
 
-# Rôles habilités à intervenir sur un incident. "agent_terrain" peut acquitter
-# (il est souvent le premier au contact) mais pas résoudre : la clôture
-# formelle d'un incident reste une décision technique.
-_ACKNOWLEDGE_ROLES = ("agent_terrain", "technicien", "chef_noc", "directeur")
-_RESOLVE_ROLES = ("technicien", "chef_noc", "directeur")
-_MANUAL_INCIDENT_ROLES = ("agent_terrain", "technicien", "chef_noc", "directeur")
-
-# NOTE: ces slugs doivent correspondre exactement aux valeurs stockées dans
-# dim_user.role. Si votre migration a choisi d'autres noms, ne changez que
-# les tuples ci-dessus — le reste du fichier n'a pas à bouger.
+# Miroir de frontend/src/api/permissions.js. Le contrôle qui compte est
+# celui-ci : le RBAC côté client n'est que du confort d'interface.
+_VIEW_HISTORY = ("directeur", "chef_noc", "technicien")
+_ACKNOWLEDGE = ("chef_noc", "technicien", "agent_terrain")
+_RESOLVE = ("chef_noc", "technicien")
+_MANUAL = ("directeur", "chef_noc", "technicien", "agent_terrain")
+_ASSIGN = ("chef_noc",)
+_ESCALATE = ("chef_noc", "technicien")
 
 
-def _dispatch_new_incident(
-    background_tasks: BackgroundTasks, incident, node
-) -> None:
-    """Broadcast temps réel + notifications (SMS/email/push) pour un incident
-    tout juste créé — factorisé car /ingest ET /manual doivent tous les deux
-    le déclencher de la même façon."""
-    alert_broadcaster.publish_alert(
-        {
-            "type": "incident",
-            "incident_id": incident.id,
-            "node_code": node.code,
-            "node_name": node.name,
-            "severity": incident.severity,
-            "status": incident.status,
-            "detected_at": incident.detected_at,
-            "description": incident.description,
-        }
-    )
-    if incident.severity == "critical":
-        # Différé après l'envoi de la réponse : l'appelant (outil de
-        # supervision ou agent terrain) ne doit jamais attendre Twilio/SMTP,
-        # ni voir sa requête échouer parce qu'un notifieur est indisponible.
-        background_tasks.add_task(
-            notification_service.notify_critical_incident,
-            incident.id,
-            node.code,
-            node.name,
-            incident.severity,
-            str(incident.detected_at),
-            incident.description,
-            incident.itop_ticket_id,
-        )
-        background_tasks.add_task(
-            push_service.notify_critical_incident_push,
-            incident.id,
-            node.code,
-            node.name,
-            incident.severity,
-            incident.description,
-        )
-
-
-def _to_response(incident) -> IncidentIngestResponse:
-    return IncidentIngestResponse(
-        incident_id=incident.id,
-        node_id=incident.node_id,
-        itop_ticket_id=incident.itop_ticket_id,
-        shift=incident.shift,
-        created_at=incident.created_at,
-    )
-
-
-@router.post("/ingest", response_model=IncidentIngestResponse, status_code=status.HTTP_201_CREATED)
-def ingest_incident(
-    payload: IncidentIngestPayload,
-    background_tasks: BackgroundTasks,
-    response: Response,
-    db: Session = Depends(get_db),
-    _: None = Depends(verify_api_key),
-    __: None = Depends(ingest_rate_limit),
-):
-    incident, node, created = incident_service.ingest_incident(db, payload)
-
-    if not created:
-        # Re-reported still-open alert (batch pollers resend active problems):
-        # idempotent no-op, no broadcast/notification, 200 instead of 201.
-        response.status_code = status.HTTP_200_OK
-        return _to_response(incident)
-
-    cache_service.invalidate_prefix("kpi:")
-    _dispatch_new_incident(background_tasks, incident, node)
-    return _to_response(incident)
-
-
-@router.post(
-    "/manual",
-    response_model=IncidentIngestResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-def create_manual_incident(
-    payload: ManualIncidentPayload,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(*_MANUAL_INCIDENT_ROLES)),
-):
-    """Signalement manuel d'un incident depuis le dashboard — pour un problème
-    constaté sur le terrain (câble coupé, groupe électrogène en panne…) que
-    les outils de supervision n'ont pas détecté. Authentifié par JWT (pas la
-    clé API des collecteurs ETL) : c'est un humain, pas un poller, qui déclare.
-    """
-    ingest_payload = IncidentIngestPayload(
-        node_code=payload.node_code,
-        source_tool="manual",
-        severity=payload.severity,
-        status="open",
-        detected_at=datetime.now(timezone.utc),
-        description=f"[{current_user.username}] {payload.description}",
-        external_id=None,
-        itop_ticket_id=None,
-        cause_category=payload.cause_category,
-        cause_label=payload.cause_label,
-    )
-    incident, node, created = incident_service.ingest_incident(db, ingest_payload)
-
-    if not created:
-        return _to_response(incident)
-
-    cache_service.invalidate_prefix("kpi:")
-    _dispatch_new_incident(background_tasks, incident, node)
-    return _to_response(incident)
-
-
-@router.get(
-    "",
-    response_model=IncidentListResponse,
-    dependencies=[Depends(get_current_user), Depends(read_rate_limit)],
-)
+@router.get("", response_model=IncidentListResponse, dependencies=[Depends(read_rate_limit)])
 def list_incidents(
-    db: Session = Depends(get_db),
-    status_filter: str | None = Query(None, alias="status"),
-    severity: str | None = Query(None),
-    locality_id: int | None = Query(None),
-    node_code: str | None = Query(None),
-    source_tool: str | None = Query(None),
-    date_from: datetime | None = Query(None),
-    date_to: datetime | None = Query(None),
+    status_filter: str | None = Query(None, alias="status", pattern=STATUS_PATTERN),
+    severity: str | None = Query(None, pattern=SEVERITY_PATTERN),
+    locality_id: int | None = None,
+    node_code: str | None = None,
+    source_tool: str | None = None,
+    cause_category: str | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
     page: int = Query(1, ge=1),
-    page_size: int = Query(25, ge=1, le=100),
+    page_size: int = Query(25, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _user: User = Depends(require_role(*_VIEW_HISTORY)),
 ):
-    """Historique complet, filtrable et paginé — à la différence de
-    /api/alerts/open (top-N d'incidents ouverts pour la vue temps réel), cet
-    endpoint alimente une table d'incidents consultable sur toute la période
-    (résolus compris), par nœud, localité, sévérité, outil source ou ticket.
-    """
     return incident_service.list_incidents(
         db,
         status=status_filter,
@@ -180,6 +65,7 @@ def list_incidents(
         locality_id=locality_id,
         node_code=node_code,
         source_tool=source_tool,
+        cause_category=cause_category,
         date_from=date_from,
         date_to=date_to,
         page=page,
@@ -187,63 +73,180 @@ def list_incidents(
     )
 
 
-@router.post(
-    "/ingest/bulk",
-    response_model=IncidentBulkIngestResponse,
-    status_code=status.HTTP_200_OK,
-)
-def ingest_incidents_bulk(
-    payload: IncidentBulkIngestPayload,
+# Déclarées AVANT /{incident_id} : Starlette teste les routes dans l'ordre
+# de déclaration, et « workload » comme « export.csv » seraient sinon
+# capturés par le paramètre entier, qui répondrait 422.
+@router.get("/workload", response_model=list[IncidentWorkloadOut])
+def get_workload(
     db: Session = Depends(get_db),
-    _: None = Depends(verify_api_key),
-    __: None = Depends(ingest_rate_limit),
+    _user: User = Depends(require_role("directeur", "chef_noc", "technicien")),
 ):
-    """Batch counterpart to /ingest, for a poller reconciling its whole active
-    set in one call.
+    """Répartition des incidents ouverts par intervenant."""
+    return incident_service.get_workload(db)
 
-    Costs a single unit of the ingest rate limit, which is the point: the ETL
-    posts every active alarm on every pass, and at NetXMS's ~1500 that is
-    otherwise 150 minutes of quota per five-minute poll.
 
-    The batch is a snapshot, not an append: alerts it no longer carries are
-    treated as recovered and their incidents are resolved (see
-    incident_service.reconcile_open_incidents). Post partial batches here and
-    you will close incidents that are still live.
+@router.get("/export.csv")
+def export_incidents(
+    status_filter: str | None = Query(None, alias="status", pattern=STATUS_PATTERN),
+    severity: str | None = Query(None, pattern=SEVERITY_PATTERN),
+    locality_id: int | None = None,
+    node_code: str | None = None,
+    source_tool: str | None = None,
+    cause_category: str | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    limit: int = Query(5000, ge=1, le=50000),
+    db: Session = Depends(get_db),
+    _user: User = Depends(require_role(*_VIEW_HISTORY)),
+):
+    """Export CSV du résultat courant du filtre.
 
-    It does not broadcast or notify — see incident_service.ingest_incidents_bulk
-    for why. Anything that must reach a human on arrival belongs on /ingest.
+    Un exploitant produit ses propres tableaux d'analyse ; sans export il
+    recopie les lignes à la main depuis l'écran. Le séparateur est le
+    point-virgule et le fichier porte un BOM UTF-8, parce que la
+    destination réelle est Excel en configuration francophone : une
+    virgule y casse les colonnes, et sans BOM les accents deviennent
+    illisibles.
     """
-    result = incident_service.ingest_incidents_bulk(db, payload.incidents)
-    if result["created"] or result["resolved"]:
-        # Same invalidation /ingest does. Without it the dashboard keeps serving
-        # the KPIs cached before the batch — which is how a pass that resolved
-        # 190 incidents can still report a 0% resolution rate.
-        cache_service.invalidate_prefix("kpi:")
-    return result
+    rows = incident_service.list_incidents(
+        db,
+        status=status_filter,
+        severity=severity,
+        locality_id=locality_id,
+        node_code=node_code,
+        source_tool=source_tool,
+        cause_category=cause_category,
+        date_from=date_from,
+        date_to=date_to,
+        page=1,
+        page_size=min(limit, 50000),
+    )["items"]
+
+    columns = [
+        ("id", "ID"),
+        ("detected_at", "Détecté le"),
+        ("severity", "Gravité"),
+        ("status", "Statut"),
+        ("node_name", "Équipement"),
+        ("locality", "Site"),
+        ("region", "Région"),
+        ("ministry", "Ministère"),
+        ("source_tool", "Outil"),
+        ("cause_label", "Cause"),
+        ("description", "Description"),
+        ("acknowledged_at", "Acquitté le"),
+        ("resolved_at", "Résolu le"),
+        ("mtta_minutes", "MTTA (min)"),
+        ("mttr_minutes", "MTTR (min)"),
+        ("downtime_minutes", "Indispo. (min)"),
+        ("assigned_to_full_name", "Assigné à"),
+        ("itop_ticket_ref", "Ticket iTop"),
+    ]
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, delimiter=";", lineterminator="\r\n")
+    writer.writerow([label for _, label in columns])
+    for item in rows:
+        writer.writerow(
+            ["" if item.get(key) is None else str(item.get(key)) for key, _ in columns]
+        )
+
+    now = datetime.now(UTC).strftime("%Y%m%d-%H%M")
+    return Response(
+        content="﻿" + buffer.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="incidents-{now}.csv"'},
+    )
 
 
-@router.patch("/{incident_id}/resolve", response_model=IncidentIngestResponse)
-def resolve_incident(
+@router.get("/{incident_id}", response_model=IncidentDetail)
+def get_incident(
+    incident_id: int,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    return incident_service.get_incident(db, incident_id)
+
+
+@router.get("/{incident_id}/timeline", response_model=list[IncidentTimelineEntry])
+def get_timeline(
+    incident_id: int,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    return incident_service.get_timeline(db, incident_id)
+
+
+@router.post(
+    "/manual",
+    response_model=IncidentDetail,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(write_rate_limit)],
+)
+def create_manual_incident(
+    payload: ManualIncidentPayload,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(*_MANUAL)),
+):
+    """Panne constatée sur le terrain que les outils n'ont pas détectée."""
+    return incident_service.create_manual(
+        db,
+        user,
+        node_code=payload.node_code,
+        severity=payload.severity,
+        description=payload.description,
+        cause_category=payload.cause_category,
+    )
+
+
+@router.patch("/{incident_id}/acknowledge", response_model=IncidentDetail)
+def acknowledge(
+    incident_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(*_ACKNOWLEDGE)),
+):
+    return incident_service.acknowledge(db, incident_id, user)
+
+
+@router.patch("/{incident_id}/resolve", response_model=IncidentDetail)
+def resolve(
     incident_id: int,
     payload: ResolvePayload,
     db: Session = Depends(get_db),
-    _current_user: User = Depends(require_role(*_RESOLVE_ROLES)),
+    user: User = Depends(require_role(*_RESOLVE)),
 ):
-    incident = incident_service.resolve_incident(db, incident_id, payload.resolved_at, payload.notes)
-    cache_service.invalidate_prefix("kpi:")
-    return _to_response(incident)
+    return incident_service.resolve(db, incident_id, user, payload.notes)
 
 
-@router.patch("/{incident_id}/acknowledge", response_model=IncidentIngestResponse)
-def acknowledge_incident(
+@router.post("/{incident_id}/assign", response_model=IncidentDetail)
+def assign(
     incident_id: int,
-    payload: AcknowledgePayload,
+    payload: AssignPayload,
     db: Session = Depends(get_db),
-    _current_user: User = Depends(require_role(*_ACKNOWLEDGE_ROLES)),
+    user: User = Depends(require_role(*_ASSIGN)),
 ):
-    incident = incident_service.acknowledge_incident(db, incident_id, payload.acknowledged_at)
-    # No cache to invalidate: acknowledging moves an incident from "open" to
-    # "acknowledged" without changing any cached figure — the KPIs count
-    # resolved against total, and the alerts endpoints are read straight from
-    # the database. Resolving does change them, which is why it invalidates.
-    return _to_response(incident)
+    return incident_service.assign(
+        db, incident_id, user, payload.assigned_to_user_id, payload.note
+    )
+
+
+@router.post("/{incident_id}/escalate", response_model=IncidentDetail)
+def escalate(
+    incident_id: int,
+    payload: EscalatePayload,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(*_ESCALATE)),
+):
+    return incident_service.escalate(
+        db, incident_id, user, payload.escalated_to_user_id, payload.reason
+    )
+
+
+@router.post("/{incident_id}/comment", response_model=list[IncidentTimelineEntry])
+def comment(
+    incident_id: int,
+    payload: CommentPayload,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return incident_service.comment(db, incident_id, user, payload.note)

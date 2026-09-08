@@ -1,21 +1,67 @@
-"""Schémas Pydantic pour les utilisateurs.
+"""Schémas des comptes utilisateurs."""
+from __future__ import annotations
 
-RoleEnum est la seule chose définie ici : c'est la source de vérité pour les
-4 rôles côté Pydantic, importée par schemas/auth.py. UserCreate/UserUpdate
-vivaient auparavant en double ici ET dans schemas/auth.py (deux définitions
-divergentes du même formulaire) — cette copie n'était importée nulle part
-dans le code actif ; supprimée pour éviter que les deux dérivent à nouveau.
-Les schémas de formulaire réellement utilisés par app/routes/users.py sont
-dans schemas/auth.py.
-"""
+from datetime import datetime
+from enum import StrEnum
 
-from enum import Enum
+from pydantic import BaseModel, Field
 
 
-class RoleEnum(str, Enum):
+class RoleEnum(StrEnum):
+    """Miroir exact de VALID_ROLES (core/config.py), de la contrainte
+    chk_dim_user_role en base et de ROLES dans
+    frontend/src/api/permissions.js. Un nouveau rôle doit être ajouté aux
+    quatre endroits."""
+
     directeur = "directeur"
     chef_noc = "chef_noc"
     technicien = "technicien"
     agent_terrain = "agent_terrain"
 
 
+class UserOut(BaseModel):
+    id: int
+    username: str
+    full_name: str | None = None
+    role: RoleEnum
+    is_active: bool = True
+    region_id: int | None = None
+    locality_id: int | None = None
+    ministry_id: int | None = None
+    phone_number: str | None = None
+    employee_code: str | None = None
+    team: str | None = None
+    has_pin: bool = False
+    last_login_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class UserCreate(BaseModel):
+    username: str = Field(min_length=3, max_length=50)
+    full_name: str = Field(min_length=1, max_length=150)
+    role: RoleEnum
+    password: str = Field(min_length=8)
+    pin: str | None = Field(default=None, min_length=4, max_length=6, pattern=r"^\d+$")
+    phone_number: str | None = None
+    region_id: int | None = None
+    locality_id: int | None = None
+    ministry_id: int | None = None
+    employee_code: str | None = None
+    team: str | None = None
+
+
+class UserUpdate(BaseModel):
+    full_name: str | None = Field(default=None, min_length=1, max_length=150)
+    role: RoleEnum | None = None
+    phone_number: str | None = None
+    region_id: int | None = None
+    locality_id: int | None = None
+    ministry_id: int | None = None
+    employee_code: str | None = None
+    team: str | None = None
+    is_active: bool | None = None
+
+
+class PinResetPayload(BaseModel):
+    new_pin: str = Field(min_length=4, max_length=6, pattern=r"^\d+$")

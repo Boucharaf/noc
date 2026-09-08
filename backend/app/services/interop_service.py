@@ -1,94 +1,170 @@
-"""State of the supervision-tool integrations, for the Interopérabilité view.
-
-Combines two sources, because neither alone answers the question the page asks:
-
-  * the ETL worker's last collection pass, read from the Redis key it rewrites
-    every poll — whether each tool answered, and what it returned;
-  * incident counts for the month, grouped by the tool that *reported* them.
-
-The second deliberately groups on fact_incident.source_tool and not
-dim_node.source_tool. Those are different facts: the first is who raised the
-incident, the second is which tool is nominally responsible for monitoring that
-node. They disagree in practice, and only the first one belongs on a card
-labelled with a tool's name.
 """
+État des intégrations, pour la page Interopérabilité.
+
+C'est le point d'intégration le plus direct avec l'ETL, et celui qui
+changeait de format entre l'ancienne et la nouvelle version.
+
+L'ancien backend lisait UNE clé Redis `noc:collector:status` contenant un
+dictionnaire `{"tools": {...}}`. Le nouvel ETL écrit UNE CLÉ PAR OUTIL,
+`noc:etl:status:<outil>`, chacune contenant un objet plat :
+
+    {"tool": "zabbix", "ok": true, "last_run_at": "...",
+     "nb_nodes": 128, "nb_incidents": 12, "nb_metrics": 640}
+
+(voir etl/pipelines/status.py::publish_status). Ce module lit ce
+nouveau format.
+
+Un statut est jugé périmé si `last_run_at` remonte à plus de trois fois
+l'intervalle de collecte : deux cycles peuvent être manqués sans que ce
+soit une panne (redémarrage du worker, collecte longue), trois signalent
+un problème réel.
+"""
+from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.config import (
+    ETL_COLLECT_INTERVAL_S,
+    ETL_STATUS_KEY_PREFIX,
+    SUPERVISION_TOOLS,
+)
 from app.db.redis_client import redis_client
-from app.models.incident import Incident
-from app.services.kpi_service import month_start
+from app.services.periods import month_bounds
 
 logger = logging.getLogger(__name__)
 
-# Written by etl/pipelines/status.py after every collection pass.
-STATUS_KEY = "noc:collector:status"
-
-# Every tool the ETL can collect from. Fixed here rather than derived from the
-# status payload so a tool that is switched off, or whose collector has never
-# run, still appears on the page as "not configured" instead of vanishing.
-TOOLS = ("zabbix", "nagios", "netxms", "centreon", "nsp", "itop")
+STALE_FACTOR = 3
 
 
-def _read_status() -> dict | None:
+def _read_all_status() -> dict[str, dict]:
+    """Lit toutes les clés de statut publiées par l'ETL.
+
+    Retourne un dictionnaire vide si Redis est injoignable — la page doit
+    s'afficher en indiquant que le collecteur est inconnu, pas renvoyer
+    une erreur 500.
+    """
     try:
-        raw = redis_client.get(STATUS_KEY)
-    except Exception as exc:  # Redis down must not take the page down
-        logger.warning("Collector status read failed: %s", exc)
-        return None
-    return json.loads(raw) if raw else None
+        keys = redis_client.keys(f"{ETL_STATUS_KEY_PREFIX}*")
+    except Exception as exc:
+        logger.warning("Lecture du statut ETL impossible : %s", exc)
+        return {}
+
+    statuses: dict[str, dict] = {}
+    for key in keys:
+        tool = key[len(ETL_STATUS_KEY_PREFIX):]
+        try:
+            raw = redis_client.get(key)
+            if raw:
+                statuses[tool] = json.loads(raw)
+        except Exception as exc:
+            logger.warning("Statut illisible pour %s : %s", tool, exc)
+    return statuses
 
 
 def _incidents_by_tool(db: Session, month: int, year: int) -> dict[str, int]:
-    period_start = month_start(month, year)
+    """Incidents du mois, groupés par outil AYANT REMONTÉ l'incident.
+
+    On groupe sur `fact_incident.source_tool`, pas sur l'outil qui
+    supervise l'équipement (`dim_node_source_map`) : un même équipement
+    est souvent vu par plusieurs outils, et seule la première réponde à
+    la question posée par une carte portant le nom d'un outil.
+    """
+    start, end = month_bounds(month, year)
     rows = db.execute(
-        select(Incident.source_tool, func.count(Incident.id))
-        .where(func.date_trunc("month", Incident.detected_at) == period_start)
-        .group_by(Incident.source_tool)
-    ).all()
-    return {tool: int(count) for tool, count in rows}
+        text(
+            """
+            SELECT source_tool, count(*) AS nb
+            FROM fact_incident
+            WHERE detected_at >= :start AND detected_at < :end
+            GROUP BY source_tool
+            """
+        ),
+        {"start": start, "end": end},
+    ).mappings().all()
+    return {r["source_tool"]: int(r["nb"]) for r in rows}
+
+
+def _nodes_by_tool(db: Session) -> dict[str, int]:
+    """Équipements supervisés par chaque outil (dim_node_source_map)."""
+    rows = db.execute(
+        text(
+            """
+            SELECT source_tool, count(DISTINCT node_id) AS nb
+            FROM dim_node_source_map
+            GROUP BY source_tool
+            """
+        )
+    ).mappings().all()
+    return {r["source_tool"]: int(r["nb"]) for r in rows}
+
+
+def _parse_dt(value) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def get_interop_status(db: Session, month: int, year: int) -> dict:
-    status = _read_status()
-    counts = _incidents_by_tool(db, month, year)
-    per_tool = (status or {}).get("tools") or {}
+    statuses = _read_all_status()
+    incident_counts = _incidents_by_tool(db, month, year)
+    node_counts = _nodes_by_tool(db)
+
+    now = datetime.now(UTC)
+    stale_after = timedelta(seconds=ETL_COLLECT_INTERVAL_S * STALE_FACTOR)
 
     tools = []
-    for name in TOOLS:
-        entry = per_tool.get(name)
-        if status is None:
-            # No status key at all: the worker has not published within the
-            # key's lifetime, so nothing can be claimed about any tool.
-            state, detail = "unknown", "Collecteur inactif ou injoignable"
-        elif entry is None:
-            state, detail = "not_configured", "Aucun endpoint configuré"
-        elif entry.get("error"):
-            state, detail = "error", entry["error"]
-        elif entry.get("failed"):
-            state = "degraded"
-            detail = f"{entry['failed']} incident(s) non enregistré(s)"
+    for name in SUPERVISION_TOOLS:
+        entry = statuses.get(name)
+        last_run = _parse_dt((entry or {}).get("last_run_at"))
+
+        if entry is None:
+            # Aucune clé publiée : soit l'outil est désactivé dans la
+            # configuration de l'ETL (etl/config.py), soit son connecteur
+            # n'a jamais tourné. On ne peut pas distinguer les deux ici,
+            # d'où un libellé qui couvre les deux cas.
+            state = "not_configured"
+            detail = "Jamais collecté — outil désactivé ou connecteur non exécuté"
+        elif last_run is None:
+            state, detail = "unknown", "Statut publié sans horodatage exploitable"
+        elif now - last_run > stale_after:
+            minutes = int((now - last_run).total_seconds() // 60)
+            state = "stale"
+            detail = f"Dernière collecte il y a {minutes} min — collecteur probablement arrêté"
+        elif not entry.get("ok"):
+            state = "error"
+            detail = "Dernier cycle en échec — voir les journaux du worker Celery"
         else:
             state, detail = "ok", "Collecte réussie"
+
         tools.append(
             {
                 "tool": name,
                 "state": state,
                 "detail": detail,
-                "fetched": (entry or {}).get("fetched"),
-                "ingested": (entry or {}).get("ingested"),
-                "incidents_this_month": counts.get(name, 0),
+                "ok": bool((entry or {}).get("ok")) if entry else None,
+                "last_run_at": last_run.isoformat() if last_run else None,
+                "nb_nodes": (entry or {}).get("nb_nodes"),
+                "nb_incidents": (entry or {}).get("nb_incidents"),
+                "nb_metrics": (entry or {}).get("nb_metrics"),
+                "nodes_supervised": node_counts.get(name, 0),
+                "incidents_this_month": incident_counts.get(name, 0),
             }
         )
 
+    healthy = sum(1 for t in tools if t["state"] == "ok")
     return {
-        "collected_at": (status or {}).get("collected_at"),
-        "interval_seconds": (status or {}).get("interval_seconds"),
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": now.isoformat(),
+        "interval_seconds": ETL_COLLECT_INTERVAL_S,
+        "tools_total": len(tools),
+        "tools_healthy": healthy,
         "tools": tools,
     }

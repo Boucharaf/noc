@@ -1,176 +1,181 @@
-from typing import Optional
+"""Agrégats KPI du dashboard."""
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.core.rate_limit import read_rate_limit
-from app.core.security import get_current_user
 from app.db.session import get_db
-from app.services import cache_service, kpi_service
+from app.dependencies.auth import get_current_user
+from app.models.operations import User
+from app.schemas.kpi import (
+    CauseOut,
+    HourDistributionOut,
+    KPISummaryResponse,
+    LocalityKPIOut,
+    LocalityMapOut,
+    LocalityNodesResponse,
+    MinistryKPIOut,
+    NodeKPIOut,
+    RecurrentNodeOut,
+    TrendPointOut,
+)
+from app.services import kpi_service
 
-# All KPI reads require a logged-in user (any role, analyst included) and are
-# rate-limited. Declaring both as router-level dependencies rather than
-# per-endpoint is deliberate: a route added later inherits them automatically,
-# so the failure mode is a new endpoint that is accidentally protected rather
-# than one that is accidentally public.
 router = APIRouter(
     prefix="/api/kpi",
     tags=["kpi"],
-    dependencies=[Depends(get_current_user), Depends(read_rate_limit)],
+    dependencies=[Depends(read_rate_limit)],
 )
 
-
-@router.get("/summary")
-def kpi_summary(month: int = Query(..., ge=1, le=12), year: int = Query(...), db: Session = Depends(get_db)):
-    cache_key = f"kpi:summary:{year}:{month}"
-    cached = cache_service.get_cached(cache_key)
-    if cached is not None:
-        return cached
-    data = kpi_service.get_summary(db, month, year)
-    cache_service.set_cached(cache_key, data)
-    return data
-
-
-@router.get("/localities")
-def kpi_localities(
-    month: int = Query(..., ge=1, le=12),
-    year: int = Query(...),
-    limit: int = Query(10, ge=1, le=100),
-    db: Session = Depends(get_db),
-):
-    cache_key = f"kpi:localities:{year}:{month}:{limit}"
-    cached = cache_service.get_cached(cache_key)
-    if cached is not None:
-        return cached
-    data = kpi_service.get_localities(db, month, year, limit)
-    cache_service.set_cached(cache_key, data)
-    return data
-
-
-@router.get("/localities/map")
-def kpi_localities_map(month: int = Query(..., ge=1, le=12), year: int = Query(...), db: Session = Depends(get_db)):
-    cache_key = f"kpi:localities-map:{year}:{month}"
-    cached = cache_service.get_cached(cache_key)
-    if cached is not None:
-        return cached
-    data = kpi_service.get_localities_map(db, month, year)
-    cache_service.set_cached(cache_key, data)
-    return data
-
-
-@router.get("/nodes")
-def kpi_nodes(
-    month: int = Query(..., ge=1, le=12),
-    year: int = Query(...),
-    locality_id: Optional[int] = Query(None),
-    limit: int = Query(10, ge=1, le=100),
-    db: Session = Depends(get_db),
-):
-    cache_key = f"kpi:nodes:{year}:{month}:{locality_id}:{limit}"
-    cached = cache_service.get_cached(cache_key)
-    if cached is not None:
-        return cached
-    data = kpi_service.get_nodes(db, month, year, locality_id, limit)
-    cache_service.set_cached(cache_key, data)
-    return data
-
-
-@router.get("/recurrent")
-def kpi_recurrent(
-    month: int = Query(..., ge=1, le=12),
-    year: int = Query(...),
-    min_count: int = Query(3, ge=1),
-    db: Session = Depends(get_db),
-):
-    cache_key = f"kpi:recurrent:{year}:{month}:{min_count}"
-    cached = cache_service.get_cached(cache_key)
-    if cached is not None:
-        return cached
-    data = kpi_service.get_recurrent_nodes(db, month, year, min_count)
-    cache_service.set_cached(cache_key, data)
-    return data
-
-
-@router.get("/trend")
-def kpi_trend(
-    months: int = Query(6, ge=1, le=24),
-    year: Optional[int] = Query(None),
-    month: Optional[int] = Query(None),
-    db: Session = Depends(get_db),
-):
-    if year is None or month is None:
-        latest_month, latest_year = kpi_service.get_latest_data_month(db)
-        month = month or latest_month
-        year = year or latest_year
-
-    cache_key = f"kpi:trend:{year}:{month}:{months}"
-    cached = cache_service.get_cached(cache_key)
-    if cached is not None:
-        return cached
-    data = kpi_service.get_trend(db, month, year, months)
-    cache_service.set_cached(cache_key, data)
-    return data
-
-
-@router.get("/hour-distribution")
-def kpi_hour_distribution(
-    month: int = Query(..., ge=1, le=12), year: int = Query(...), db: Session = Depends(get_db)
-):
-    cache_key = f"kpi:hours:{year}:{month}"
-    cached = cache_service.get_cached(cache_key)
-    if cached is not None:
-        return cached
-    data = kpi_service.get_hour_distribution(db, month, year)
-    cache_service.set_cached(cache_key, data)
-    return data
-
-
-@router.get("/compare")
-def kpi_compare(
-    month: int = Query(..., ge=1, le=12),
-    year: int = Query(...),
-    db: Session = Depends(get_db),
-):
-    cache_key = f"kpi:compare:{year}:{month}"
-    cached = cache_service.get_cached(cache_key)
-    if cached is not None:
-        return cached
-    data = kpi_service.get_comparison(db, month, year)
-    cache_service.set_cached(cache_key, data)
-    return data
-
-
-@router.get("/causes")
-def kpi_causes(month: int = Query(..., ge=1, le=12), year: int = Query(...), db: Session = Depends(get_db)):
-    cache_key = f"kpi:causes:{year}:{month}"
-    cached = cache_service.get_cached(cache_key)
-    if cached is not None:
-        return cached
-    data = kpi_service.get_cause_breakdown(db, month, year)
-    cache_service.set_cached(cache_key, data)
-    return data
-
-
+# Router séparé : le frontend appelle /api/locality/{id}/nodes, hors du
+# préfixe /api/kpi (voir frontend/src/api/kpi.js::getLocalityNodes).
 locality_router = APIRouter(
     prefix="/api/locality",
     tags=["kpi"],
-    dependencies=[Depends(get_current_user), Depends(read_rate_limit)],
+    dependencies=[Depends(read_rate_limit)],
 )
 
 
-@locality_router.get("/{locality_id}/nodes")
-def locality_nodes(
-    locality_id: int,
-    month: int = Query(..., ge=1, le=12),
-    year: int = Query(...),
+def _now() -> tuple[int, int]:
+    now = datetime.now(UTC)
+    return now.month, now.year
+
+
+def _period(month: int | None, year: int | None) -> tuple[int, int]:
+    default_month, default_year = _now()
+    return month or default_month, year or default_year
+
+
+@router.get("/summary", response_model=KPISummaryResponse)
+def get_summary(
+    month: int | None = Query(None, ge=1, le=12),
+    year: int | None = Query(None, ge=2000, le=2100),
     db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
 ):
-    cache_key = f"kpi:locality-nodes:{locality_id}:{year}:{month}"
-    cached = cache_service.get_cached(cache_key)
-    if cached is not None:
-        return cached
-    data = kpi_service.get_locality_nodes(db, locality_id, month, year)
-    if data is None:
-        raise HTTPException(status_code=404, detail="Locality not found")
-    cache_service.set_cached(cache_key, data)
-    return data
+    m, y = _period(month, year)
+    return kpi_service.get_summary(db, m, y)
+
+
+@router.get("/localities", response_model=list[LocalityKPIOut])
+def get_localities(
+    month: int | None = Query(None, ge=1, le=12),
+    year: int | None = Query(None, ge=2000, le=2100),
+    limit: int = Query(10, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    m, y = _period(month, year)
+    return kpi_service.get_localities(db, m, y, limit)
+
+
+@router.get("/localities/map", response_model=list[LocalityMapOut])
+def get_localities_map(
+    month: int | None = Query(None, ge=1, le=12),
+    year: int | None = Query(None, ge=2000, le=2100),
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    m, y = _period(month, year)
+    return kpi_service.get_localities_map(db, m, y)
+
+
+@router.get("/nodes", response_model=list[NodeKPIOut])
+def get_nodes(
+    month: int | None = Query(None, ge=1, le=12),
+    year: int | None = Query(None, ge=2000, le=2100),
+    locality_id: int | None = None,
+    limit: int = Query(10, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    m, y = _period(month, year)
+    return kpi_service.get_nodes(db, m, y, locality_id, limit)
+
+
+@router.get("/recurrent", response_model=list[RecurrentNodeOut])
+def get_recurrent(
+    month: int | None = Query(None, ge=1, le=12),
+    year: int | None = Query(None, ge=2000, le=2100),
+    min_count: int = Query(3, ge=2, le=100),
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    m, y = _period(month, year)
+    return kpi_service.get_recurrent(db, m, y, min_count)
+
+
+@router.get("/trend", response_model=list[TrendPointOut])
+def get_trend(
+    month: int | None = Query(None, ge=1, le=12),
+    year: int | None = Query(None, ge=2000, le=2100),
+    months: int = Query(6, ge=2, le=24),
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    m, y = _period(month, year)
+    return kpi_service.get_trend(db, m, y, months)
+
+
+@router.get("/hour-distribution", response_model=list[HourDistributionOut])
+def get_hour_distribution(
+    month: int | None = Query(None, ge=1, le=12),
+    year: int | None = Query(None, ge=2000, le=2100),
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    m, y = _period(month, year)
+    return kpi_service.get_hour_distribution(db, m, y)
+
+
+@router.get("/causes", response_model=list[CauseOut])
+def get_causes(
+    month: int | None = Query(None, ge=1, le=12),
+    year: int | None = Query(None, ge=2000, le=2100),
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    m, y = _period(month, year)
+    return kpi_service.get_causes(db, m, y)
+
+
+@router.get("/compare")
+def get_compare(
+    month: int | None = Query(None, ge=1, le=12),
+    year: int | None = Query(None, ge=2000, le=2100),
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    m, y = _period(month, year)
+    return kpi_service.get_compare(db, m, y)
+
+
+@router.get("/ministries", response_model=list[MinistryKPIOut])
+def get_ministries(
+    month: int | None = Query(None, ge=1, le=12),
+    year: int | None = Query(None, ge=2000, le=2100),
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """Vue par ministère — dimension apportée par le nouvel ETL
+    (dim_ministry), absente de l'ancien schéma."""
+    m, y = _period(month, year)
+    return kpi_service.get_ministries(db, m, y)
+
+
+@locality_router.get("/{locality_id}/nodes", response_model=LocalityNodesResponse)
+def get_locality_nodes(
+    locality_id: int,
+    month: int | None = Query(None, ge=1, le=12),
+    year: int | None = Query(None, ge=2000, le=2100),
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    from fastapi import HTTPException
+
+    m, y = _period(month, year)
+    result = kpi_service.get_locality_nodes(db, locality_id, m, y)
+    if not result:
+        raise HTTPException(status_code=404, detail="Site introuvable.")
+    return result

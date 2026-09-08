@@ -1,11 +1,9 @@
-"""
-Redis pub/sub bridge between incident ingestion and the /ws/alerts WebSocket.
+"""Pont Redis pub/sub entre le veilleur d'incidents et /ws/alerts.
 
-The HTTP worker publishes each new incident on ALERT_CHANNEL; every open
-WebSocket connection (possibly on another uvicorn worker) is subscribed and
-forwards the message to its client.
+Le veilleur (watcher_service) publie sur ALERT_CHANNEL ; chaque
+connexion WebSocket ouverte, y compris sur un autre worker uvicorn, y est
+abonnée et relaie le message à son client.
 """
-
 import json
 import logging
 from typing import Any
@@ -20,5 +18,5 @@ ALERT_CHANNEL = "noc:alerts"
 def publish_alert(event: dict[str, Any]) -> None:
     try:
         redis_client.publish(ALERT_CHANNEL, json.dumps(event, default=str))
-    except Exception as exc:  # a broken broadcast must not break ingestion
-        logger.warning("Alert broadcast failed: %s", exc)
+    except Exception as exc:  # une diffusion cassée ne doit rien interrompre
+        logger.warning("Diffusion d'alerte échouée : %s", exc)

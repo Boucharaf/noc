@@ -1,33 +1,32 @@
-import { create } from "zustand";
 import axios from "axios";
+import { create } from "zustand";
+
 import { BASE_URL } from "../api/config";
 
-// Client HTTP délibérément séparé de api/client.js : la logique de refresh
-// vit ici (dans le store) pour être partagée par useSessionKeepAlive ET par
-// l'intercepteur 401 de client.js sans dépendance circulaire, et sans
-// repasser par les intercepteurs Bearer/refresh de apiClient.
+// Client HTTP séparé de api/client.js : la logique de refresh vit ici pour
+// être partagée par le keep-alive proactif ET par l'intercepteur 401
+// réactif, sans dépendance circulaire et sans repasser par les
+// intercepteurs qui ont justement besoin d'elle.
 const refreshHttp = axios.create({ baseURL: BASE_URL, withCredentials: true });
 
-// Dédoublonnage au niveau module : que le refresh soit déclenché par le
-// polling proactif (useSessionKeepAlive) ou par un 401 réactif (client.js),
-// les deux partagent le même appel en vol. Important si le refresh token
-// tourne (rotation à chaque usage) : deux appels /auth/refresh concurrents
-// invalideraient l'un des deux et provoqueraient un logout injustifié.
-let inFlightRefresh = null;
+// Dédoublonnage au niveau module : si le refresh token tourne à chaque
+// usage (rotation), deux appels concurrents à /auth/refresh en
+// invalideraient un — et déconnecteraient un utilisateur dont la session
+// est parfaitement valide.
+let inFlight = null;
 
 export const useAuthStore = create((set, get) => ({
-  // Le token d'accès ne vit plus qu'en mémoire — jamais en localStorage.
-  // Une fermeture d'onglet le fait disparaître ; c'est voulu. La session est
-  // restaurée au chargement via bootstrap(), qui s'appuie sur le refresh
-  // token en cookie httpOnly côté serveur (le navigateur l'envoie seul,
-  // JS n'y a jamais accès).
+  // Le jeton d'accès ne vit qu'en mémoire, jamais en localStorage : un XSS
+  // le lirait en une ligne. La session est restaurée au chargement via
+  // bootstrap(), qui s'appuie sur le refresh token en cookie httpOnly —
+  // le navigateur l'envoie seul, JavaScript n'y a jamais accès.
   token: null,
   user: null,
   expiresAt: null,
   logoutReason: null,
-  // Reste `false` tant qu'on n'a pas tenté la restauration de session au
-  // démarrage — permet à l'UI d'afficher un état de chargement plutôt que
-  // de flasher l'écran de login avant de savoir si un cookie valide existe.
+  // Reste `false` tant qu'on n'a pas tenté la restauration : permet
+  // d'afficher un écran d'attente plutôt que de faire clignoter la page
+  // de connexion avant de savoir si un cookie valide existe.
   bootstrapped: false,
 
   login: (token, user, expiresIn) =>
@@ -38,45 +37,53 @@ export const useAuthStore = create((set, get) => ({
       logoutReason: null,
     }),
 
+  setUser: (user) => set({ user }),
+
   logout: (reason = null) =>
     set({ token: null, user: null, expiresAt: null, logoutReason: reason }),
 
   clearLogoutReason: () => set({ logoutReason: null }),
 
-  // Tente un rafraîchissement de session. Retourne le nouveau token ou lève
-  // si le cookie de refresh est absent/expiré/révoqué. Dédoublonné : un
-  // appel déjà en vol est réutilisé plutôt que dupliqué.
-  refresh: () => {
-    if (!inFlightRefresh) {
-      inFlightRefresh = refreshHttp
+  /**
+   * `silent` distingue deux échecs que rien d'autre ne sépare :
+   *
+   * · une session EN COURS qui tombe (cookie expiré ou révoqué) : il faut
+   *   le dire, « Votre session a expiré » explique la déconnexion ;
+   * · la restauration au PREMIER chargement, quand il n'y a simplement
+   *   aucun cookie. Sans ce drapeau, tout nouveau visiteur découvre
+   *   l'écran de connexion avec un message d'expiration parlant d'une
+   *   session qui n'a jamais existé.
+   *
+   * Le motif est posé AVANT que la promesse ne soit rejetée, donc le
+   * corriger après coup ne suffit pas : l'écran de connexion l'a déjà lu.
+   */
+  refresh: (options = {}) => {
+    if (!inFlight) {
+      const silent = options.silent === true;
+      inFlight = refreshHttp
         .post("/auth/refresh")
         .then(({ data }) => {
           get().login(data.access_token, data.user, data.expires_in);
           return data.access_token;
         })
-        .catch((err) => {
-          // Échec définitif : cookie de refresh absent/expiré/révoqué.
-          // Centralisé ici pour que tout appelant (keep-alive proactif ou
-          // intercepteur 401 réactif) obtienne le même comportement sans le
-          // dupliquer chacun de son côté.
-          get().logout("expired");
-          throw err;
+        .catch((error) => {
+          get().logout(silent ? null : "expired");
+          throw error;
         })
         .finally(() => {
-          inFlightRefresh = null;
+          inFlight = null;
         });
     }
-    return inFlightRefresh;
+    return inFlight;
   },
 
-  // À appeler une fois au montage de l'app (voir hooks/useSessionBootstrap.js).
-  // Échec silencieux attendu et normal pour un visiteur non connecté — ce
-  // n'est pas une erreur à logger.
+  // Appelé une fois au montage. L'échec est le cas NORMAL d'un visiteur
+  // non connecté : ce n'est pas une erreur à journaliser.
   bootstrap: async () => {
     try {
-      await get().refresh();
+      await get().refresh({ silent: true });
     } catch {
-      // Pas de cookie valide : l'utilisateur n'est simplement pas connecté.
+      /* pas de cookie valide : le visiteur n'est simplement pas connecté */
     } finally {
       set({ bootstrapped: true });
     }

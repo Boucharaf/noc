@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC
 
 from app.db.redis_client import redis_client
 
@@ -24,9 +25,9 @@ PIN_LOCK_WINDOW_SECONDS = 15 * 60
 
 
 def _ttl_seconds(expire_at) -> int:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return max(1, int((expire_at - datetime.now(timezone.utc)).total_seconds()))
+    return max(1, int((expire_at - datetime.now(UTC)).total_seconds()))
 
 
 def store_refresh_session(user_id: int, jti: str, expire_at) -> None:

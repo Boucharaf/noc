@@ -1,120 +1,165 @@
-"""dim_maintenance_window : création manuelle (dashboard) et import
-automatique (ETL) — voir models/dimension.py::MaintenanceWindow pour la
-distinction des deux origines."""
+"""
+Fenêtres de maintenance planifiée (ops_maintenance_window).
 
-import logging
-from datetime import datetime, timedelta, timezone
+Deux origines possibles :
 
+* manuelle — créée depuis le dashboard, `created_by_user_id` renseigné ;
+* importée — poussée par l'ETL via POST /api/internal/maintenance-windows,
+  `source_tool` + `external_id` renseignés (mode maintenance Zabbix,
+  downtime Centreon, etc.).
+
+Toute fenêtre avec `suppress_alerts` neutralise les incidents qu'elle
+recouvre dans la vue `v_incident` (colonne `is_maintenance`), donc dans
+tous les KPI et le SLA.
+"""
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+from fastapi import HTTPException
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.models.dimension import MaintenanceWindow, Node
-from app.schemas.maintenance import MaintenanceWindowCreate, MaintenanceWindowImportPayload
-
-logger = logging.getLogger(__name__)
-
-# Certains outils (NetXMS, et Centreon pour la partie active_till — voir
-# extract/centreon.py) ne rapportent qu'un drapeau on/off, sans horaires. Une
-# fenêtre sans ends_at ne suffit à rien (elle ne suppprimerait jamais les
-# alertes) : on lui donne une durée par défaut, régulièrement reconduite tant
-# que le poll suivant la voit encore active (upsert sur external_id).
-_DEFAULT_WINDOW_DURATION = timedelta(hours=1)
+from app.models.operations import MaintenanceWindow, User
+from app.models.warehouse import Node
+from app.services import kpi_service
 
 
-def create_maintenance_window(
-    db: Session, payload: MaintenanceWindowCreate, created_by_user_id: int
-) -> MaintenanceWindow:
+def _serialize(db: Session, where: str, params: dict) -> list[dict]:
+    rows = db.execute(
+        text(
+            f"""
+            SELECT w.id, w.node_id, n.name AS node_name,
+                   w.locality_id, l.name AS locality_name,
+                   w.reason, w.starts_at, w.ends_at, w.suppress_alerts,
+                   w.created_by_user_id, u.full_name AS created_by_full_name,
+                   w.source_tool, w.external_id, w.created_at,
+                   (now() BETWEEN w.starts_at AND w.ends_at) AS is_active
+            FROM ops_maintenance_window w
+            LEFT JOIN dim_node     n ON n.id = w.node_id
+            LEFT JOIN dim_locality l ON l.id = w.locality_id
+            LEFT JOIN dim_user     u ON u.id = w.created_by_user_id
+            WHERE {where}
+            ORDER BY w.starts_at DESC
+            """
+        ),
+        params,
+    ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def list_windows(db: Session, only_active: bool = False, limit: int = 100) -> list[dict]:
+    where = "TRUE"
+    params: dict = {}
+    if only_active:
+        where = "now() BETWEEN w.starts_at AND w.ends_at"
+    windows = _serialize(db, where, params)
+    return windows[:limit]
+
+
+def create_window(
+    db: Session,
+    user: User,
+    *,
+    node_id: int | None,
+    locality_id: int | None,
+    reason: str,
+    starts_at: datetime,
+    ends_at: datetime,
+    suppress_alerts: bool = True,
+) -> dict:
+    if node_id is None and locality_id is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Préciser au moins un équipement ou un site.",
+        )
+    if ends_at <= starts_at:
+        raise HTTPException(status_code=422, detail="La fin doit être postérieure au début.")
+    if node_id is not None and db.get(Node, node_id) is None:
+        raise HTTPException(status_code=404, detail="Équipement introuvable.")
+
     window = MaintenanceWindow(
-        node_id=payload.node_id,
-        locality_id=payload.locality_id,
-        reason=payload.reason,
-        starts_at=payload.starts_at,
-        ends_at=payload.ends_at,
-        suppress_alerts=payload.suppress_alerts,
-        created_by_user_id=created_by_user_id,
+        node_id=node_id,
+        locality_id=locality_id,
+        reason=reason,
+        starts_at=starts_at,
+        ends_at=ends_at,
+        suppress_alerts=suppress_alerts,
+        created_by_user_id=user.id,
     )
     db.add(window)
     db.commit()
     db.refresh(window)
-    return window
+
+    # Une fenêtre nouvellement créée change rétroactivement les KPI :
+    # les incidents qu'elle recouvre en sortent.
+    kpi_service.invalidate_cache()
+    return _serialize(db, "w.id = :id", {"id": window.id})[0]
 
 
-def list_active_windows(db: Session) -> list[MaintenanceWindow]:
-    """Fenêtres dont la période couvre l'instant présent — manuelles et
-    importées confondues, triées par fin la plus proche d'abord (les plus
-    urgentes à surveiller/prolonger en premier)."""
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    return (
-        db.query(MaintenanceWindow)
-        .filter(MaintenanceWindow.starts_at <= now, MaintenanceWindow.ends_at >= now)
-        .order_by(MaintenanceWindow.ends_at.asc())
-        .all()
-    )
+def delete_window(db: Session, window_id: int) -> None:
+    window = db.get(MaintenanceWindow, window_id)
+    if window is None:
+        raise HTTPException(status_code=404, detail="Fenêtre introuvable.")
+    db.delete(window)
+    db.commit()
+    kpi_service.invalidate_cache()
 
 
-def ingest_maintenance_windows_bulk(
-    db: Session, payloads: list[MaintenanceWindowImportPayload]
-) -> dict[str, int]:
-    """Upsert sur (source_tool, external_id) — voir
-    normalize.to_maintenance_window_payload() côté ETL pour la construction
-    de cet external_id stable. Un import qui revoit la même fenêtre encore
-    active à chaque poll (5 min) met juste à jour ends_at au lieu de créer
-    une nouvelle ligne à chaque fois.
+def import_windows(db: Session, windows: list[dict]) -> dict:
+    """Import en masse depuis l'ETL.
+
+    Rapprochement de l'équipement par son nom : `dim_node` n'a pas de
+    colonne `code`, et `dim_node_source_map.external_ref` n'est pas
+    forcément l'identifiant que l'outil utilise pour ses maintenances.
+    Un nom introuvable n'est pas une erreur bloquante — il est compté et
+    renvoyé, pour qu'un import partiel reste exploitable.
     """
-    if not payloads:
-        return {"received": 0, "created": 0, "updated": 0, "unknown_node": 0}
+    created = updated = unknown = 0
 
-    node_ids = {
-        code: nid
-        for code, nid in db.query(Node.code, Node.id).filter(
-            Node.code.in_({p.node_code for p in payloads})
-        )
-    }
-
-    existing = {
-        (w.source_tool, w.external_id): w
-        for w in db.query(MaintenanceWindow).filter(
-            MaintenanceWindow.source_tool.in_({p.source_tool for p in payloads}),
-            MaintenanceWindow.external_id.in_({p.external_id for p in payloads}),
-        )
-    }
-
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    created = updated = unknown_node = 0
-    for p in payloads:
-        node_id = node_ids.get(p.node_code)
-        if node_id is None:
-            unknown_node += 1
+    for item in windows:
+        node = db.query(Node).filter(Node.name.ilike(item["node_code"])).first()
+        if node is None:
+            unknown += 1
             continue
 
-        starts_at = (
-            p.starts_at.astimezone(timezone.utc).replace(tzinfo=None) if p.starts_at and p.starts_at.tzinfo else (p.starts_at or now)
+        existing = (
+            db.query(MaintenanceWindow)
+            .filter(
+                MaintenanceWindow.source_tool == item["source_tool"],
+                MaintenanceWindow.external_id == item["external_id"],
+            )
+            .first()
         )
-        ends_at = (
-            p.ends_at.astimezone(timezone.utc).replace(tzinfo=None) if p.ends_at and p.ends_at.tzinfo else p.ends_at
-        )
-        if ends_at is None:
-            ends_at = now + _DEFAULT_WINDOW_DURATION
+        now = datetime.now(UTC)
+        starts_at = item.get("starts_at") or now
+        ends_at = item.get("ends_at") or now
 
-        key = (p.source_tool, p.external_id)
-        window = existing.get(key)
-        if window is None:
-            window = MaintenanceWindow(source_tool=p.source_tool, external_id=p.external_id)
-            db.add(window)
-            existing[key] = window
-            created += 1
-        else:
+        if existing:
+            existing.node_id = node.id
+            existing.reason = item["reason"]
+            existing.starts_at = starts_at
+            existing.ends_at = ends_at
             updated += 1
-
-        window.node_id = node_id
-        window.reason = p.reason
-        window.starts_at = starts_at
-        window.ends_at = ends_at
-        window.suppress_alerts = True
+        else:
+            db.add(
+                MaintenanceWindow(
+                    node_id=node.id,
+                    reason=item["reason"],
+                    starts_at=starts_at,
+                    ends_at=ends_at,
+                    suppress_alerts=True,
+                    source_tool=item["source_tool"],
+                    external_id=item["external_id"],
+                )
+            )
+            created += 1
 
     db.commit()
+    kpi_service.invalidate_cache()
     return {
-        "received": len(payloads),
+        "received": len(windows),
         "created": created,
         "updated": updated,
-        "unknown_node": unknown_node,
+        "unknown_node": unknown,
     }

@@ -1,110 +1,179 @@
 """
-Nouvelles tables métier qui n'existaient pas dans la v1 et qui deviennent
-nécessaires dès qu'on distingue 4 rôles avec des besoins réels différents :
+Modèles ORM des tables appartenant au backend.
 
-- FieldIntervention : le cœur du métier de l'Agent Terrain. Sans ça, son
-  rôle dans la base se limite à "peut se connecter" — aucune valeur.
-- EscalationRule : formalise ce qui aujourd'hui se passe "à la voix"
-  (un incident critique non traité en X minutes remonte au Chef NOC,
-  puis au Directeur). Rend l'escalade automatisable par Celery.
-- NotificationLog : trace ce qui a été envoyé à qui, sur quel canal —
-  utile pour debug push/SMS et pour prouver qu'une alerte a bien été
-  notifiée (audit SLA).
+`User` est un cas mixte : la table `dim_user` est créée par l'ETL
+(etl/sql/schema_dimensions.sql) mais n'est peuplée que par le backend.
+Les colonnes ajoutées par sql/01_backend_extensions.sql (pin_hash, scope
+géographique, contact) sont déclarées ici et sont toutes nullables — un
+ETL qui insérerait un utilisateur sans elles resterait valide.
+
+Toutes les autres tables sont préfixées `ops_` : elles n'existent que
+pour le backend, l'ETL n'en connaît aucune.
 """
-
 from sqlalchemy import (
-    BigInteger,
+    Boolean,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
-    Numeric,
-    String,
     Text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
 from app.db.session import Base
 
 
-class FieldIntervention(Base):
-    __tablename__ = "fact_field_intervention"
-
-    id = Column(BigInteger, primary_key=True)
-    incident_id = Column(BigInteger, ForeignKey("fact_incident.id"))  # nullable: tournée de routine
-    node_id = Column(Integer, ForeignKey("dim_node.id"), nullable=False)
-    agent_user_id = Column(Integer, ForeignKey("dim_user.id"), nullable=False)
-
-    status = Column(String(20), nullable=False, default="scheduled")  # scheduled|en_route|on_site|done|cancelled
-    scheduled_at = Column(DateTime)
-    started_at = Column(DateTime)
-    completed_at = Column(DateTime)
-
-    # géolocalisation du check-in, pour confirmer une présence réelle sur site
-    checkin_latitude = Column(Numeric(9, 6))
-    checkin_longitude = Column(Numeric(9, 6))
-
-    report_text = Column(Text)
-    photo_urls = Column(Text)  # JSON-encodé, liste d'URLs (S3/local storage)
-
-    created_at = Column(DateTime, server_default=func.now())
-
-    incident = relationship("Incident")
-    node = relationship("Node")
-    agent = relationship("User")
-
-
-class EscalationRule(Base):
-    """Règle déclenchée par le scheduler Celery existant : si un incident
-    de sévérité X n'est pas acquitté/résolu après N minutes, il est
-    escaladé automatiquement (incident.escalation_level += 1,
-    notification au rôle cible, ligne dans fact_incident_timeline).
-    """
-
-    __tablename__ = "dim_escalation_rule"
+class User(Base):
+    __tablename__ = "dim_user"
 
     id = Column(Integer, primary_key=True)
-    severity = Column(String(20), nullable=False)
-    trigger_after_minutes = Column(Integer, nullable=False)
-    from_escalation_level = Column(Integer, nullable=False)  # niveau actuel
-    escalate_to_role = Column(String(20), nullable=False)  # chef_noc|directeur
-    is_active = Column(Integer, default=1)
+    username = Column(Text, unique=True, nullable=False)
+    full_name = Column(Text)
+    role = Column(Text, nullable=False, default="agent_terrain")
+    password_hash = Column(Text)
+    is_active = Column(Boolean, nullable=False, default=True)
+    last_login_at = Column(DateTime(timezone=True))
+
+    # --- colonnes ajoutées par sql/01_backend_extensions.sql ---
+    pin_hash = Column(Text)
+    region_id = Column(Integer, ForeignKey("dim_region.id"))
+    locality_id = Column(Integer, ForeignKey("dim_locality.id"))
+    ministry_id = Column(Integer, ForeignKey("dim_ministry.id"))
+    phone_number = Column(Text)
+    employee_code = Column(Text)
+    team = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class IncidentTimeline(Base):
+    __tablename__ = "ops_incident_timeline"
+
+    id = Column(Integer, primary_key=True)
+    incident_id = Column(Integer, ForeignKey("fact_incident.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("dim_user.id"))
+    action = Column(Text, nullable=False)
+    note = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    user = relationship("User")
+
+
+class IncidentAssignment(Base):
+    """Assignation et escalade, hors de fact_incident.
+
+    Volontairement dans une table à part : fact_incident est réécrite en
+    UPSERT à chaque cycle de collecte par etl/load/load_facts.py. Une
+    colonne `assigned_to_user_id` posée sur fact_incident survivrait
+    jusqu'au prochain passage de l'ETL, puis serait silencieusement
+    perdue. Ici, l'ETL ne touche à rien.
+    """
+
+    __tablename__ = "ops_incident_assignment"
+
+    incident_id = Column(Integer, ForeignKey("fact_incident.id"), primary_key=True)
+    assigned_to_user_id = Column(Integer, ForeignKey("dim_user.id"))
+    escalation_level = Column(Integer, nullable=False, default=0)
+    escalated_at = Column(DateTime(timezone=True))
+    escalated_to_user_id = Column(Integer, ForeignKey("dim_user.id"))
+    impact_scope = Column(Integer, nullable=False, default=1)
+    incident_type = Column(Text)
+    reopened_count = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    assigned_to = relationship("User", foreign_keys=[assigned_to_user_id])
+    escalated_to = relationship("User", foreign_keys=[escalated_to_user_id])
+
+
+class SlaTarget(Base):
+    __tablename__ = "ops_sla_target"
+
+    id = Column(Integer, primary_key=True)
+    severity = Column(Text, unique=True, nullable=False)
+    ttr_target_minutes = Column(Integer, nullable=False)
+    tta_target_minutes = Column(Integer, nullable=False)
+    availability_target_pct = Column(Float, nullable=False, default=99.0)
+
+
+class MaintenanceWindow(Base):
+    __tablename__ = "ops_maintenance_window"
+
+    id = Column(Integer, primary_key=True)
+    node_id = Column(Integer, ForeignKey("dim_node.id"))
+    locality_id = Column(Integer, ForeignKey("dim_locality.id"))
+    reason = Column(Text, nullable=False)
+    starts_at = Column(DateTime(timezone=True), nullable=False)
+    ends_at = Column(DateTime(timezone=True), nullable=False)
+    suppress_alerts = Column(Boolean, nullable=False, default=True)
+    created_by_user_id = Column(Integer, ForeignKey("dim_user.id"))
+    source_tool = Column(Text)
+    external_id = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class FieldIntervention(Base):
+    __tablename__ = "ops_field_intervention"
+
+    id = Column(Integer, primary_key=True)
+    incident_id = Column(Integer, ForeignKey("fact_incident.id"))
+    node_id = Column(Integer, ForeignKey("dim_node.id"), nullable=False)
+    agent_user_id = Column(Integer, ForeignKey("dim_user.id"), nullable=False)
+    status = Column(Text, nullable=False, default="scheduled")
+    scheduled_at = Column(DateTime(timezone=True))
+    started_at = Column(DateTime(timezone=True))
+    completed_at = Column(DateTime(timezone=True))
+    checkin_latitude = Column(Float)
+    checkin_longitude = Column(Float)
+    report_text = Column(Text)
+    photo_urls = Column(JSONB, nullable=False, default=list)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class PushSubscription(Base):
+    __tablename__ = "ops_push_subscription"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("dim_user.id"), nullable=False)
+    endpoint = Column(Text, unique=True, nullable=False)
+    p256dh = Column(Text, nullable=False)
+    auth = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class NotificationLog(Base):
-    __tablename__ = "fact_notification_log"
-
-    id = Column(BigInteger, primary_key=True)
-    user_id = Column(Integer, ForeignKey("dim_user.id"), nullable=False)
-    incident_id = Column(BigInteger, ForeignKey("fact_incident.id"))
-    channel = Column(String(20), nullable=False)  # push|sms|email
-    status = Column(String(20), nullable=False, default="sent")  # sent|failed|read
-    sent_at = Column(DateTime, server_default=func.now())
-
-    user = relationship("User")
-    incident = relationship("Incident")
-
-
-class AuditLog(Base):
-    """Journal transverse (au-delà des incidents) : connexions, création/
-    modification d'un nœud, changement de rôle, export de rapport... Requis
-    dès qu'un Directeur ou un client externe peut demander "qui a fait quoi".
-
-    (Anciennement dans un fichier "user rbac.py" mal nommé — espace dans le
-    nom de fichier, donc jamais importable par `import` standard : la classe
-    n'était enregistrée nulle part et la table n'existait dans aucun schéma
-    SQL. Déplacée ici, aux côtés des autres tables opérationnelles v2.)
-    """
-
-    __tablename__ = "audit_log"
+    __tablename__ = "ops_notification_log"
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("dim_user.id"))
-    action = Column(String(50), nullable=False)  # login|node_updated|report_exported...
-    entity_type = Column(String(50))  # node|incident|user|maintenance_window...
-    entity_id = Column(String(50))
-    ip_address = Column(String(50))
-    created_at = Column(DateTime, server_default=func.now())
+    incident_id = Column(Integer, ForeignKey("fact_incident.id"))
+    channel = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, default="sent")
+    detail = Column(Text)
+    sent_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    user = relationship("User")
+
+class AuditLog(Base):
+    __tablename__ = "ops_audit_log"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("dim_user.id"))
+    action = Column(Text, nullable=False)
+    entity_type = Column(Text)
+    entity_id = Column(Text)
+    ip_address = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class IncidentNotified(Base):
+    """Marqueur « incident déjà notifié », utilisé par le veilleur.
+
+    Sans lui, chaque passage du veilleur re-notifierait tous les incidents
+    critiques encore ouverts.
+    """
+
+    __tablename__ = "ops_incident_notified"
+
+    incident_id = Column(Integer, ForeignKey("fact_incident.id"), primary_key=True)
+    notified_at = Column(DateTime(timezone=True), server_default=func.now())

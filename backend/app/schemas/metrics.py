@@ -1,53 +1,72 @@
+"""
+Schémas des métriques.
+
+Il n'y a PLUS de schéma d'ingestion : le nouvel ETL écrit directement
+dans la hypertable `metric_value`, le backend ne fait que lire.
+`METRIC_TYPE_PATTERN` reprend exactement la liste de
+etl/transform/normalize_metrics.py.
+"""
+from __future__ import annotations
+
 from datetime import datetime
-from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-
-class MetricIngestPayload(BaseModel):
-    node_code: str
-    source_tool: str = Field(..., pattern="^(zabbix|nagios|centreon|netxms|nsp|itop)$")
-    metric_type: str = Field(
-        ...,
-        pattern="^(cpu_pct|ram_pct|bandwidth_in_bps|bandwidth_out_bps|"
-        "latency_ms|packet_loss_pct|availability)$",
-    )
-    value: float
-    unit: Optional[str] = None
-    collected_at: datetime
-
-
-class MetricBulkIngestPayload(BaseModel):
-    # Un pass complet couvre potentiellement tout le parc (~1500+ nœuds) sur
-    # plusieurs métriques chacun — même ordre de grandeur que le bulk incidents.
-    metrics: list[MetricIngestPayload] = Field(..., max_length=20000)
-
-
-class MetricBulkIngestResponse(BaseModel):
-    received: int
-    created: int
-    duplicates: int
-    unknown_node: int
+METRIC_TYPE_PATTERN = (
+    "^(latency_ms|packet_loss_pct|bandwidth_in_mbps|bandwidth_out_mbps|"
+    "cpu_pct|ram_pct|availability_pct)$"
+)
 
 
 class NetworkKpiOut(BaseModel):
-    """KPI réseau agrégés sur une période : disponibilité, perte de paquets,
-    latence moyenne, utilisation de bande passante — calculés depuis
-    fact_metric, absents tant que cette table n'existait pas."""
-
-    availability_pct: Optional[float] = None
-    packet_loss_pct: Optional[float] = None
-    avg_latency_ms: Optional[float] = None
-    avg_bandwidth_utilization_pct: Optional[float] = None
-    nodes_down: int
+    window_hours: int
+    availability_pct: float | None = None
+    packet_loss_pct: float | None = None
+    avg_latency_ms: float | None = None
+    avg_cpu_pct: float | None = None
+    avg_ram_pct: float | None = None
+    avg_bandwidth_in_mbps: float | None = None
+    avg_bandwidth_out_mbps: float | None = None
     nodes_reporting: int
+    nodes_down: int
+    metric_types_available: list[str] = []
 
 
 class NodeDownOut(BaseModel):
     node_id: int
     node_code: str
     node_name: str
-    locality_id: int
+    locality_id: int | None = None
     locality: str
     source_tool: str
-    since: Optional[datetime] = None
+    since: datetime | None = None
+
+
+class MetricPointOut(BaseModel):
+    time: datetime
+    value: float | None = None
+    min: float | None = None
+    max: float | None = None
+
+
+class NetworkSeriesPointOut(MetricPointOut):
+    """Point d'une courbe agrégée sur plusieurs équipements.
+
+    `nb_nodes` n'est pas décoratif : une moyenne calculée sur 3 nœuds au
+    lieu de 300 ne veut pas dire la même chose, et c'est le seul moyen de
+    voir qu'un connecteur a cessé de remonter au milieu de la fenêtre.
+    """
+
+    nb_nodes: int = 0
+
+
+class TopNodeMetricOut(BaseModel):
+    node_id: int
+    node_code: str
+    node_name: str
+    locality: str
+    locality_id: int | None = None
+    metric_type: str
+    avg_value: float
+    max_value: float
+    nb_points: int

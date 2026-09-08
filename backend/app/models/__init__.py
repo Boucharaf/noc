@@ -1,43 +1,40 @@
-from app.models.asset import Asset
-from app.models.dimension import (
-    Cause,
-    Locality,
-    MaintenanceWindow,
-    Node,
-    NodeMonitoringSource,
-    Organisation,
-    Province,
-    Region,
-)
-from app.models.incident import Incident
-from app.models.kpi import KpiNodeMonthly
-from app.models.metric import Metric
+"""Modèles ORM.
+
+Séparés en deux fichiers selon qui écrit la table :
+  * warehouse.py  — tables créées ET peuplées par l'ETL (lecture seule ici)
+  * operations.py — dim_user + tables `ops_*`, propres au backend
+"""
 from app.models.operations import (
     AuditLog,
-    EscalationRule,
     FieldIntervention,
+    IncidentAssignment,
+    IncidentNotified,
+    IncidentTimeline,
+    MaintenanceWindow,
     NotificationLog,
+    PushSubscription,
+    SlaTarget,
+    User,
 )
-from app.models.push_subscription import PushSubscription
-from app.models.user import User
+from app.models.warehouse import (
+    Cause,
+    Incident,
+    Link,
+    Locality,
+    MetricValue,
+    Ministry,
+    Node,
+    NodeSourceMap,
+    Region,
+    SupervisionCoverageDaily,
+)
 
 __all__ = [
-    "Region",
-    "Province",
-    "Organisation",
-    "Locality",
-    "Node",
-    "NodeMonitoringSource",
-    "MaintenanceWindow",
-    "Cause",
-    "Incident",
-    "Metric",
-    "Asset",
-    "KpiNodeMonthly",
-    "User",
-    "PushSubscription",
-    "FieldIntervention",
-    "EscalationRule",
-    "NotificationLog",
-    "AuditLog",
+    # Entrepôt (ETL)
+    "Ministry", "Region", "Locality", "Node", "Link", "NodeSourceMap",
+    "Cause", "Incident", "SupervisionCoverageDaily", "MetricValue",
+    # Backend
+    "User", "IncidentTimeline", "IncidentAssignment", "SlaTarget",
+    "MaintenanceWindow", "FieldIntervention", "PushSubscription",
+    "NotificationLog", "AuditLog", "IncidentNotified",
 ]

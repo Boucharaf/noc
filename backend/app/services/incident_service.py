@@ -1,407 +1,106 @@
-from datetime import datetime, timedelta, timezone
+"""
+Incidents : consultation et actions humaines.
+
+CHANGEMENT MAJEUR par rapport à l'ancien backend : il n'y a plus
+d'ingestion HTTP. L'ancien `/api/incidents/ingest` supposait que l'ETL
+poussait chaque incident vers le backend ; le nouvel ETL écrit
+directement dans `fact_incident` (etl/load/load_facts.py). Conserver un
+endpoint d'ingestion créerait deux chemins d'écriture concurrents sur la
+même table, avec deux conventions d'`external_id` différentes et donc des
+doublons.
+
+Le backend est donc LECTEUR de fact_incident, avec deux exceptions
+assumées et sans risque de collision avec l'ETL :
+
+* les incidents manuels, écrits avec `source_tool='manual'` — une valeur
+  qu'aucun connecteur ETL ne produit, donc la contrainte
+  UNIQUE (source_tool, external_id) les isole complètement ;
+* l'acquittement et la résolution depuis le dashboard, qui posent
+  `acknowledged_at` / `resolved_at` / `status`. L'UPSERT de l'ETL les
+  préserve : il applique COALESCE sur ces colonnes plutôt que de les
+  écraser (voir etl/load/load_facts.py::load_incidents). C'est la raison
+  pour laquelle ces deux actions sont sûres, et pourquoi l'assignation,
+  elle, vit dans une table à part (ops_incident_assignment).
+"""
+from __future__ import annotations
+
+import logging
+from datetime import UTC, datetime
 
 from fastapi import HTTPException
-from sqlalchemy import Integer, func, select, text, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.core.constants import SYNC_MV_REFRESH
-from app.models.dimension import Cause, Node, NodeMonitoringSource
-from app.models.incident import Incident
-from app.schemas.incidents import IncidentIngestPayload
+from app.models.operations import IncidentAssignment, IncidentTimeline, User
+from app.models.warehouse import Incident, Node
+from app.services import cache_service, kpi_service
+from app.services.alert_broadcaster import publish_alert
 
-# Fenêtre à l'intérieur de laquelle deux événements sur le même nœud, en
-# provenance de deux outils différents, sont considérés comme le même
-# incident réel plutôt que deux incidents indépendants. C'est le problème de
-# doublons d'équipements évoqué dès le départ : Zabbix et NetXMS qui
-# surveillent le même routeur lèvent chacun leur propre alerte à quelques
-# secondes d'écart. 10 minutes est un compromis — assez large pour absorber
-# le décalage entre deux polls à 5 minutes d'intervalle, assez court pour ne
-# pas rattacher deux pannes réellement distinctes survenues à des heures
-# différentes sur le même nœud.
-CORRELATION_WINDOW = timedelta(minutes=10)
+logger = logging.getLogger(__name__)
 
+MANUAL_SOURCE_TOOL = "manual"
 
-def _to_naive_utc(dt: datetime | None) -> datetime | None:
-    """fact_incident columns are TIMESTAMP WITHOUT TIME ZONE; normalize any
-    tz-aware input (e.g. webhook payloads ending in "Z") to naive UTC so
-    arithmetic against other naive columns doesn't raise."""
-    if dt is None:
-        return None
-    if dt.tzinfo is not None:
-        return dt.astimezone(timezone.utc).replace(tzinfo=None)
-    return dt
+_SELECT_COLUMNS = """
+    i.id, i.source_tool, i.external_id, i.node_id, i.node_code, i.node_name,
+    i.locality_id, i.locality, i.region, i.ministry,
+    i.severity, i.status, i.description,
+    i.cause_category, i.cause_label,
+    i.detected_at, i.acknowledged_at, i.resolved_at,
+    i.mtta_minutes, i.mttr_minutes, i.downtime_minutes,
+    i.itop_ticket_ref, i.is_maintenance,
+    a.assigned_to_user_id, u.full_name AS assigned_to_full_name,
+    COALESCE(a.escalation_level, 0) AS escalation_level,
+    COALESCE(a.impact_scope, 1)     AS impact_scope,
+    a.incident_type,
+    COALESCE(a.reopened_count, 0)   AS reopened_count,
+    EXTRACT(EPOCH FROM (now() - i.detected_at)) / 60 AS age_minutes
+"""
 
-
-def get_node_by_code(db: Session, node_code: str) -> Node:
-    node = db.query(Node).filter(Node.code == node_code).first()
-    if node is None:
-        raise HTTPException(status_code=404, detail=f"Unknown node_code '{node_code}'")
-    return node
+_FROM = """
+    FROM v_incident i
+    LEFT JOIN ops_incident_assignment a ON a.incident_id = i.id
+    LEFT JOIN dim_user u ON u.id = a.assigned_to_user_id
+"""
 
 
-def get_or_create_cause(
-    db: Session, category: str | None, label: str | None
-) -> Cause | None:
-    if not category or not label:
-        return None
-    cause = (
-        db.query(Cause).filter(Cause.category == category, Cause.label == label).first()
-    )
-    if cause is None:
-        cause = Cause(category=category, label=label)
-        db.add(cause)
-        db.flush()
-    return cause
-
-
-def refresh_kpi_view(db: Session) -> None:
-    # The spec's nightly 02:00 refresh runs in the ETL beat container
-    # (etl.refresh_kpi_view); this synchronous refresh-on-write keeps small demo
-    # datasets interactive and is disabled in production via SYNC_MV_REFRESH=false.
-    if not SYNC_MV_REFRESH:
-        return
-    db.execute(text("REFRESH MATERIALIZED VIEW mv_kpi_node_monthly"))
-    db.commit()
-
-
-def find_open_duplicate(
-    db: Session, external_id: str | None, source_tool: str
-) -> Incident | None:
-    """An unresolved incident already ingested for this exact alert.
-
-    Real collectors re-report a still-active problem on every poll (Nagios
-    host status, NetXMS alarms…) with a stable external_id — matching it here
-    makes ingestion idempotent. A resolved/closed incident does NOT match: the
-    same alert firing again after recovery is a genuinely new incident.
-    """
-    if not external_id:
-        return None
-    return (
-        db.query(Incident)
-        .filter(
-            Incident.external_id == external_id,
-            Incident.source_tool == source_tool,
-            Incident.status.in_(("open", "acknowledged")),
-        )
-        .first()
-    )
-
-
-def _remember_monitoring_source(
-    db: Session, node_id: int, source_tool: str, external_id: str | None
-) -> None:
-    """Record that `node_id` is also seen by `source_tool` under
-    `external_id`, in dim_node_monitoring_source.
-
-    This table existed in the schema before this change but nothing wrote to
-    it — see the audit that led to this fix. Populating it here, on every
-    ingestion, costs nothing extra to call (node_code, source_tool and
-    external_id are already known at this point) and is what lets
-    find_correlated_incident() below recognize "this external_id belongs to
-    a node already monitored by another tool" without needing a separate
-    reconciliation job. `manual` incidents and events without an external_id
-    are not monitoring sources and are skipped.
-    """
-    if not external_id or source_tool == "manual":
-        return
-    stmt = (
-        pg_insert(NodeMonitoringSource)
-        .values(node_id=node_id, tool=source_tool, external_id=external_id)
-        .on_conflict_do_nothing(index_elements=["tool", "external_id"])
-    )
-    db.execute(stmt)
-
-
-def find_correlated_incident(
-    db: Session, node_id: int, source_tool: str, detected_at: datetime
-) -> Incident | None:
-    """An already-open incident on the *same node*, from a *different tool*,
-    detected within CORRELATION_WINDOW of this new event.
-
-    This is the cross-tool duplicate-equipment problem: two monitoring tools
-    covering the same physical device each raise their own alert for the same
-    real-world failure. find_open_duplicate() above only catches a tool
-    re-reporting its *own* alert; it does nothing when Zabbix and NetXMS both
-    report the same outage under their own, unrelated external_ids. When
-    found, the caller links the new row to this one via parent_incident_id
-    instead of treating it as an independent root cause — see
-    fact_incident.parent_incident_id (already in the schema, previously only
-    used for a WAN outage fanning out into per-service alerts, which is the
-    same "child of a root" shape).
-    """
-    naive_detected = _to_naive_utc(detected_at)
-    window_start = naive_detected - CORRELATION_WINDOW
-    window_end = naive_detected + CORRELATION_WINDOW
-    return (
-        db.query(Incident)
-        .filter(
-            Incident.node_id == node_id,
-            Incident.source_tool != source_tool,
-            Incident.status.in_(("open", "acknowledged")),
-            Incident.parent_incident_id.is_(None),  # rattacher à la racine, pas à un enfant
-            Incident.detected_at.between(window_start, window_end),
-        )
-        .order_by(Incident.detected_at.asc())
-        .first()
-    )
-
-
-def ingest_incident(
-    db: Session, payload: IncidentIngestPayload
-) -> tuple[Incident, Node, bool]:
-    """Returns (incident, node, created) — created is False when the payload
-    matched an already-open incident and no new row was written.
-
-    The node is returned alongside the incident (rather than making the route
-    call get_node_by_code again) so callers building a broadcast/notification
-    payload don't pay for the same lookup twice on every single ingestion."""
-    node = get_node_by_code(db, payload.node_code)
-
-    duplicate = find_open_duplicate(db, payload.external_id, payload.source_tool)
-    if duplicate is not None:
-        return duplicate, node, False
-
-    cause = get_or_create_cause(db, payload.cause_category, payload.cause_label)
-    correlated = find_correlated_incident(
-        db, node.id, payload.source_tool, payload.detected_at
-    )
-
-    incident = Incident(
-        node_id=node.id,
-        cause_id=cause.id if cause else None,
-        external_id=payload.external_id,
-        source_tool=payload.source_tool,
-        severity=payload.severity,
-        status=payload.status,
-        detected_at=_to_naive_utc(payload.detected_at),
-        description=payload.description,
-        itop_ticket_id=payload.itop_ticket_id,
-        parent_incident_id=correlated.id if correlated else None,
-    )
-    db.add(incident)
-    _remember_monitoring_source(db, node.id, payload.source_tool, payload.external_id)
-    db.commit()
-    db.refresh(incident)
-
-    refresh_kpi_view(db)
-    return incident, node, True
-
-
-def reconcile_open_incidents(
-    db: Session, source_tool: str, active_external_ids: set[str]
-) -> int:
-    """Resolve incidents whose alert has disappeared from the tool's active set.
-
-    Batch collectors report what is wrong *right now*; an alert that clears
-    simply stops being listed, and nothing else ever tells us it ended. Without
-    this, incidents only accumulate: MTTR and resolution rate stay at zero
-    forever, and every availability figure is computed against outages that the
-    network recovered from months ago.
-
-    The active set is only trusted when it is non-empty. An empty one is
-    indistinguishable from a collector that authenticated but returned nothing,
-    and treating that as "the whole network recovered" would resolve every open
-    incident for the tool at once — losing the real start times, since the next
-    poll re-creates them as new incidents detected now. A genuine all-clear is
-    picked up by the next pass that carries at least one alert.
-
-    Incidents with no external_id are left alone: they cannot be matched
-    against the active set, so their absence from it means nothing.
-    """
-    if not active_external_ids:
-        return 0
-
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    result = db.execute(
-        update(Incident)
-        .where(
-            Incident.source_tool == source_tool,
-            Incident.status.in_(("open", "acknowledged")),
-            Incident.external_id.isnot(None),
-            Incident.external_id.notin_(active_external_ids),
-        )
-        .values(
-            status="resolved",
-            resolved_at=now,
-            # Never acknowledged by a human, but leaving it null would make the
-            # incident look unhandled forever in the alert views.
-            acknowledged_at=func.coalesce(Incident.acknowledged_at, now),
-            downtime_minutes=func.greatest(
-                func.floor(
-                    func.extract("epoch", now - Incident.detected_at) / 60
-                ).cast(Integer),
-                0,
-            ),
-        )
-        .execution_options(synchronize_session=False)
-    )
-    return result.rowcount or 0
-
-
-def ingest_incidents_bulk(
-    db: Session, payloads: list[IncidentIngestPayload]
-) -> dict[str, int]:
-    """Ingest a whole poll's worth of alerts in one transaction.
-
-    Same semantics as ingest_incident — dedupe on (source_tool, external_id)
-    against still-open incidents, create a cause when both parts are given —
-    but nothing per-item: one lookup per *set* of node codes, external ids and
-    causes, one commit, one materialized-view refresh at the end. Ingesting
-    NetXMS's ~1500 active alarms through ingest_incident means 1500 commits and
-    1500 REFRESH MATERIALIZED VIEW, which is what makes the one-by-one path
-    unusable at that size rather than merely slow.
-
-    Deliberately silent: no broadcast, no SMS, no email. This is the path for a
-    batch poller reconciling its whole active set, where the interesting event
-    is "here is everything that is wrong right now", not 1500 separate pieces of
-    news — notifying on each would page the permanence a thousand times for a
-    backlog it already knows about. Genuinely new incidents still arrive
-    through POST /ingest and still notify.
-
-    Unknown node codes are counted and skipped, not raised: one host missing
-    from the CMDB must not throw away the other 1499.
-    """
-    if not payloads:
-        return {
-            "received": 0,
-            "created": 0,
-            "duplicates": 0,
-            "unknown_node": 0,
-            "resolved": 0,
-        }
-
-    node_ids = {
-        code: nid
-        for code, nid in db.query(Node.code, Node.id).filter(
-            Node.code.in_({p.node_code for p in payloads})
-        )
-    }
-
-    external_ids = {p.external_id for p in payloads if p.external_id}
-    open_keys = set()
-    if external_ids:
-        open_keys = {
-            (source_tool, external_id)
-            for external_id, source_tool in db.query(
-                Incident.external_id, Incident.source_tool
-            ).filter(
-                Incident.external_id.in_(external_ids),
-                Incident.status.in_(("open", "acknowledged")),
-            )
-        }
-
-    created = duplicates = unknown_node = 0
-    for payload in payloads:
-        node_id = node_ids.get(payload.node_code)
-        if node_id is None:
-            unknown_node += 1
-            continue
-        key = (payload.source_tool, payload.external_id)
-        # Checked against open_keys rather than the database so that duplicates
-        # *within the batch* collapse too — a poll can legitimately carry the
-        # same external_id twice.
-        if payload.external_id and key in open_keys:
-            duplicates += 1
-            continue
-
-        cause = get_or_create_cause(db, payload.cause_category, payload.cause_label)
-        correlated = find_correlated_incident(
-            db, node_id, payload.source_tool, payload.detected_at
-        )
-        incident = Incident(
-            node_id=node_id,
-            cause_id=cause.id if cause else None,
-            external_id=payload.external_id,
-            source_tool=payload.source_tool,
-            severity=payload.severity,
-            status=payload.status,
-            detected_at=_to_naive_utc(payload.detected_at),
-            description=payload.description,
-            itop_ticket_id=payload.itop_ticket_id,
-            parent_incident_id=correlated.id if correlated else None,
-        )
-        db.add(incident)
-        _remember_monitoring_source(db, node_id, payload.source_tool, payload.external_id)
-        # Flushed (not committed) so a later payload *in this same batch*, on
-        # the same node from a different tool, can still be correlated
-        # against this one via find_correlated_incident()'s db.query() above
-        # — the session is created with autoflush=False (see db/session.py),
-        # so without this an incident added earlier in this loop stays
-        # invisible to that query until the transaction commits.
-        db.flush()
-        if payload.external_id:
-            open_keys.add(key)
-        created += 1
-
-    # Reconcile within the same transaction as the inserts, so the batch is
-    # applied as one consistent "this is the state now" snapshot per tool.
-    resolved = 0
-    for source_tool in {p.source_tool for p in payloads}:
-        resolved += reconcile_open_incidents(
-            db,
-            source_tool,
-            {p.external_id for p in payloads if p.source_tool == source_tool and p.external_id},
-        )
-
-    db.commit()
-    if created or resolved:
-        refresh_kpi_view(db)
-
+def _row_to_dict(row) -> dict:
     return {
-        "received": len(payloads),
-        "created": created,
-        "duplicates": duplicates,
-        "unknown_node": unknown_node,
-        "resolved": resolved,
+        "id": row["id"],
+        "source_tool": row["source_tool"],
+        "external_id": row["external_id"],
+        "node_id": row["node_id"],
+        "node_code": row["node_code"] or "—",
+        "node_name": row["node_name"] or "—",
+        "locality_id": row["locality_id"],
+        "locality": row["locality"] or "—",
+        "region": row["region"],
+        "ministry": row["ministry"],
+        "severity": row["severity"],
+        "status": row["status"],
+        "description": row["description"],
+        "cause_category": row["cause_category"],
+        "cause_label": row["cause_label"],
+        "detected_at": row["detected_at"],
+        "acknowledged_at": row["acknowledged_at"],
+        "resolved_at": row["resolved_at"],
+        "mtta_minutes": row["mtta_minutes"],
+        "mttr_minutes": row["mttr_minutes"],
+        "downtime_minutes": row["downtime_minutes"],
+        "itop_ticket_ref": row["itop_ticket_ref"],
+        "is_maintenance": bool(row["is_maintenance"]),
+        "assigned_to_user_id": row["assigned_to_user_id"],
+        "assigned_to_full_name": row["assigned_to_full_name"],
+        "escalation_level": int(row["escalation_level"]),
+        "impact_scope": int(row["impact_scope"]),
+        "incident_type": row["incident_type"],
+        "reopened_count": int(row["reopened_count"]),
+        "age_minutes": int(row["age_minutes"]) if row["age_minutes"] is not None else None,
     }
 
 
-def resolve_incident(
-    db: Session, incident_id: int, resolved_at: datetime | None, notes: str | None
-) -> Incident:
-    incident = db.get(Incident, incident_id)
-    if incident is None:
-        raise HTTPException(status_code=404, detail="Incident not found")
-
-    incident.resolved_at = _to_naive_utc(resolved_at) or datetime.now(
-        timezone.utc
-    ).replace(tzinfo=None)
-    incident.status = "resolved"
-    if incident.acknowledged_at is None:
-        incident.acknowledged_at = incident.resolved_at
-    incident.downtime_minutes = max(
-        int((incident.resolved_at - incident.detected_at).total_seconds() // 60), 0
-    )
-    if notes:
-        incident.description = (
-            f"{incident.description or ''}\n[Résolution] {notes}".strip()
-        )
-
-    db.commit()
-    db.refresh(incident)
-    refresh_kpi_view(db)
-    return incident
-
-
-def acknowledge_incident(
-    db: Session, incident_id: int, acknowledged_at: datetime | None
-) -> Incident:
-    incident = db.get(Incident, incident_id)
-    if incident is None:
-        raise HTTPException(status_code=404, detail="Incident not found")
-
-    incident.acknowledged_at = _to_naive_utc(acknowledged_at) or datetime.now(
-        timezone.utc
-    ).replace(tzinfo=None)
-    if incident.status == "open":
-        incident.status = "acknowledged"
-
-    db.commit()
-    db.refresh(incident)
-    return incident
-
-
+# ---------------------------------------------------------------------------
+# Lecture
+# ---------------------------------------------------------------------------
 def list_incidents(
     db: Session,
     *,
@@ -410,79 +109,328 @@ def list_incidents(
     locality_id: int | None = None,
     node_code: str | None = None,
     source_tool: str | None = None,
+    cause_category: str | None = None,
     date_from: datetime | None = None,
     date_to: datetime | None = None,
     page: int = 1,
     page_size: int = 25,
 ) -> dict:
-    """Paginated, filterable incident history — the /open and /recent alert
-    feeds are deliberately top-N views for the live dashboard; this backs the
-    IncidentTable's "search the whole history" use case (by node, locality,
-    period, ticket…) that neither of those can answer.
-    """
-    query = select(Incident).join(Node, Incident.node_id == Node.id)
-    count_query = select(func.count(Incident.id)).select_from(Incident).join(
-        Node, Incident.node_id == Node.id
-    )
+    page = max(1, page)
+    page_size = max(1, min(200, page_size))
 
-    filters = []
+    where = ["TRUE"]
+    params: dict = {}
+
     if status:
-        filters.append(Incident.status == status)
+        where.append("i.status = :status")
+        params["status"] = status
     if severity:
-        filters.append(Incident.severity == severity)
+        where.append("i.severity = :severity")
+        params["severity"] = severity
     if locality_id is not None:
-        filters.append(Node.locality_id == locality_id)
+        where.append("i.locality_id = :locality_id")
+        params["locality_id"] = locality_id
     if node_code:
-        filters.append(Node.code == node_code)
+        # dim_node n'a pas de colonne `code` : v_node expose le nom comme
+        # code, donc le filtre porte sur le nom. Recherche partielle,
+        # insensible à la casse — un opérateur tape rarement le nom exact.
+        where.append("i.node_code ILIKE :node_code")
+        params["node_code"] = f"%{node_code}%"
     if source_tool:
-        filters.append(Incident.source_tool == source_tool)
-    if date_from is not None:
-        filters.append(Incident.detected_at >= _to_naive_utc(date_from))
-    if date_to is not None:
-        filters.append(Incident.detected_at <= _to_naive_utc(date_to))
+        where.append("i.source_tool = :source_tool")
+        params["source_tool"] = source_tool
+    if cause_category:
+        where.append("i.cause_category = :cause_category")
+        params["cause_category"] = cause_category
+    if date_from:
+        where.append("i.detected_at >= :date_from")
+        params["date_from"] = date_from
+    if date_to:
+        where.append("i.detected_at < :date_to")
+        params["date_to"] = date_to
 
-    for f in filters:
-        query = query.where(f)
-        count_query = count_query.where(f)
+    clause = " AND ".join(where)
 
-    total = db.execute(count_query).scalar() or 0
+    total = db.execute(
+        text(f"SELECT count(*) {_FROM} WHERE {clause}"), params
+    ).scalar() or 0
 
-    page = max(page, 1)
-    page_size = max(min(page_size, 100), 1)
-    rows = (
-        db.execute(
-            query.order_by(Incident.detected_at.desc())
-            .offset((page - 1) * page_size)
-            .limit(page_size)
+    rows = db.execute(
+        text(
+            f"""
+            SELECT {_SELECT_COLUMNS} {_FROM}
+            WHERE {clause}
+            ORDER BY i.detected_at DESC NULLS LAST, i.id DESC
+            LIMIT :limit OFFSET :offset
+            """
+        ),
+        {**params, "limit": page_size, "offset": (page - 1) * page_size},
+    ).mappings().all()
+
+    return {
+        "items": [_row_to_dict(r) for r in rows],
+        "total": int(total),
+        "page": page,
+        "page_size": page_size,
+        "pages": (int(total) + page_size - 1) // page_size,
+    }
+
+
+def get_workload(db: Session) -> list[dict]:
+    """Charge par intervenant — la question du Chef NOC avant d'assigner.
+
+    La ligne `assigned_to_user_id = NULL` est délibérément conservée : les
+    incidents que personne ne traite sont l'information la plus utile de
+    ce tableau, et les écarter pour « ne garder que les agents » ferait
+    disparaître exactement ce qu'on cherche.
+    """
+    rows = db.execute(
+        text(
+            """
+            SELECT
+                a.assigned_to_user_id                                        AS user_id,
+                u.full_name,
+                u.username,
+                u.role,
+                count(*)                                                     AS open_incidents,
+                count(*) FILTER (WHERE i.severity = 'critical')              AS critical,
+                count(*) FILTER (WHERE i.severity = 'high')                  AS high,
+                count(*) FILTER (WHERE i.status = 'open')                    AS unacknowledged,
+                avg(EXTRACT(EPOCH FROM (now() - i.detected_at)) / 60)        AS avg_age_minutes,
+                max(EXTRACT(EPOCH FROM (now() - i.detected_at)) / 60)        AS oldest_age_minutes
+            FROM v_incident i
+            LEFT JOIN ops_incident_assignment a ON a.incident_id = i.id
+            LEFT JOIN dim_user u ON u.id = a.assigned_to_user_id
+            WHERE i.status IN ('open','acknowledged') AND NOT i.is_maintenance
+            GROUP BY a.assigned_to_user_id, u.full_name, u.username, u.role
+            ORDER BY (a.assigned_to_user_id IS NULL) DESC, count(*) DESC
+            """
         )
-        .scalars()
-        .all()
-    )
+    ).mappings().all()
 
-    items = [
+    return [
         {
-            "id": r.id,
-            "node_id": r.node_id,
-            "node_code": r.node.code,
-            "node_name": r.node.name,
-            "locality_id": r.node.locality_id,
-            "severity": r.severity,
-            "status": r.status,
-            "source_tool": r.source_tool,
-            "description": r.description,
-            "detected_at": r.detected_at,
-            "acknowledged_at": r.acknowledged_at,
-            "resolved_at": r.resolved_at,
-            "itop_ticket_id": r.itop_ticket_id,
-            "external_id": r.external_id,
+            "user_id": r["user_id"],
+            "full_name": r["full_name"] or ("Non assigné" if r["user_id"] is None else "—"),
+            "username": r["username"],
+            "role": r["role"],
+            "open_incidents": int(r["open_incidents"]),
+            "critical": int(r["critical"]),
+            "high": int(r["high"]),
+            "unacknowledged": int(r["unacknowledged"]),
+            "avg_age_minutes": round(float(r["avg_age_minutes"]), 1)
+            if r["avg_age_minutes"] is not None
+            else None,
+            "oldest_age_minutes": round(float(r["oldest_age_minutes"]), 1)
+            if r["oldest_age_minutes"] is not None
+            else None,
         }
         for r in rows
     ]
 
-    return {
-        "items": items,
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-        "pages": (total + page_size - 1) // page_size if page_size else 0,
-    }
+
+def get_incident(db: Session, incident_id: int) -> dict:
+    row = db.execute(
+        text(f"SELECT {_SELECT_COLUMNS} {_FROM} WHERE i.id = :id"), {"id": incident_id}
+    ).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Incident introuvable.")
+
+    incident = _row_to_dict(row)
+    incident["timeline"] = get_timeline(db, incident_id)
+    return incident
+
+
+def get_timeline(db: Session, incident_id: int) -> list[dict]:
+    rows = db.execute(
+        text(
+            """
+            SELECT t.id, t.user_id, u.full_name AS user_full_name,
+                   t.action, t.note, t.created_at
+            FROM ops_incident_timeline t
+            LEFT JOIN dim_user u ON u.id = t.user_id
+            WHERE t.incident_id = :id
+            ORDER BY t.created_at ASC, t.id ASC
+            """
+        ),
+        {"id": incident_id},
+    ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Actions
+# ---------------------------------------------------------------------------
+def _log(db: Session, incident_id: int, user: User | None, action: str, note: str | None = None):
+    db.add(
+        IncidentTimeline(
+            incident_id=incident_id,
+            user_id=user.id if user else None,
+            action=action,
+            note=note,
+        )
+    )
+
+
+def acknowledge(db: Session, incident_id: int, user: User) -> dict:
+    incident = db.get(Incident, incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail="Incident introuvable.")
+
+    if incident.acknowledged_at is None:
+        now = datetime.now(UTC)
+        incident.acknowledged_at = now
+        if incident.detected_at:
+            incident.mtta_minutes = round(
+                (now - incident.detected_at).total_seconds() / 60, 1
+            )
+        # Le statut n'est écrasé que s'il est encore ouvert : un incident
+        # que l'outil source a déjà clos entre-temps ne doit pas être
+        # rouvert par un acquittement tardif du dashboard.
+        if incident.status in (None, "open", "new"):
+            incident.status = "acknowledged"
+
+    _log(db, incident_id, user, "acknowledged")
+    db.commit()
+    kpi_service.invalidate_cache()
+    return get_incident(db, incident_id)
+
+
+def resolve(db: Session, incident_id: int, user: User, notes: str) -> dict:
+    if not (notes or "").strip():
+        # Même règle que côté frontend (api/alerts.js) : une résolution
+        # sans note est une perte d'information pour le post-mortem.
+        raise HTTPException(
+            status_code=422, detail="Une note de résolution est obligatoire."
+        )
+
+    incident = db.get(Incident, incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail="Incident introuvable.")
+
+    now = datetime.now(UTC)
+    if incident.resolved_at is None:
+        incident.resolved_at = now
+        if incident.detected_at:
+            minutes = round((now - incident.detected_at).total_seconds() / 60, 1)
+            incident.mttr_minutes = minutes
+            if incident.downtime_minutes is None:
+                incident.downtime_minutes = minutes
+    incident.status = "resolved"
+
+    _log(db, incident_id, user, "resolved", notes.strip())
+    db.commit()
+    kpi_service.invalidate_cache()
+    return get_incident(db, incident_id)
+
+
+def assign(db: Session, incident_id: int, user: User, assignee_id: int, note: str | None) -> dict:
+    if db.get(Incident, incident_id) is None:
+        raise HTTPException(status_code=404, detail="Incident introuvable.")
+    if db.get(User, assignee_id) is None:
+        raise HTTPException(status_code=404, detail="Destinataire introuvable.")
+
+    assignment = db.get(IncidentAssignment, incident_id) or IncidentAssignment(
+        incident_id=incident_id
+    )
+    assignment.assigned_to_user_id = assignee_id
+    assignment.updated_at = datetime.now(UTC)
+    db.merge(assignment)
+
+    _log(db, incident_id, user, "assigned", note)
+    db.commit()
+    return get_incident(db, incident_id)
+
+
+def escalate(db: Session, incident_id: int, user: User, escalate_to_id: int, reason: str) -> dict:
+    if db.get(Incident, incident_id) is None:
+        raise HTTPException(status_code=404, detail="Incident introuvable.")
+
+    assignment = db.get(IncidentAssignment, incident_id) or IncidentAssignment(
+        incident_id=incident_id
+    )
+    assignment.escalation_level = (assignment.escalation_level or 0) + 1
+    assignment.escalated_at = datetime.now(UTC)
+    assignment.escalated_to_user_id = escalate_to_id
+    assignment.updated_at = datetime.now(UTC)
+    db.merge(assignment)
+
+    _log(db, incident_id, user, "escalated", reason)
+    db.commit()
+    return get_incident(db, incident_id)
+
+
+def comment(db: Session, incident_id: int, user: User, note: str) -> list[dict]:
+    if db.get(Incident, incident_id) is None:
+        raise HTTPException(status_code=404, detail="Incident introuvable.")
+    _log(db, incident_id, user, "commented", note)
+    db.commit()
+    return get_timeline(db, incident_id)
+
+
+# ---------------------------------------------------------------------------
+# Signalement manuel
+# ---------------------------------------------------------------------------
+def create_manual(
+    db: Session,
+    user: User,
+    *,
+    node_code: str,
+    severity: str,
+    description: str,
+    cause_category: str | None = None,
+) -> dict:
+    """Panne constatée sur le terrain que les outils n'ont pas détectée.
+
+    L'`external_id` est construit comme `manual-<user_id>-<timestamp>` :
+    il doit rester unique au sein de source_tool='manual' à cause de la
+    contrainte UNIQUE (source_tool, external_id) de fact_incident, et
+    l'horodatage à la microseconde suffit ici (un même utilisateur ne
+    crée pas deux signalements dans la même microseconde).
+    """
+    node = (
+        db.query(Node)
+        .filter(Node.name.ilike(node_code))
+        .first()
+    )
+    if node is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Aucun équipement ne correspond à « {node_code} ».",
+        )
+
+    now = datetime.now(UTC)
+    incident = Incident(
+        source_tool=MANUAL_SOURCE_TOOL,
+        external_id=f"manual-{user.id}-{now.strftime('%Y%m%d%H%M%S%f')}",
+        node_id=node.id,
+        status="open",
+        severity=severity,           # déjà dans le vocabulaire normalisé
+        cause_category=cause_category or "non_identifie",
+        detected_at=now,
+        description=description,
+    )
+    db.add(incident)
+    db.flush()
+
+    _log(db, incident.id, user, "created", "Signalement manuel")
+    db.commit()
+    kpi_service.invalidate_cache()
+
+    # Même canal que les incidents découverts par le veilleur : un
+    # signalement terrain doit remonter sur le mur d'alertes en direct.
+    publish_alert(
+        {
+            "type": "incident",
+            "id": incident.id,
+            "node_code": node.name,
+            "node_name": node.name,
+            "severity": severity,
+            "status": "open",
+            "description": description,
+            "source_tool": MANUAL_SOURCE_TOOL,
+            "detected_at": now.isoformat(),
+        }
+    )
+    cache_service.invalidate_prefix("noc:alerts:")
+    return get_incident(db, incident.id)
