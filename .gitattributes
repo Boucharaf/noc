@@ -1,0 +1,18 @@
+# Les scripts exécutés dans des conteneurs Linux DOIVENT rester en LF.
+# Sous Windows, core.autocrlf=true les convertirait en CRLF au checkout, et
+# Docker échouerait sur « exec /usr/local/bin/docker-entrypoint.sh: no such
+# file or directory » — le noyau cherche alors l'interpréteur « /bin/bash\r ».
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+*.Dockerfile    text eol=lf
+docker-entrypoint.sh text eol=lf
+*.php           text eol=lf
+*.py            text eol=lf
+*.yml           text eol=lf
+*.sql           text eol=lf
+
+# Fichiers binaires : jamais de conversion.
+*.png binary
+*.ico binary
+*.zip binary
+*.docx binary

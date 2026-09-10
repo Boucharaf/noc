@@ -1,170 +1,130 @@
 """
-État des intégrations, pour la page Interopérabilité.
+Écran Interopérabilité — l'état de la chaîne de collecte, vu par l'exploitant.
 
-C'est le point d'intégration le plus direct avec l'ETL, et celui qui
-changeait de format entre l'ancienne et la nouvelle version.
+C'EST L'ÉCRAN LE PLUS IMPORTANT DU TABLEAU DE BORD, et c'est contre-intuitif.
+Tous les autres écrans montrent le réseau ; celui-ci montre si l'on a le
+DROIT de croire les autres écrans. Un mur d'alertes vide peut vouloir dire
+« tout va bien » ou « le collecteur est mort depuis quatre heures », et
+personne ne doit avoir à deviner lequel.
 
-L'ancien backend lisait UNE clé Redis `noc:collector:status` contenant un
-dictionnaire `{"tools": {...}}`. Le nouvel ETL écrit UNE CLÉ PAR OUTIL,
-`noc:etl:status:<outil>`, chacune contenant un objet plat :
+D'où trois règles suivies partout dans ce module :
 
-    {"tool": "zabbix", "ok": true, "last_run_at": "...",
-     "nb_nodes": 128, "nb_incidents": 12, "nb_metrics": 640}
-
-(voir etl/pipelines/status.py::publish_status). Ce module lit ce
-nouveau format.
-
-Un statut est jugé périmé si `last_run_at` remonte à plus de trois fois
-l'intervalle de collecte : deux cycles peuvent être manqués sans que ce
-soit une panne (redémarrage du worker, collecte longue), trois signalent
-un problème réel.
+  * un outil configuré dont le collecteur n'a jamais joint l'API apparaît
+    comme « jamais collecté », il ne disparaît pas de la liste ;
+  * le message d'erreur brut de l'outil est affiché TEL QUEL — « HTTP 401 »,
+    « certificat expiré », « profil REST Services User requis » disent
+    chacun quoi faire, là où « intégration en erreur » ne dit rien ;
+  * l'âge de l'instantané est toujours rendu, même quand tout va bien.
 """
 from __future__ import annotations
 
-import json
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timezone
 
-from sqlalchemy import text
-from sqlalchemy.orm import Session
-
-from app.core.config import (
-    ETL_COLLECT_INTERVAL_S,
-    ETL_STATUS_KEY_PREFIX,
-    SUPERVISION_TOOLS,
-)
-from app.db.redis_client import redis_client
-from app.services.periods import month_bounds
+from app.core.config import COLLECT_INTERVAL_S, SUPERVISION_TOOLS
+from app.services import live_service
 
 logger = logging.getLogger(__name__)
 
-STALE_FACTOR = 3
 
+def _freshness(checked_at: str | None) -> tuple[float | None, bool]:
+    """Âge d'un contrôle et sa péremption.
 
-def _read_all_status() -> dict[str, dict]:
-    """Lit toutes les clés de statut publiées par l'ETL.
-
-    Retourne un dictionnaire vide si Redis est injoignable — la page doit
-    s'afficher en indiquant que le collecteur est inconnu, pas renvoyer
-    une erreur 500.
+    Le seuil est de deux cycles : un cycle raté est un incident de parcours,
+    deux cycles ratés sont une panne. Alerter au premier ferait clignoter
+    l'écran à chaque hoquet réseau, et l'exploitant cesserait de le regarder.
     """
+    if not checked_at:
+        return None, True
     try:
-        keys = redis_client.keys(f"{ETL_STATUS_KEY_PREFIX}*")
-    except Exception as exc:
-        logger.warning("Lecture du statut ETL impossible : %s", exc)
-        return {}
-
-    statuses: dict[str, dict] = {}
-    for key in keys:
-        tool = key[len(ETL_STATUS_KEY_PREFIX):]
-        try:
-            raw = redis_client.get(key)
-            if raw:
-                statuses[tool] = json.loads(raw)
-        except Exception as exc:
-            logger.warning("Statut illisible pour %s : %s", tool, exc)
-    return statuses
+        at = datetime.fromisoformat(checked_at)
+    except (TypeError, ValueError):
+        return None, True
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - at).total_seconds()
+    return age, age > COLLECT_INTERVAL_S * 2
 
 
-def _incidents_by_tool(db: Session, month: int, year: int) -> dict[str, int]:
-    """Incidents du mois, groupés par outil AYANT REMONTÉ l'incident.
+async def status() -> dict:
+    """État complet de la chaîne de collecte."""
+    tools = await live_service.get_tools_health()
 
-    On groupe sur `fact_incident.source_tool`, pas sur l'outil qui
-    supervise l'équipement (`dim_node_source_map`) : un même équipement
-    est souvent vu par plusieurs outils, et seule la première réponde à
-    la question posée par une carte portant le nom d'un outil.
-    """
-    start, end = month_bounds(month, year)
-    rows = db.execute(
-        text(
-            """
-            SELECT source_tool, count(*) AS nb
-            FROM fact_incident
-            WHERE detected_at >= :start AND detected_at < :end
-            GROUP BY source_tool
-            """
-        ),
-        {"start": start, "end": end},
-    ).mappings().all()
-    return {r["source_tool"]: int(r["nb"]) for r in rows}
-
-
-def _nodes_by_tool(db: Session) -> dict[str, int]:
-    """Équipements supervisés par chaque outil (dim_node_source_map)."""
-    rows = db.execute(
-        text(
-            """
-            SELECT source_tool, count(DISTINCT node_id) AS nb
-            FROM dim_node_source_map
-            GROUP BY source_tool
-            """
-        )
-    ).mappings().all()
-    return {r["source_tool"]: int(r["nb"]) for r in rows}
-
-
-def _parse_dt(value) -> datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-
-
-def get_interop_status(db: Session, month: int, year: int) -> dict:
-    statuses = _read_all_status()
-    incident_counts = _incidents_by_tool(db, month, year)
-    node_counts = _nodes_by_tool(db)
-
-    now = datetime.now(UTC)
-    stale_after = timedelta(seconds=ETL_COLLECT_INTERVAL_S * STALE_FACTOR)
-
-    tools = []
-    for name in SUPERVISION_TOOLS:
-        entry = statuses.get(name)
-        last_run = _parse_dt((entry or {}).get("last_run_at"))
-
-        if entry is None:
-            # Aucune clé publiée : soit l'outil est désactivé dans la
-            # configuration de l'ETL (etl/config.py), soit son connecteur
-            # n'a jamais tourné. On ne peut pas distinguer les deux ici,
-            # d'où un libellé qui couvre les deux cas.
-            state = "not_configured"
-            detail = "Jamais collecté — outil désactivé ou connecteur non exécuté"
-        elif last_run is None:
-            state, detail = "unknown", "Statut publié sans horodatage exploitable"
-        elif now - last_run > stale_after:
-            minutes = int((now - last_run).total_seconds() // 60)
-            state = "stale"
-            detail = f"Dernière collecte il y a {minutes} min — collecteur probablement arrêté"
-        elif not entry.get("ok"):
-            state = "error"
-            detail = "Dernier cycle en échec — voir les journaux du worker Celery"
-        else:
-            state, detail = "ok", "Collecte réussie"
-
-        tools.append(
+    rows = []
+    for tool in tools:
+        age, stale = _freshness(tool.get("checked_at"))
+        rows.append(
             {
-                "tool": name,
-                "state": state,
-                "detail": detail,
-                "ok": bool((entry or {}).get("ok")) if entry else None,
-                "last_run_at": last_run.isoformat() if last_run else None,
-                "nb_nodes": (entry or {}).get("nb_nodes"),
-                "nb_incidents": (entry or {}).get("nb_incidents"),
-                "nb_metrics": (entry or {}).get("nb_metrics"),
-                "nodes_supervised": node_counts.get(name, 0),
-                "incidents_this_month": incident_counts.get(name, 0),
+                "tool": tool["tool"],
+                "reachable": bool(tool.get("reachable")),
+                "never_collected": bool(tool.get("never_collected")),
+                "version": tool.get("version"),
+                "latency_ms": tool.get("latency_ms"),
+                # Message brut de l'outil. Volontairement non reformulé.
+                "error": tool.get("error"),
+                "checked_at": tool.get("checked_at"),
+                "age_s": age,
+                "stale": stale,
             }
         )
 
-    healthy = sum(1 for t in tools if t["state"] == "ok")
+    # `get_meta` lève si la collecte est arrêtée. Ici on l'attrape : cet
+    # écran doit RESTER affichable quand tout le reste ne l'est plus — c'est
+    # précisément le moment où l'exploitant en a besoin.
+    try:
+        meta = await live_service.get_meta()
+        collector_running = True
+    except live_service.SnapshotUnavailable:
+        meta = None
+        collector_running = False
+
     return {
-        "generated_at": now.isoformat(),
-        "interval_seconds": ETL_COLLECT_INTERVAL_S,
-        "tools_total": len(tools),
-        "tools_healthy": healthy,
-        "tools": tools,
+        "collector": {
+            "running": collector_running,
+            "collected_at": meta.get("collected_at") if meta else None,
+            "duration_s": meta.get("duration_s") if meta else None,
+            "interval_s": COLLECT_INTERVAL_S,
+            "snapshot_age_s": await live_service.snapshot_age_s(),
+            "stale": await live_service.is_stale(),
+            "nodes": meta.get("nodes") if meta else None,
+            "alerts": meta.get("alerts") if meta else None,
+        },
+        "tools": rows,
+        "configured": list(SUPERVISION_TOOLS),
+        "merge": (meta or {}).get("merge"),
+        "orphan_alerts": (meta or {}).get("orphan_alerts"),
+    }
+
+
+async def merge_report() -> dict:
+    """Détail des rapprochements multi-outils.
+
+    Cet écran répond à deux questions du responsable du NOC :
+      « le parc affiché est-il le vrai parc, ou compte-t-il des doublons ? »
+      « quels équipements ne sont vus que par un seul outil ? »
+
+    La seconde est la plus utile : un équipement vu par un seul outil est un
+    point de rupture — si cet outil tombe, on le perd de vue sans le savoir.
+    """
+    try:
+        meta = await live_service.get_meta()
+    except live_service.SnapshotUnavailable:
+        return {
+            "available": False,
+            "reason": "Aucun instantané : le collecteur ne publie plus.",
+        }
+
+    merge = meta.get("merge") or {}
+    raw = merge.get("raw", 0)
+    merged = merge.get("merged", 0)
+    return {
+        "available": True,
+        "raw_entries": raw,
+        "merged_nodes": merged,
+        # Nombre de vues qui ont été repliées sur un équipement existant.
+        "duplicates_resolved": max(0, raw - merged),
+        "matched_by_ip": merge.get("matched_by_ip", 0),
+        "matched_by_name": merge.get("matched_by_name", 0),
+        "single_source_nodes": merge.get("single_source", []),
+        "orphan_alerts": meta.get("orphan_alerts", 0),
     }

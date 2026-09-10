@@ -44,6 +44,10 @@ export default function LoginPage() {
     if (logoutReason === "expired") {
       setError("Votre session a expiré. Reconnectez-vous.");
       clearLogoutReason();
+    } else if (logoutReason === "password_changed") {
+      // Posé par « Mon compte » : le backend a fermé toutes les sessions.
+      setError("Mot de passe modifié. Reconnectez-vous avec le nouveau mot de passe.");
+      clearLogoutReason();
     }
   }, [logoutReason, clearLogoutReason]);
 
@@ -258,7 +262,7 @@ export default function LoginPage() {
         <p className="text-center text-[10.5px] mt-3" style={{ color: "var(--ink-3)" }}>
           Aucun compte n'existe au premier démarrage. Créez-en un depuis le serveur :
           <br />
-          <code className="mono-xs">python backend/scripts/create_user.py --demo-set</code>
+          <code className="mono-xs">python backend/scripts/create_user.py --role-set</code>
         </p>
       </div>
     </div>

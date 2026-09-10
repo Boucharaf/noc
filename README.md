@@ -1,291 +1,319 @@
 # Plateforme NOC RESINA
 
-Centre de supervision du réseau de l'administration burkinabè. La
-plateforme agrège six outils hétérogènes (Zabbix, iTop, NetXMS, Centreon,
-Nagios, Nokia NSP) dans un entrepôt unique, et en tire quatre tableaux de
-bord — un par métier.
+Tableau de bord du **centre de supervision (NOC)** du réseau de
+l'administration burkinabè (RESINA, exploité par l'ANPTIC). La plateforme lit
+les outils de supervision existants — Zabbix, Centreon, iTop, NetXMS, et à
+terme Nagios et Nokia NSP — et présente un écran par métier : Directeur,
+Chef NOC, Technicien, Agent terrain.
 
-```
-┌──────────────┐   collecte    ┌───────────────────────┐    lecture    ┌───────────────┐
-│  6 outils    │──────────────▶│  Entrepôt PostgreSQL  │◀─────────────│   Backend     │
-│  supervision │   (Celery,    │  + TimescaleDB        │   (SQL seul)  │   FastAPI     │
-│  et ITSM     │    5 min)     │                       │──────────────▶│  70 endpoints │
-└──────────────┘               │  dim_* fact_* metric_*│    écriture   └───────┬───────┘
-                               │  ops_* (backend)      │    ops_*              │
-        ETL ────────────────── └───────────────────────┘                       │ REST + WebSocket
-                                                                               ▼
-                                                                       ┌───────────────┐
-                                                                       │   Frontend    │
-                                                                       │  React / Vite │
-                                                                       └───────────────┘
-```
-
-**Un seul entrepôt.** L'ETL écrit, le backend lit — plus aucune ingestion
-par HTTP. C'est le changement structurel de la version 2 : l'ancien
-backend supposait que l'ETL lui poussait chaque incident, ce qui créait
-deux chemins d'écriture concurrents sur la même table.
+> **Ce fichier explique comment installer et faire tourner le projet.**
+> Pour **comprendre** le projet (métier, architecture, code, sécurité), lire
+> la documentation : **[docs/README.md](docs/README.md)**.
 
 ---
 
-## 1. Démarrage en cinq minutes
+## Sommaire
 
-### Avec Docker (recommandé)
+1. [Prérequis](#1-prérequis)
+2. [Installation et premier lancement](#2-installation-et-premier-lancement)
+3. [Choisir ses sources de données](#3-choisir-ses-sources-de-données)
+4. [Tester les alertes par courriel](#4-tester-les-alertes-par-courriel)
+5. [Commandes du quotidien](#5-commandes-du-quotidien)
+6. [Configuration : les variables essentielles](#6-configuration--les-variables-essentielles)
+7. [Adresses et ports](#7-adresses-et-ports)
+8. [Problèmes fréquents](#8-problèmes-fréquents)
+9. [Aller plus loin](#9-aller-plus-loin)
+
+---
+
+## 1. Prérequis
+
+| Élément | Détail |
+|---|---|
+| **Docker** avec Compose v2 | Docker Desktop (Windows, macOS) ou Docker Engine (Linux). Toute la plateforme tourne en conteneurs : rien d'autre à installer pour la faire fonctionner. |
+| **Mémoire allouée à Docker** | 4 Go pour la plateforme seule ; **8 Go** avec la base NetXMS et un ou deux outils de laboratoire ; 12 Go et plus avec Zabbix + iTop + Centreon. |
+| **Disque** | 10 Go pour la plateforme ; +2 Go pour la base NetXMS restaurée ; +5 Go pour les outils de laboratoire. |
+| **Git** | Pour récupérer le code. |
+| **Un terminal bash** | Les scripts `.sh` du dépôt sont en bash. Sous Windows : **Git Bash** (installé avec Git). |
+| **Ports libres** | 8443 et 8888 (interface), 5436 (base du NOC). |
+
+---
+
+## 2. Installation et premier lancement
+
+### Étape 1 — Récupérer le code
+
+```bash
+git clone https://github.com/Boucharaf/noc.git
+cd noc
+```
+
+### Étape 2 — Créer le fichier de configuration
 
 ```bash
 cp .env.example .env
-# Renseigner AU MINIMUM : SECRET_KEY, INTERNAL_API_KEY, POSTGRES_PASSWORD
-#   python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
 
+Ouvrir `.env` et renseigner **au minimum** :
+
+| Variable | Quoi mettre |
+|---|---|
+| `SECRET_KEY` | Une chaîne aléatoire d'au moins 32 caractères. Le backend **refuse de démarrer** sans elle. Générer : `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
+| `POSTGRES_PASSWORD` | Le mot de passe de la base du NOC. ⚠️ Il est figé à la création du volume : le changer ensuite rend la base inaccessible. |
+
+`.env` contient des secrets : il est exclu de git et ne doit jamais y entrer.
+
+### Étape 3 — Générer le certificat HTTPS
+
+L'interface est servie en HTTPS par nginx, qui ne démarre pas sans
+certificat. Le certificat n'est pas dans git : il faut le produire une fois.
+
+```bash
+bash nginx/generate_cert.sh
+```
+
+C'est un certificat **auto-signé** : le navigateur affichera un avertissement
+à accepter. En production, le remplacer par un certificat de l'autorité de
+l'agence (fichiers `nginx/certs/noc-selfsigned.crt` et `.key`).
+
+### Étape 4 — Démarrer
+
+```bash
 docker compose up -d --build
+```
 
-# Créer le premier compte (aucun n'existe au départ)
+Le premier lancement construit les images (quelques minutes). Vérifier que
+tout est « healthy » :
+
+```bash
+docker compose ps
+```
+
+### Étape 5 — Créer le premier compte (Chef NOC)
+
+Aucun compte n'existe au départ, et l'interface exige d'être connecté pour en
+créer. Ce script crée le premier :
+
+```bash
 docker compose exec backend python scripts/create_user.py \
-    --demo-set --password "MotDePasse123"
-
-# Données de démonstration, pour voir les écrans vivre
-docker compose exec backend python scripts/seed_demo.py
+    -u chefnoc -r chef_noc -n "Chef NOC" -p "UnMotDePasseSolide"
 ```
 
-Puis <https://localhost:8443> (certificat auto-signé : accepter
-l'avertissement) ou <http://localhost:8888>.
+> Sous Windows, **passez toujours le mot de passe avec `-p`**. La saisie
+> masquée (sans `-p`) peut enregistrer autre chose que ce qui a été tapé, et
+> la connexion échoue ensuite avec « Identifiants invalides ».
 
-Comptes créés par `--demo-set`, un par tableau de bord :
+### Étape 6 — Se connecter
 
-| Identifiant | Rôle | Écran d'accueil |
+Ouvrir **<https://localhost:8443>** et se connecter avec `chefnoc`.
+
+Le Chef NOC crée ensuite **tous les autres comptes** depuis l'écran
+*Utilisateurs* et leur attribue un rôle. Il est le seul à pouvoir le faire.
+Chaque utilisateur modifie ensuite ses propres identifiants dans *Mon compte*.
+
+| Rôle | Écran d'accueil |
+|---|---|
+| Directeur | Pilotage (disponibilité, SLA, tendances, rapports) |
+| Chef NOC | Salle de supervision + gestion des comptes |
+| Technicien | Console d'exploitation (traitement des alertes) |
+| Agent terrain | Tournée (interventions, signalement de pannes) |
+
+À ce stade, **le tableau de bord est vide** : aucune source de données n'est
+branchée. C'est normal — voir la section suivante.
+
+---
+
+## 3. Choisir ses sources de données
+
+La plateforme ne stocke pas les équipements ni les alertes : elle les lit
+chez les outils de supervision. Un outil s'active par la **seule présence de
+son URL** dans `.env` (`<OUTIL>_API_URL`). Quatre situations possibles :
+
+| Situation | Données affichées | Mise en place |
 |---|---|---|
-| `directeur` | Directeur | Pilotage RESINA |
-| `chefnoc` | Chef NOC | Salle de supervision |
-| `technicien` | Technicien | Console d'exploitation |
-| `terrain` | Agent terrain | Tournée |
+| **A. Aucune source** | Aucune (écrans vides) | Rien à faire |
+| **B. Dump NetXMS de production** | 1 409 équipements et 791 alarmes réels, **figés au 07/08/2026** | [§ 3.1](#31-base-netxms-restaurée-depuis-le-dump) |
+| **C. Outils de laboratoire** | Les conteneurs de la pile, supervisés par de vrais Zabbix, iTop et Centreon locaux | [§ 3.2](#32-outils-de-laboratoire-zabbix-itop-centreon) |
+| **D. Outils réels de l'agence** | Le vrai réseau, en direct | [§ 3.3](#33-outils-réels-de-lagence) |
 
-### Sans Docker
+Les situations B, C et D se combinent : les équipements de plusieurs outils
+sont fusionnés dans un même parc.
+
+### 3.1 Base NetXMS restaurée depuis le dump
+
+Le fichier `database/netxmsbd07082026.sql` (356 Mo, **exclu de git** car il
+contient des données de production) doit être copié à la main dans
+`database/`.
 
 ```bash
-# 1. Entrepôt — PostgreSQL 15+ AVEC l'extension TimescaleDB
-createdb noc_warehouse
-export NOC_WAREHOUSE_DSN=postgresql://noc:noc@localhost:5432/noc_warehouse
+# 1. Démarrer la base NetXMS locale
+docker compose --profile netxms up -d netxms-db
 
-# L'ordre compte : l'extension backend référence les tables de l'ETL
-psql "$NOC_WAREHOUSE_DSN" -f etl/sql/schema_dimensions.sql
-psql "$NOC_WAREHOUSE_DSN" -f etl/sql/schema_facts.sql
-psql "$NOC_WAREHOUSE_DSN" -f etl/sql/schema_timescale.sql
-psql "$NOC_WAREHOUSE_DSN" -f backend/sql/01_backend_extensions.sql
+# 2. Dans .env, choisir le mot de passe du compte de lecture du NOC
+#    NETXMS_DB_READER_PASSWORD=<un mot de passe>
 
-# 2. Backend
-cd backend && pip install -r requirements.txt
-python scripts/create_user.py --demo-set --password "MotDePasse123"
-uvicorn app.main:app --port 8000
+# 3. Restaurer (≈ 4 min) : restauration, purge des secrets, compte de lecture
+bash database/restore_netxms_dump.sh
 
-# 3. Frontend
-cd frontend && npm install && npm run dev
+# 4. Dans .env, brancher le collecteur sur cette base
+#    NETXMS_API_URL=postgresql://netxms-db:5432/netxms
+#    NETXMS_API_USER=noc_reader
+#    NETXMS_API_PASSWORD=<le même mot de passe qu'à l'étape 2>
 
-# 4. ETL (facultatif tant qu'aucun outil n'est configuré)
-cd etl && pip install -r requirements.txt
-celery -A etl.celery_app worker --loglevel=INFO
-celery -A etl.celery_app beat   --loglevel=INFO
+# 5. Prendre en compte la configuration
+docker compose up -d collector backend
 ```
 
----
+Les équipements apparaissent au cycle de collecte suivant (moins d'une
+minute après le redémarrage du collecteur).
 
-## 2. Ce qui a été corrigé dans cette itération
+### 3.2 Outils de laboratoire (Zabbix, iTop, Centreon)
 
-La refonte du frontend a mis au jour plusieurs points qui empêchaient le
-projet de démarrer tel quel. Ils sont corrigés :
-
-| Problème | Conséquence | Correction |
-|---|---|---|
-| `docker-compose.yml` montait `./database` dans `docker-entrypoint-initdb.d` | Au premier démarrage, PostgreSQL exécutait l'**ancien schéma** puis un dump NetXMS de **370 Mo** sur la base du dashboard | Les quatre DDL corrects sont montés un par un, dans l'ordre. Les fichiers obsolètes sont déplacés dans `database/legacy/` |
-| Image `postgres:15-alpine` | `CREATE EXTENSION timescaledb` échoue → **aucune métrique** ne peut être stockée | Image `timescale/timescaledb:2.17.2-pg16` |
-| Variables `DB_HOST`, `NOC_API_KEY`, `SYNC_MV_REFRESH`, `ZABBIX_USER`… | Plus lues par personne : le backend et l'ETL cherchaient `NOC_WAREHOUSE_DSN`, `INTERNAL_API_KEY`, `ZABBIX_API_USER`… et repartaient sur leurs défauts | Variables alignées sur `backend/app/core/config.py` et `etl/config.py` |
-| `etl/Dockerfile` absent | `docker compose build` échouait | Recréé. Le paquet est copié dans `/app/etl` et les commandes visent `etl.celery_app` — les modules utilisent des imports relatifs |
-| `backend/docker-images/` supprimé mais toujours référencé | `docker compose up` échouait sur la construction de NetXMS et Centreon | Les 11 services d'outils sont passés sous le profil `tools` : ils ne démarrent plus par défaut |
-| `frontend/nginx.conf` ne relayait ni `/api` ni `/ws` | Le conteneur frontend n'était utilisable que derrière la passerelle | Relais ajouté, plus gzip et politique de cache (`sw.js` jamais mis en cache) |
-| `etl/report_trigger.py` portait un `TODO` | Le rapport mensuel automatique n'était **jamais** produit | Implémenté, avec repli silencieux : un backend injoignable ne fait pas échouer la collecte |
-| Aucun moyen de créer le premier compte | Impossible de se connecter à une installation neuve | `backend/scripts/create_user.py` |
-| Entrepôt vide = tous les écrans vides | Impossible de valider ou démontrer l'interface | `backend/scripts/seed_demo.py` |
-| `celery_app.py` sans `include` | Le worker démarrait « sain » puis **rejetait chaque tâche** de beat (`Received unregistered task`) : l'ETL ne collectait **rien** | `include=["etl.pipelines.tasks"]` — le planificateur ne connaît que des noms, c'est au worker d'avoir importé les fonctions |
-| `backend/Dockerfile` ne copiait pas `scripts/` | `docker compose exec backend python scripts/create_user.py` échouait : impossible d'amorcer le premier compte | `COPY scripts ./scripts` |
-| `ON CONFLICT` sur un index **partiel** dans le semis | La création des fenêtres de maintenance échouait | Prédicat `WHERE source_tool IS NOT NULL` répété dans la clause |
-| Ordre de purge du semis | Violation de `dim_node_source_map_node_id_fkey` | Identifiants relevés avant de vider la table de correspondance |
-| `alerts.length` sur une valeur non encore chargée | **Écran blanc total** sur la console du technicien | Lecture via le tableau memoïsé, plus une **frontière d'erreur** : un écran qui plante n'emporte plus la barre d'état ni la navigation |
-| « Votre session a expiré » à la première visite | Message d'expiration pour une session qui n'a jamais existé | `refresh({ silent: true })` au démarrage |
-
-Tous ces points ont été trouvés **en exécutant la pile**, pas en relisant
-le code : c'est la raison d'être de la campagne de vérification décrite
-au §7.
-
-### Ce qui reste à faire côté agence
-
-* **`NAGIOS_MODE`** (`livestatus` | `xi` | `ndoutils`) et **`NSP_FM_MODE`**
-  (`classic` | `yang`) sont à confirmer. Tant qu'ils valent `unknown`, ces
-  deux connecteurs ne collectent rien et l'écran « Collecte ETL » l'indique.
-* **`etl/scripts/discover_geography.py`** doit tourner au moins une fois,
-  sinon `dim_region`, `dim_locality` et `dim_ministry` restent vides : la
-  carte n'affiche rien et le classement par ministère est vide. Ce n'est
-  pas une erreur, et l'interface le dit explicitement.
-* Le profil `tools` a besoin de `backend/docker-images/` pour NetXMS et
-  Centreon. Restaurer si nécessaire : `git checkout backend/docker-images`.
-
----
-
-## 3. Les quatre profils
-
-L'architecture reprend les quatre niveaux du document métier
-« informations essentielles par profil ». **Chaque rôle a son écran**, et
-non un écran commun filtré.
-
-| Niveau | Rôle | Route | Contenu |
-|---|---|---|---|
-| 1 | Directeur | `/direction` | Disponibilité globale, SLA, MTTR, incidents critiques, Top 10 sites, tendance 6 mois, ministères, causes, couverture, rapports. **Aucune action d'exploitation** |
-| 2 | Chef NOC | `/supervision` | État du réseau, incidents en cours, **charge par intervenant**, **santé de la collecte**, maintenances, équipements critiques |
-| 3 | Technicien | `/console` | File de traitement, alertes temps réel, sites affectés, équipements HS, actions en cours |
-| 4 | *(transverse)* | `/equipements/:id` | Équipement : CPU, RAM, trafic, latence, pertes, disponibilité, historique, identifiants par outil |
-| — | Agent terrain | `/terrain` | Tournée, changement d'état, compte rendu avec relevé GPS, signalement de panne |
-
-Le **drill-down** fonctionne dans les deux sens : KPI global → ministère →
-site → équipement → incident, et retour. Tout nom cliquable mène quelque
-part.
-
----
-
-## 4. Les KPI, et d'où ils viennent
-
-| Famille | Indicateurs | Source |
-|---|---|---|
-| **Réseau** | disponibilité globale / par site / par ministère, perte de paquets, latence, bande passante, équipements indisponibles | hypertable `metric_value`, agrégat continu `metric_hourly` |
-| **Incidents** | total, ouverts, résolus, critiques, en retard, taux de résolution, MTTA, MTTR, récurrents | vue `v_incident` (sévérité et statut normalisés en SQL) |
-| **Supervision** | équipements totaux / supervisés, taux de couverture, sites non supervisés, alertes actives et critiques | `fact_supervision_coverage_daily`, `v_node` |
-| **SLA** | conformité MTTA / MTTR par gravité, dépassements | `ops_sla_target` (objectifs modifiables depuis l'écran SLA) |
-
-### Deux normalisations invisibles mais décisives
-
-L'ETL stocke les sévérités **brutes**, telles que chaque outil les
-renvoie : `5` pour Zabbix, `major` pour NSP, `2` pour Centreon, `1` pour
-iTop. Un filtre `WHERE severity = 'critical'` écrit naïvement ne
-renverrait donc que les incidents NSP. La traduction est faite en SQL par
-`noc_norm_severity()` et `noc_norm_status()`
-(`backend/sql/01_backend_extensions.sql`), pour que les filtres, les
-`GROUP BY` et les index restent exécutés par PostgreSQL.
-
-Aucun service du backend ne lit `fact_incident` ni `dim_node`
-directement : tout passe par `v_incident` et `v_node`. Si le schéma de
-l'ETL évolue, seul ce fichier SQL est à reprendre.
-
----
-
-## 5. Arborescence
-
-```
-noc/
-├── etl/                    Collecte (Celery) — écrit dans l'entrepôt
-│   ├── extract/            connecteurs API + lecteurs de dumps, par outil
-│   ├── transform/          normalisation, déduplication, causes, identités
-│   ├── load/               chargement dimensions / faits / métriques
-│   ├── pipelines/          tâches Celery, statut de collecte (Redis)
-│   ├── scripts/            découverte géographique, restauration de dumps
-│   └── sql/                DDL de l'entrepôt (dimensions, faits, TimescaleDB)
-│
-├── backend/                API FastAPI — lit l'entrepôt, écrit ops_*
-│   ├── app/routes/         70 endpoints /api/*, dont /api/internal/*
-│   ├── app/services/       KPI, incidents, métriques, veilleur, rapports
-│   ├── sql/                extensions backend (vues, fonctions, tables ops_*)
-│   └── scripts/            create_user.py · seed_demo.py
-│
-├── frontend/               Console React — 4 tableaux de bord + transverses
-│   └── src/{api,lib,store,hooks,components,pages}
-│
-├── database/               Outils NetXMS (dump source) · legacy/ = obsolète
-├── nginx/                  Passerelle TLS
-└── docker-compose.yml      7 services par défaut, 11 outils sous profil « tools »
-```
-
-Documentation détaillée :
-
-* **[backend/README.md](backend/README.md)** — schéma, veilleur d'incidents,
-  normalisation, API, scripts d'exploitation
-* **[frontend/README.md](frontend/README.md)** — parti pris visuel, profils,
-  temps réel, cadences de rafraîchissement
-* **[etl/README.md](etl/README.md)** — connecteurs, transformation, chargement
-
----
-
-## 6. Exploitation courante
+Instances locales, **aux mêmes versions que la production** de l'agence. Elles
+sont lourdes : les lancer par profil.
 
 ```bash
-# État de la plateforme
-curl -s http://localhost:8000/api/health | python -m json.tool
+docker compose --profile zabbix --profile itop up -d     # ~2 Go de RAM
+docker compose logs -f itop                              # attendre la fin de l'installation
+docker compose --profile provision run --rm provision    # déclarer les machines à superviser
 
-# Journaux
-docker compose logs -f backend etl-worker
-
-# Forcer une collecte immédiate
-docker compose exec etl-worker python -c \
-  "from etl.pipelines.tasks import collect_all_tools; collect_all_tools()"
-
-# Vider le cache KPI (après un import massif ou une correction)
-docker compose exec redis redis-cli --scan --pattern 'noc:*' | \
-  xargs -r docker compose exec -T redis redis-cli del
-
-# Gestion des comptes
-docker compose exec backend python scripts/create_user.py --list
-docker compose exec backend python scripts/create_user.py -u untel --reset-password
+docker compose --profile centreon up -d                  # ~2 Go de plus, à part
+docker compose exec centreon /usr/local/bin/provision-lab
 ```
 
-### Diagnostic
+Les URL et comptes de ces outils sont déjà dans `.env.example`. Accès aux
+interfaces : voir [§ 7](#7-adresses-et-ports). Détails et pièges connus :
+**[tools/README.md](tools/README.md)**.
 
-| Symptôme | Cause probable | Vérification |
-|---|---|---|
-| Tous les écrans sont vides | l'entrepôt n'a pas de données | écran **Collecte ETL** : si les six outils sont « jamais collecté », aucun `*_API_URL` n'est renseigné |
-| Les chiffres sont figés | un connecteur est arrêté | même écran : la colonne « Dernière collecte » est la seule qui le révèle — un total d'équipements reste rassurant même vieux de trois jours |
-| Beaucoup d'équipements « muets » | la collecte de métriques s'est arrêtée | `/equipements?state=silent` |
-| Le flux temps réel affiche « coupé » | WebSocket non relayé | vérifier `proxy_set_header Upgrade` dans le nginx en amont |
-| Déconnexion toutes les 30 min | `REFRESH_COOKIE_SECURE=true` sur une origine `http://` | passer à `false` en local, ou servir en HTTPS |
-| `500` sur toutes les routes métier | `01_backend_extensions.sql` non appliqué | les journaux du backend le disent au démarrage ; `/api/health` renvoie `database: degraded` |
+### 3.3 Outils réels de l'agence
 
----
+Dans `.env`, remplacer le bloc « laboratoire local » (section 4) par le bloc
+« production » (section 5) : URL des outils de l'agence et **comptes en
+lecture seule**. Ne jamais mélanger les deux blocs.
 
-## 7. Vérification de bout en bout
+Pour NetXMS, deux accès sont possibles, sans changer de code :
 
-La pile a été exécutée entièrement sous Docker et vérifiée à quatre
-niveaux. Les scripts sont reproductibles.
-
-| Suite | Ce qu'elle couvre | Résultat |
-|---|---|---|
-| **API** — 73 contrôles | les 70 endpoints, la normalisation des 6 vocabulaires de sévérité, le filtrage multi-outils, l'export CSV (BOM UTF-8), la boucle complète acquitter → affecter → escalader → commenter → résoudre avec calcul du MTTR, la création de compte, le RBAC (agent terrain refusé sur `/api/incidents`, technicien refusé sur l'affectation), les rapports PDF et DOCX | 73/73 |
-| **WebSocket** — 6 contrôles | poignée de main à travers nginx, authentification par première trame, battement de cœur, diffusion d'un incident en direct, refus d'un jeton invalide et d'une trame non conforme | 6/6 |
-| **Veilleur** — 4 contrôles | un `INSERT` SQL brut dans `fact_incident` (exactement ce que fait l'ETL, sévérité `'5'` de Zabbix, aucun appel HTTP) est découvert seul par le backend, diffusé **déjà normalisé** en `critical`, et marqué dans `ops_incident_notified` | 4/4 |
-| **Interface** — 19 contrôles | rendu réel dans un navigateur : les 13 écrans, la connexion, la redirection par rôle et le contenu effectif de chaque accueil (détection d'écran blanc) | 19/19 |
-
-Vérifié également : schéma appliqué à l'initialisation (TimescaleDB 2.17.2,
-20 tables, vues `v_node`/`v_incident`, hypertable, fonctions de
-normalisation), redémarrage complet de la pile, chaîne ETL → Redis →
-`/api/interop/status`, service worker non mis en cache, et repli SPA sur
-les liens profonds.
-
-**Non couvert** : les six outils de supervision réels ne sont pas
-joignables depuis cette machine. Le comportement vérifié est celui de la
-dégradation — un connecteur en échec est isolé, les autres poursuivent, et
-l'écran « Collecte ETL » affiche `error` / `ok` / `not_configured` par
-outil.
+- **par son API Web** : `NETXMS_API_URL=https://…` et un compte NetXMS ;
+- **par sa base, en lecture seule** : l'administrateur de l'agence exécute
+  `database/netxms_readonly_role.sql`, puis
+  `NETXMS_API_URL=postgresql://<hôte>:5432/netxms?sslmode=verify-full`.
 
 ---
 
-## 8. Sécurité
+## 4. Tester les alertes par courriel
 
-* Rôles vérifiés **côté serveur** sur chaque route sensible
-  (`app/dependencies/auth.py`). Le RBAC du frontend n'est que du confort
-  d'interface.
-* Le rôle est relu en base à chaque requête, jamais pris dans le seul
-  JWT : un compte rétrogradé en cours de session voit son jeton refusé.
-* Jeton d'accès **en mémoire uniquement**, rafraîchissement par cookie
-  httpOnly inaccessible à JavaScript.
-* Connexion par PIN réservée aux agents terrain — jamais aux comptes
-  directeur ou chef NOC, qui portent trop de privilèges pour un facteur à
-  quatre chiffres. Verrouillage par IP après échecs répétés.
-* Routes `/api/internal/*` protégées par une clé statique partagée avec
-  l'ETL ; sans `INTERNAL_API_KEY`, elles répondent 503 plutôt que de
-  s'ouvrir.
-* Un compte est **désactivé, jamais supprimé** : supprimer une ligne de
-  `dim_user` emporterait la traçabilité « qui a résolu cet incident ».
-* HTTPS obligatoire en production. Le certificat auto-signé fourni
-  (`nginx/generate_cert.sh`) est réservé au développement.
+La plateforme envoie un courriel à chaque nouvelle alerte grave (critique ou
+majeure). Pour tester sans écrire à personne, un faux serveur SMTP est fourni :
+
+```bash
+docker compose --profile mail up -d mailpit
+```
+
+Dans `.env` :
+
+```ini
+NOTIFICATIONS_ENABLED=true
+SMTP_HOST=mailpit
+SMTP_PORT=1025
+SMTP_USE_TLS=false
+```
+
+Puis `docker compose up -d backend`. Les courriels se lisent sur
+**<http://localhost:8025>**.
+
+Côté interface : écran *Utilisateurs* → renseigner l'adresse d'un compte et
+cocher « Recevoir les alertes » → bouton **Envoyer un test** dans le panneau
+*Alertes par courriel*.
+
+En production, remplacer `SMTP_*` par le relais de messagerie de l'agence et
+refaire le test.
+
+---
+
+## 5. Commandes du quotidien
+
+| Besoin | Commande |
+|---|---|
+| État des conteneurs | `docker compose ps` |
+| Santé de la chaîne | `curl -sk https://localhost:8443/api/health` |
+| Journaux d'un service | `docker compose logs -f --tail 100 collector` (ou `backend`, `nginx`…) |
+| Redémarrer un service | `docker compose restart backend` |
+| Prendre en compte une modification de `.env` | `docker compose up -d collector backend` |
+| Mettre à jour le code | `git pull && bash deployment.sh` |
+| Arrêter **sans rien perdre** | `docker compose down` |
+| Réinitialiser un mot de passe | `docker compose exec backend python scripts/create_user.py -u <identifiant> --reset-password -p "<nouveau>"` |
+| Lister les comptes | `docker compose exec backend python scripts/create_user.py --list` |
+| Mettre à jour le schéma de la base | `docker compose exec -T postgres psql -U noc -d noc < backend/sql/schema.sql` (sans danger, rejouable) |
+| Sauvegarder la base du NOC | `docker compose exec -T postgres pg_dump -U noc -d noc --clean --if-exists > sauvegarde_noc.sql` |
+| Restaurer une sauvegarde | `docker compose exec -T postgres psql -U noc -d noc < sauvegarde_noc.sql` |
+
+> ⛔ **Ne jamais lancer `docker compose down -v`.** L'option `-v` supprime les
+> volumes : tous les comptes, acquittements, notes et maintenances sont
+> perdus, et plus personne ne peut se connecter.
+
+---
+
+## 6. Configuration : les variables essentielles
+
+`.env.example` documente chaque variable. Les plus importantes :
+
+| Variable | Rôle | Valeur par défaut |
+|---|---|---|
+| `SECRET_KEY` | Signature des jetons de connexion (≥ 32 caractères) | — (obligatoire) |
+| `POSTGRES_PASSWORD` | Mot de passe de la base du NOC | — |
+| `COLLECT_INTERVAL_S` | Cadence de lecture des outils, en secondes. **C'est la charge imposée à la production** : une requête par outil par intervalle. | `300` |
+| `<OUTIL>_API_URL`, `_USER`, `_PASSWORD`, `_TOKEN` | Accès à chaque outil. URL vide = outil désactivé. | laboratoire local |
+| `NOTIFICATIONS_ENABLED` | Envoi automatique des courriels et SMS | `false` |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_USE_TLS` | Serveur de messagerie | vide |
+| `NOTIFY_SEVERITIES` | Gravités qui déclenchent une notification | `critical,high` |
+| `REFRESH_COOKIE_SECURE` | `true` dès que l'accès se fait en HTTPS | `false` |
+| `CORS_ORIGINS`, `DASHBOARD_URL` | Adresse publique de l'interface (à adapter sur un serveur) | `localhost` |
+
+> ⚠️ **Ne jamais écrire deux fois la même variable dans `.env`.** Docker
+> Compose garde silencieusement la dernière, ce qui produit des pannes dont le
+> message ne parle jamais de configuration.
+
+---
+
+## 7. Adresses et ports
+
+| Service | Adresse depuis le poste | Identifiants |
+|---|---|---|
+| **Interface NOC** | <https://localhost:8443> (et <http://localhost:8888>, redirigé) | comptes créés dans le NOC |
+| Base du NOC (PostgreSQL) | `localhost:5436`, base `noc` | `noc` / `POSTGRES_PASSWORD` |
+| Base NetXMS restaurée | `127.0.0.1:5438`, base `netxms` | `netxms` / `netxms` (lecture : `noc_reader`) |
+| Mailpit (courriels de test) | <http://localhost:8025> | — |
+| Zabbix de laboratoire | <http://localhost:8081> | `Admin` / `zabbix` |
+| iTop de laboratoire | <http://localhost:8082> | `admin` / `ITOP_ADMIN_PASSWORD` |
+| Centreon de laboratoire | <http://localhost:8084/centreon> | `admin` / `CENTREON_API_PASSWORD` |
+
+La documentation interactive de l'API (Swagger) est servie par le backend sur
+`/docs`, à l'intérieur du réseau Docker :
+`docker compose port backend 8000` donne le port à ouvrir sur le poste.
+
+---
+
+## 8. Problèmes fréquents
+
+| Symptôme | Cause probable | Solution |
+|---|---|---|
+| « Identifiants invalides » alors que le compte a été créé | Les volumes ont été supprimés (`down -v`) et la base est vide, **ou** le mot de passe a été saisi de façon masquée sous Windows | `create_user.py --list` pour vérifier ; recréer ou réinitialiser avec `-p` |
+| Le backend redémarre en boucle | `SECRET_KEY` absente ou trop courte | La renseigner (≥ 32 caractères) |
+| nginx ne démarre pas | Certificat absent | `bash nginx/generate_cert.sh` |
+| Tableau de bord vide | Aucune source branchée, ou collecteur arrêté | Écran *Collecte ETL* ; `docker compose logs collector` |
+| « Collecte interrompue » | Le collecteur ne publie plus depuis 15 min | `docker compose restart collector`, puis lire ses journaux |
+| Déconnexion au bout de 30 min | `REFRESH_COOKIE_SECURE=true` avec un accès en `http://` | Accéder en HTTPS, ou mettre `false` en local |
+| Aucun courriel reçu | Voir la liste de contrôle dans [docs/06](docs/06-alertes-et-notifications.md#diagnostic--pourquoi-je-ne-reçois-rien) | — |
+| `no such file or directory` au lancement d'un script `.sh` dans un conteneur | Fins de ligne Windows (CRLF) | Le `.gitattributes` force LF ; re-cloner ou convertir le fichier |
+| Un outil de laboratoire affiche « PostgreSQL server is not available » | Variable dupliquée dans `.env`, ou mot de passe changé après la création du volume | Voir [tools/README.md](tools/README.md#pièges-rencontrés-et-comment-les-reconnaître) |
+
+---
+
+## 9. Aller plus loin
+
+| Document | Contenu |
+|---|---|
+| **[docs/README.md](docs/README.md)** | Documentation complète : comprendre le métier, l'architecture, le code, la sécurité, l'exploitation |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Le raisonnement derrière les choix d'architecture |
+| [tools/README.md](tools/README.md) | Les outils de laboratoire : versions, installation, pièges |
+| [.env.example](.env.example) | Chaque variable de configuration, commentée |

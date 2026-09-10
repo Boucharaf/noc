@@ -120,7 +120,7 @@ export default function TerrainView() {
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <Link
-                          to={`/equipements/${intervention.node_id}`}
+                          to={`/equipements/${encodeURIComponent(intervention.node_key ?? intervention.node_id)}`}
                           className="text-[13px] font-semibold"
                           style={{ color: "var(--ink)", textDecoration: "none" }}
                         >
@@ -372,7 +372,8 @@ function CreateInterventionModal({ open, onClose, onSubmit }) {
     setError(null);
     try {
       await onSubmit.mutateAsync({
-        node_id: Number(nodeId),
+        // Clé textuelle (`netxms:464322`) : la convertir en nombre donnait NaN.
+        node_key: nodeId,
         incident_id: null,
         scheduled_at: scheduledAt ? new Date(scheduledAt).toISOString() : null,
       });
@@ -435,7 +436,7 @@ function CreateInterventionModal({ open, onClose, onSubmit }) {
                       className="w-full text-left px-2.5 py-1.5 hover:bg-[var(--surface-3)]"
                       style={{
                         background:
-                          Number(nodeId) === node.node_id ? "var(--accent-soft)" : undefined,
+                          nodeId === node.node_id ? "var(--accent-soft)" : undefined,
                       }}
                       onClick={() => setNodeId(node.node_id)}
                     >

@@ -8,14 +8,14 @@ from app.core import session_store
 from app.core.config import JWT_EXPIRATION_MINUTES, REFRESH_COOKIE_SECURE
 from app.db.session import get_db
 from app.dependencies.auth import get_current_user, require_role
-from app.models.operations import User
+from app.models import User
 from app.schemas.auth import (
     LoginPayload,
     PasswordChangePayload,
     PinLoginPayload,
     TokenResponse,
 )
-from app.schemas.users import UserOut
+from app.schemas.users import UserOut, UserSelfUpdate
 from app.services import auth_service, user_service
 
 router = APIRouter(prefix="/api/auth", tags=["authentification"])
@@ -169,6 +169,23 @@ def get_me(current_user: User = Depends(get_current_user), db: Session = Depends
     return UserOut(**user_service.get_user(db, current_user.id))
 
 
+@router.patch("/me", response_model=UserOut)
+def update_me(
+    payload: UserSelfUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Mise à jour de ses propres identifiants — ouverte à tous les rôles.
+
+    Identifiant, nom, téléphone, adresse et abonnement aux alertes. Le rôle
+    n'est pas modifiable ici (le schéma refuse le champ) : seul un Chef NOC
+    l'attribue, depuis la gestion des comptes.
+    """
+    return UserOut(
+        **user_service.update_self(db, current_user, payload.model_dump(exclude_unset=True))
+    )
+
+
 @router.patch("/me/password", status_code=status.HTTP_204_NO_CONTENT)
 def change_my_password(
     payload: PasswordChangePayload,
@@ -187,6 +204,6 @@ def change_my_password(
 @router.post("/users/{user_id}/revoke-sessions", status_code=status.HTTP_204_NO_CONTENT)
 def revoke_user_sessions(
     user_id: int,
-    _admin: User = Depends(require_role("directeur", "chef_noc")),
+    _admin: User = Depends(require_role("chef_noc")),
 ):
     session_store.revoke_all_sessions(user_id)

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.dependencies.auth import require_role
-from app.models.operations import User
+from app.models import User
 from app.services import report_service
 
 router = APIRouter(prefix="/api/report", tags=["rapports"])

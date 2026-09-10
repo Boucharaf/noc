@@ -1,34 +1,43 @@
 import { useMemo, useState } from "react";
-import { KeyRound, Pencil, ShieldOff, UserPlus } from "lucide-react";
+import { KeyRound, Lock, Mail, Pencil, Send, ShieldOff, UserPlus } from "lucide-react";
 
 import Panel from "../components/ui/Panel";
 import { Badge } from "../components/ui/Badge";
 import { ConfirmDialog, Modal } from "../components/ui/Overlay";
 import { Field, Notice, SearchField, Toolbar } from "../components/ui/Controls";
+import { DefRow } from "../components/ui/Stat";
 import { PageHeader } from "../components/layout/TopBar";
 import { QueryBoundary } from "../components/ui/States";
 import { ROLE_DESCRIPTION, ROLE_LABEL, ROLES } from "../lib/permissions";
+import { severityMeta } from "../lib/vocabulary";
 import { dateTime, num } from "../lib/format";
 import { errorMessage } from "../api/client";
 import { useCurrentUser } from "../hooks/useSession";
-import { useReference, useUserActions, useUsers } from "../hooks/queries";
+import {
+  useEmailStatus,
+  useSendTestEmail,
+  useSites,
+  useUserActions,
+  useUsers,
+} from "../hooks/queries";
 
 /**
- * Gestion des comptes.
+ * Gestion des comptes — Chef NOC uniquement.
  *
  * Le rôle n'est pas un simple libellé : il détermine l'écran d'accueil,
  * les gestes autorisés et ce que le backend accepte. La liste déroulante
- * affiche donc la DESCRIPTION de chaque rôle, pas seulement son nom —
- * « Chef NOC » ne dit pas qu'il est le seul à pouvoir affecter un
- * incident.
+ * affiche donc la DESCRIPTION de chaque rôle, pas seulement son nom.
  *
- * Deux comportements imposés par le backend, expliqués dans l'interface :
+ * Comportements imposés par le backend, expliqués dans l'interface :
  *
  * · un compte n'est jamais SUPPRIMÉ, seulement désactivé — supprimer une
- *   ligne de `dim_user` emporterait ou casserait la traçabilité « qui a
- *   résolu cet incident » (user_service.deactivate_user) ;
+ *   ligne de `noc_user` casserait la traçabilité « qui a résolu cet
+ *   incident » (user_service.deactivate_user) ;
  * · changer le rôle d'un compte RÉVOQUE ses sessions en cours, parce que
- *   les jetons émis portent l'ancien rôle.
+ *   les jetons émis portent l'ancien rôle ;
+ * · un Chef NOC ne change pas son propre rôle et ne désactive pas son
+ *   propre compte : le dernier Chef NOC laisserait sinon la plateforme sans
+ *   personne pour créer un compte.
  */
 
 const ROLE_ORDER = [ROLES.DIRECTEUR, ROLES.CHEF_NOC, ROLES.TECHNICIEN, ROLES.AGENT_TERRAIN];
@@ -40,6 +49,11 @@ const ROLE_COLOR = {
   agent_terrain: "var(--state-up)",
 };
 
+// Miroirs des motifs de backend/app/schemas/users.py : refuser la saisie ici
+// évite un aller-retour voué au 422.
+const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const USERNAME_PATTERN = /^[A-Za-z0-9._-]+$/;
+
 export default function UsersPage() {
   const me = useCurrentUser();
   const users = useUsers();
@@ -49,6 +63,7 @@ export default function UsersPage() {
   const [roleFilter, setRoleFilter] = useState(null);
   const [editing, setEditing] = useState(null); // objet utilisateur, ou "new"
   const [pinFor, setPinFor] = useState(null);
+  const [passwordFor, setPasswordFor] = useState(null);
   const [toDeactivate, setToDeactivate] = useState(null);
   const [feedback, setFeedback] = useState(null);
 
@@ -57,7 +72,8 @@ export default function UsersPage() {
     return list.filter((user) => {
       if (roleFilter && user.role !== roleFilter) return false;
       if (!search) return true;
-      const haystack = `${user.username} ${user.full_name ?? ""} ${user.team ?? ""}`.toLowerCase();
+      const haystack =
+        `${user.username} ${user.full_name ?? ""} ${user.team ?? ""} ${user.email ?? ""}`.toLowerCase();
       return haystack.includes(search.toLowerCase());
     });
   }, [users.data, search, roleFilter]);
@@ -70,11 +86,13 @@ export default function UsersPage() {
     return counts;
   }, [users.data]);
 
+  const done = (message) => setFeedback({ tone: "success", message });
+
   return (
     <div className="space-y-2.5">
       <PageHeader
         title="Utilisateurs"
-        subtitle="Comptes, rôles et périmètres d'accès"
+        subtitle="Comptes, rôles et destinataires des alertes"
         actions={
           <button type="button" className="btn btn-sm btn-primary" onClick={() => setEditing("new")}>
             <UserPlus size={13} /> Créer un compte
@@ -128,8 +146,8 @@ export default function UsersPage() {
             <SearchField
               value={search}
               onChange={setSearch}
-              placeholder="Nom, identifiant, équipe…"
-              width={220}
+              placeholder="Nom, identifiant, équipe, courriel…"
+              width={240}
             />
           </Toolbar>
         </div>
@@ -139,98 +157,139 @@ export default function UsersPage() {
           empty={() => rows.length === 0}
           emptyMessage="Aucun compte ne correspond"
         >
-          <table className="tbl">
-            <thead>
-              <tr>
-                <th>Nom</th>
-                <th style={{ width: 140 }}>Identifiant</th>
-                <th style={{ width: 140 }}>Rôle</th>
-                <th style={{ width: 120 }}>Équipe</th>
-                <th style={{ width: 130 }}>Téléphone</th>
-                <th style={{ width: 60 }}>PIN</th>
-                <th style={{ width: 140 }}>Dernière connexion</th>
-                <th style={{ width: 90 }}>État</th>
-                <th style={{ width: 100 }} />
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((user) => (
-                <tr key={user.id} style={{ opacity: user.is_active ? 1 : 0.55 }}>
-                  <td className="font-medium">
-                    {user.full_name || "—"}
-                    {user.id === me?.id && (
-                      <span className="text-[10.5px] ml-1.5" style={{ color: "var(--ink-3)" }}>
-                        (vous)
-                      </span>
-                    )}
-                  </td>
-                  <td className="mono-xs" style={{ color: "var(--ink-2)" }}>
-                    {user.username}
-                  </td>
-                  <td>
-                    <Badge color={ROLE_COLOR[user.role]} title={ROLE_DESCRIPTION[user.role]}>
-                      {ROLE_LABEL[user.role] ?? user.role}
-                    </Badge>
-                  </td>
-                  <td style={{ color: "var(--ink-3)" }}>{user.team || "—"}</td>
-                  <td className="mono-xs" style={{ color: "var(--ink-3)" }}>
-                    {user.phone_number || "—"}
-                  </td>
-                  <td>
-                    {user.has_pin ? (
-                      <span style={{ color: "var(--state-up)" }} title="Connexion par PIN activée">
-                        oui
-                      </span>
-                    ) : (
-                      <span style={{ color: "var(--ink-3)" }}>non</span>
-                    )}
-                  </td>
-                  <td className="num" style={{ color: "var(--ink-3)" }}>
-                    {user.last_login_at ? dateTime(user.last_login_at) : "jamais"}
-                  </td>
-                  <td>
-                    <Badge color={user.is_active ? "var(--state-up)" : "var(--ink-3)"}>
-                      {user.is_active ? "Actif" : "Désactivé"}
-                    </Badge>
-                  </td>
-                  <td>
-                    <div className="flex items-center gap-0.5 justify-end">
-                      <button
-                        type="button"
-                        className="btn btn-ghost btn-sm"
-                        title="Modifier"
-                        onClick={() => setEditing(user)}
-                      >
-                        <Pencil size={12} />
-                      </button>
-                      {user.role === ROLES.AGENT_TERRAIN && (
-                        <button
-                          type="button"
-                          className="btn btn-ghost btn-sm"
-                          title="Définir un code PIN"
-                          onClick={() => setPinFor(user)}
-                        >
-                          <KeyRound size={12} />
-                        </button>
-                      )}
-                      {user.is_active && user.id !== me?.id && (
-                        <button
-                          type="button"
-                          className="btn btn-ghost btn-sm"
-                          title="Désactiver ce compte"
-                          onClick={() => setToDeactivate(user)}
-                        >
-                          <ShieldOff size={12} />
-                        </button>
-                      )}
-                    </div>
-                  </td>
+          <div className="overflow-x-auto">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>Nom</th>
+                  <th style={{ width: 130 }}>Identifiant</th>
+                  <th style={{ width: 130 }}>Rôle</th>
+                  <th style={{ width: 110 }}>Équipe</th>
+                  <th style={{ width: 200 }}>Courriel</th>
+                  <th style={{ width: 120 }}>Téléphone</th>
+                  <th style={{ width: 50 }}>PIN</th>
+                  <th style={{ width: 130 }}>Dernière connexion</th>
+                  <th style={{ width: 85 }}>État</th>
+                  <th style={{ width: 120 }} />
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {rows.map((user) => {
+                  const isSelf = user.id === me?.id;
+                  return (
+                    <tr key={user.id} style={{ opacity: user.is_active ? 1 : 0.55 }}>
+                      <td className="font-medium">
+                        {user.full_name || "—"}
+                        {isSelf && (
+                          <span className="text-[10.5px] ml-1.5" style={{ color: "var(--ink-3)" }}>
+                            (vous)
+                          </span>
+                        )}
+                      </td>
+                      <td className="mono-xs" style={{ color: "var(--ink-2)" }}>
+                        {user.username}
+                      </td>
+                      <td>
+                        <Badge color={ROLE_COLOR[user.role]} title={ROLE_DESCRIPTION[user.role]}>
+                          {ROLE_LABEL[user.role] ?? user.role}
+                        </Badge>
+                      </td>
+                      <td style={{ color: "var(--ink-3)" }}>{user.team || "—"}</td>
+                      <td className="mono-xs" style={{ color: "var(--ink-3)" }}>
+                        {user.email ? (
+                          <span
+                            className="inline-flex items-center gap-1"
+                            title={
+                              user.notify_email
+                                ? "Reçoit les alertes graves par courriel"
+                                : "Adresse renseignée, alertes non souscrites"
+                            }
+                          >
+                            <Mail
+                              size={11}
+                              style={{
+                                color: user.notify_email ? "var(--state-up)" : "var(--ink-3)",
+                                flexShrink: 0,
+                              }}
+                            />
+                            {user.email}
+                          </span>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td className="mono-xs" style={{ color: "var(--ink-3)" }}>
+                        {user.phone_number || "—"}
+                      </td>
+                      <td>
+                        {user.has_pin ? (
+                          <span style={{ color: "var(--state-up)" }} title="Connexion par PIN activée">
+                            oui
+                          </span>
+                        ) : (
+                          <span style={{ color: "var(--ink-3)" }}>non</span>
+                        )}
+                      </td>
+                      <td className="num" style={{ color: "var(--ink-3)" }}>
+                        {user.last_login_at ? dateTime(user.last_login_at) : "jamais"}
+                      </td>
+                      <td>
+                        <Badge color={user.is_active ? "var(--state-up)" : "var(--ink-3)"}>
+                          {user.is_active ? "Actif" : "Désactivé"}
+                        </Badge>
+                      </td>
+                      <td>
+                        <div className="flex items-center gap-0.5 justify-end">
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm"
+                            title="Modifier"
+                            onClick={() => setEditing(user)}
+                          >
+                            <Pencil size={12} />
+                          </button>
+                          {!isSelf && user.is_active && (
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              title="Réinitialiser le mot de passe"
+                              onClick={() => setPasswordFor(user)}
+                            >
+                              <Lock size={12} />
+                            </button>
+                          )}
+                          {user.role === ROLES.AGENT_TERRAIN && (
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              title="Définir un code PIN"
+                              onClick={() => setPinFor(user)}
+                            >
+                              <KeyRound size={12} />
+                            </button>
+                          )}
+                          {user.is_active && !isSelf && (
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              title="Désactiver ce compte"
+                              onClick={() => setToDeactivate(user)}
+                            >
+                              <ShieldOff size={12} />
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </QueryBoundary>
       </Panel>
+
+      <EmailAlertsPanel />
 
       {/* Aide-mémoire des rôles : évite d'aller lire la documentation
           pour savoir ce qu'on est en train d'accorder. */}
@@ -253,10 +312,11 @@ export default function UsersPage() {
       {editing && (
         <UserFormModal
           user={editing === "new" ? null : editing}
+          isSelf={editing !== "new" && editing.id === me?.id}
           onClose={() => setEditing(null)}
           actions={actions}
           onDone={(message) => {
-            setFeedback({ tone: "success", message });
+            done(message);
             setEditing(null);
           }}
         />
@@ -268,8 +328,20 @@ export default function UsersPage() {
           onClose={() => setPinFor(null)}
           actions={actions}
           onDone={(message) => {
-            setFeedback({ tone: "success", message });
+            done(message);
             setPinFor(null);
+          }}
+        />
+      )}
+
+      {passwordFor && (
+        <PasswordResetModal
+          user={passwordFor}
+          onClose={() => setPasswordFor(null)}
+          actions={actions}
+          onDone={(message) => {
+            done(message);
+            setPasswordFor(null);
           }}
         />
       )}
@@ -281,13 +353,17 @@ export default function UsersPage() {
         title="Désactiver le compte"
         message={
           toDeactivate
-            ? `${toDeactivate.full_name || toDeactivate.username} ne pourra plus se connecter et ses sessions en cours seront coupées. Le compte n'est pas supprimé : son historique d'actions reste consultable.`
+            ? `${toDeactivate.full_name || toDeactivate.username} ne pourra plus se connecter, ses sessions en cours seront coupées et il ne recevra plus d'alertes. Le compte n'est pas supprimé : son historique d'actions reste consultable.`
             : ""
         }
         confirmLabel="Désactiver"
         onConfirm={async () => {
-          await actions.deactivate.mutateAsync(toDeactivate.id);
-          setFeedback({ tone: "success", message: "Compte désactivé." });
+          try {
+            await actions.deactivate.mutateAsync(toDeactivate.id);
+            done("Compte désactivé.");
+          } catch (error) {
+            setFeedback({ tone: "error", message: errorMessage(error) });
+          }
           setToDeactivate(null);
         }}
       />
@@ -295,10 +371,122 @@ export default function UsersPage() {
   );
 }
 
+const SECURITY_LABEL = {
+  ssl: "TLS implicite (SMTPS)",
+  starttls: "STARTTLS",
+  none: "sans chiffrement",
+};
+
+/**
+ * État de la chaîne courriel et envoi d'un test.
+ *
+ * Le test existe pour qu'on ne découvre pas un mot de passe SMTP erroné le
+ * jour d'une vraie panne : il passe par exactement le même chemin qu'une
+ * alerte, et rend le message du serveur SMTP tel quel en cas d'échec.
+ */
+function EmailAlertsPanel() {
+  const status = useEmailStatus();
+  const sendTest = useSendTestEmail();
+  const [result, setResult] = useState(null);
+  const data = status.data;
+
+  let state = null;
+  if (data) {
+    if (!data.smtp_configured) state = { label: "SMTP non configuré", color: "var(--sev-critical)" };
+    else if (!data.notifications_enabled) state = { label: "Envoi coupé", color: "var(--sev-medium)" };
+    else if (data.recipients.length === 0) state = { label: "Aucun destinataire", color: "var(--sev-medium)" };
+    else state = { label: "Opérationnel", color: "var(--state-up)" };
+  }
+
+  const sendTestEmail = async () => {
+    setResult(null);
+    try {
+      const { sent_to: sentTo } = await sendTest.mutateAsync();
+      setResult({ tone: "success", message: `Courriel de test envoyé à ${sentTo.join(", ")}.` });
+    } catch (error) {
+      setResult({ tone: "error", message: errorMessage(error) });
+    }
+  };
+
+  return (
+    <Panel
+      title="Alertes par courriel"
+      subtitle="Incidents graves envoyés aux comptes abonnés"
+      actions={
+        <button
+          type="button"
+          className="btn btn-sm"
+          onClick={sendTestEmail}
+          disabled={sendTest.isPending || !data?.smtp_configured || !data?.recipients.length}
+        >
+          <Send size={12} /> {sendTest.isPending ? "Envoi…" : "Envoyer un test"}
+        </button>
+      }
+    >
+      <QueryBoundary query={status}>
+        {data && (
+          <div className="space-y-2">
+            {result && (
+              <Notice tone={result.tone} onClose={() => setResult(null)}>
+                {result.message}
+              </Notice>
+            )}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-6">
+              <div>
+                <DefRow label="État">
+                  <Badge color={state.color}>{state.label}</Badge>
+                </DefRow>
+                <DefRow label="Serveur" mono>
+                  {data.smtp_host
+                    ? `${data.smtp_host}:${data.smtp_port} · ${SECURITY_LABEL[data.security]}`
+                    : "—"}
+                </DefRow>
+                <DefRow label="Expéditeur" mono>
+                  {data.sender}
+                </DefRow>
+                <DefRow label="Gravités">
+                  {data.severities.map((severity) => severityMeta(severity).label).join(", ")}
+                </DefRow>
+              </div>
+              <div>
+                <DefRow label="Destinataires" mono>
+                  {data.recipients.length ? data.recipients.join(", ") : "Aucun"}
+                </DefRow>
+                {data.fixed_recipients.length > 0 && (
+                  <DefRow label="Listes fixes" mono>
+                    {data.fixed_recipients.join(", ")}
+                  </DefRow>
+                )}
+              </div>
+            </div>
+            {!data.smtp_configured && (
+              <Notice tone="warning">
+                Aucun serveur SMTP : renseignez SMTP_HOST et les variables associées dans .env,
+                puis redémarrez le backend.
+              </Notice>
+            )}
+            {data.smtp_configured && !data.notifications_enabled && (
+              <Notice tone="warning">
+                Le serveur SMTP est configuré mais l'envoi automatique est coupé
+                (NOTIFICATIONS_ENABLED=false). Le test fonctionne quand même : validez la
+                configuration, puis activez l'envoi.
+              </Notice>
+            )}
+            <p className="text-[10.5px]" style={{ color: "var(--ink-3)" }}>
+              Pour ajouter un destinataire, modifiez son compte : adresse courriel et case
+              « Recevoir les alertes ». Chacun peut aussi s'abonner depuis « Mon compte ».
+            </p>
+          </div>
+        )}
+      </QueryBoundary>
+    </Panel>
+  );
+}
+
 /** Création et modification d'un compte. */
-function UserFormModal({ user, onClose, actions, onDone }) {
+function UserFormModal({ user, isSelf, onClose, actions, onDone }) {
   const isNew = !user;
-  const { data: reference } = useReference();
+  const { data: sites } = useSites();
 
   const [form, setForm] = useState({
     username: user?.username ?? "",
@@ -307,57 +495,61 @@ function UserFormModal({ user, onClose, actions, onDone }) {
     password: "",
     pin: "",
     phone_number: user?.phone_number ?? "",
+    email: user?.email ?? "",
+    notify_email: user?.notify_email ?? false,
     team: user?.team ?? "",
     employee_code: user?.employee_code ?? "",
-    region_id: user?.region_id ?? "",
-    locality_id: user?.locality_id ?? "",
-    ministry_id: user?.ministry_id ?? "",
+    site: user?.site ?? "",
   });
   const [error, setError] = useState(null);
 
   const set = (key) => (event) => setForm({ ...form, [key]: event.target.value });
 
-  const numberOrNull = (value) => (value === "" || value === null ? null : Number(value));
-
+  const username = form.username.trim();
+  const email = form.email.trim();
+  const usernameInvalid = isNew && username.length > 0 && !USERNAME_PATTERN.test(username);
   const passwordTooShort = isNew && form.password.length > 0 && form.password.length < 8;
-  const valid = isNew
-    ? form.username.trim().length >= 3 && form.full_name.trim() && form.password.length >= 8
-    : form.full_name.trim();
+  const emailInvalid = email.length > 0 && !EMAIL_PATTERN.test(email);
+  const notifyWithoutEmail = form.notify_email && !email;
+
+  const valid =
+    (isNew
+      ? username.length >= 3 && !usernameInvalid && form.full_name.trim() && form.password.length >= 8
+      : form.full_name.trim()) &&
+    !emailInvalid &&
+    !notifyWithoutEmail;
 
   const submit = async () => {
     setError(null);
+    const common = {
+      full_name: form.full_name.trim(),
+      phone_number: form.phone_number.trim() || null,
+      email: email || null,
+      notify_email: form.notify_email,
+      team: form.team.trim() || null,
+      employee_code: form.employee_code.trim() || null,
+      site: form.site.trim() || null,
+    };
     try {
       if (isNew) {
         await actions.create.mutateAsync({
-          username: form.username.trim(),
-          full_name: form.full_name.trim(),
+          ...common,
+          username,
           role: form.role,
           password: form.password,
           pin: form.pin || null,
-          phone_number: form.phone_number || null,
-          team: form.team || null,
-          employee_code: form.employee_code || null,
-          region_id: numberOrNull(form.region_id),
-          locality_id: numberOrNull(form.locality_id),
-          ministry_id: numberOrNull(form.ministry_id),
         });
-        onDone(`Compte « ${form.username.trim()} » créé. Il peut se connecter immédiatement.`);
+        onDone(`Compte « ${username} » créé. Il peut se connecter immédiatement.`);
       } else {
+        const roleChanged = form.role !== user.role;
         await actions.update.mutateAsync({
           userId: user.id,
-          payload: {
-            full_name: form.full_name.trim(),
-            role: form.role,
-            phone_number: form.phone_number || null,
-            team: form.team || null,
-            employee_code: form.employee_code || null,
-            region_id: numberOrNull(form.region_id),
-            locality_id: numberOrNull(form.locality_id),
-            ministry_id: numberOrNull(form.ministry_id),
-          },
+          // Le rôle n'est envoyé que s'il change : le backend coupe les
+          // sessions du compte à chaque changement de rôle.
+          payload: roleChanged ? { ...common, role: form.role } : common,
         });
         onDone(
-          form.role !== user.role
+          roleChanged
             ? "Compte mis à jour. Le changement de rôle a coupé ses sessions en cours."
             : "Compte mis à jour.",
         );
@@ -375,7 +567,7 @@ function UserFormModal({ user, onClose, actions, onDone }) {
       onClose={onClose}
       title={isNew ? "Créer un compte" : `Modifier ${user.username}`}
       subtitle={isNew ? "L'utilisateur pourra se connecter dès la création." : undefined}
-      width={540}
+      width={560}
       footer={
         <>
           <button type="button" className="btn btn-sm" onClick={onClose}>
@@ -399,7 +591,12 @@ function UserFormModal({ user, onClose, actions, onDone }) {
           <Field
             label="Identifiant"
             required
-            hint={isNew ? "3 caractères minimum, non modifiable ensuite." : undefined}
+            error={usernameInvalid ? "Lettres, chiffres, point, tiret ou souligné." : null}
+            hint={
+              isNew
+                ? "3 caractères minimum. L'utilisateur pourra le changer lui-même."
+                : "Modifiable par l'utilisateur, depuis « Mon compte »."
+            }
           >
             <input
               className="input"
@@ -420,8 +617,16 @@ function UserFormModal({ user, onClose, actions, onDone }) {
           </Field>
         </div>
 
-        <Field label="Rôle" required hint={ROLE_DESCRIPTION[form.role]}>
-          <select className="select" value={form.role} onChange={set("role")}>
+        <Field
+          label="Rôle"
+          required
+          hint={
+            isSelf
+              ? "Vous ne pouvez pas modifier votre propre rôle : demandez-le à un autre Chef NOC."
+              : ROLE_DESCRIPTION[form.role]
+          }
+        >
+          <select className="select" value={form.role} onChange={set("role")} disabled={isSelf}>
             {ROLE_ORDER.map((role) => (
               <option key={role} value={role}>
                 {ROLE_LABEL[role]}
@@ -433,17 +638,17 @@ function UserFormModal({ user, onClose, actions, onDone }) {
         {isNew && (
           <div className="grid grid-cols-2 gap-2.5">
             <Field
-              label="Mot de passe"
+              label="Mot de passe provisoire"
               required
               error={passwordTooShort ? "8 caractères minimum." : null}
-              hint={passwordTooShort ? undefined : "8 caractères minimum."}
+              hint={passwordTooShort ? undefined : "À transmettre ; modifiable depuis « Mon compte »."}
             >
               <input
                 className="input"
                 type="text"
                 value={form.password}
                 onChange={set("password")}
-                placeholder="À transmettre à l'utilisateur"
+                autoComplete="off"
               />
             </Field>
             <Field
@@ -451,7 +656,7 @@ function UserFormModal({ user, onClose, actions, onDone }) {
               hint={
                 form.role === ROLES.AGENT_TERRAIN
                   ? "4 à 6 chiffres — connexion rapide sur console partagée."
-                  : "Sans effet : seuls les agents terrain peuvent se connecter par PIN."
+                  : "Sans effet : seuls les agents terrain se connectent par PIN."
               }
             >
               <input
@@ -468,8 +673,26 @@ function UserFormModal({ user, onClose, actions, onDone }) {
           </div>
         )}
 
-        <div className="grid grid-cols-3 gap-2.5">
-          <Field label="Téléphone" hint="Pour les alertes SMS.">
+        <div className="grid grid-cols-2 gap-2.5">
+          <Field
+            label="Courriel"
+            error={
+              emailInvalid
+                ? "Adresse invalide."
+                : notifyWithoutEmail
+                  ? "Obligatoire pour recevoir les alertes."
+                  : null
+            }
+          >
+            <input
+              className="input"
+              type="email"
+              value={form.email}
+              onChange={set("email")}
+              placeholder="k.ouedraogo@anptic.bf"
+            />
+          </Field>
+          <Field label="Téléphone">
             <input
               className="input"
               value={form.phone_number}
@@ -477,6 +700,19 @@ function UserFormModal({ user, onClose, actions, onDone }) {
               placeholder="+226…"
             />
           </Field>
+        </div>
+
+        <label className="flex items-center gap-2 text-[12px] cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={form.notify_email}
+            onChange={(event) => setForm({ ...form, notify_email: event.target.checked })}
+            style={{ accentColor: "var(--accent-ink)" }}
+          />
+          Recevoir les alertes graves par courriel
+        </label>
+
+        <div className="grid grid-cols-3 gap-2.5">
           <Field label="Équipe">
             <input className="input" value={form.team} onChange={set("team")} placeholder="Quart A" />
           </Field>
@@ -487,48 +723,19 @@ function UserFormModal({ user, onClose, actions, onDone }) {
               onChange={set("employee_code")}
             />
           </Field>
-        </div>
-
-        <div
-          className="pt-2 border-t"
-          style={{ borderColor: "var(--border)" }}
-        >
-          <p className="text-[10.5px] mb-2" style={{ color: "var(--ink-3)" }}>
-            Périmètre géographique — facultatif, sert à contextualiser les écrans et les
-            alertes envoyées à cet utilisateur.
-          </p>
-          <div className="grid grid-cols-3 gap-2.5">
-            <Field label="Région">
-              <select className="select" value={form.region_id} onChange={set("region_id")}>
-                <option value="">Aucune</option>
-                {(reference?.regions ?? []).map((region) => (
-                  <option key={region.id} value={region.id}>
-                    {region.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Site">
-              <select className="select" value={form.locality_id} onChange={set("locality_id")}>
-                <option value="">Aucun</option>
-                {(reference?.localities ?? []).map((locality) => (
-                  <option key={locality.id} value={locality.id}>
-                    {locality.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Ministère">
-              <select className="select" value={form.ministry_id} onChange={set("ministry_id")}>
-                <option value="">Aucun</option>
-                {(reference?.ministries ?? []).map((ministry) => (
-                  <option key={ministry.id} value={ministry.id}>
-                    {ministry.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
-          </div>
+          <Field label="Site" hint="Tel que les outils le nomment.">
+            <input
+              className="input"
+              value={form.site}
+              onChange={set("site")}
+              list="user-form-sites"
+            />
+            <datalist id="user-form-sites">
+              {(sites ?? []).map((entry) => (
+                <option key={entry.site} value={entry.site} />
+              ))}
+            </datalist>
+          </Field>
         </div>
 
         {!isNew && form.role !== user.role && (
@@ -537,6 +744,67 @@ function UserFormModal({ user, onClose, actions, onDone }) {
             portent l'ancien rôle et seraient refusés.
           </Notice>
         )}
+      </div>
+    </Modal>
+  );
+}
+
+function PasswordResetModal({ user, onClose, actions, onDone }) {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(null);
+
+  const submit = async () => {
+    setError(null);
+    try {
+      await actions.resetPassword.mutateAsync({ userId: user.id, password });
+      onDone(
+        `Mot de passe de ${user.full_name || user.username} réinitialisé et sessions coupées. ` +
+          "Transmettez-lui le mot de passe provisoire ; il le changera depuis « Mon compte ».",
+      );
+    } catch (submitError) {
+      setError(errorMessage(submitError));
+    }
+  };
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title="Réinitialiser le mot de passe"
+      subtitle={`${user.full_name || user.username} — mot de passe oublié`}
+      width={400}
+      footer={
+        <>
+          <button type="button" className="btn btn-sm" onClick={onClose}>
+            Annuler
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm btn-primary"
+            disabled={password.length < 8 || actions.resetPassword.isPending}
+            onClick={submit}
+          >
+            {actions.resetPassword.isPending ? "…" : "Réinitialiser"}
+          </button>
+        </>
+      }
+    >
+      <div className="space-y-2.5">
+        {error && <Notice tone="error">{error}</Notice>}
+        <Field label="Mot de passe provisoire" required hint="8 caractères minimum.">
+          <input
+            className="input"
+            type="text"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            autoComplete="off"
+            autoFocus
+          />
+        </Field>
+        <p className="text-[10.5px]" style={{ color: "var(--ink-3)" }}>
+          Toutes ses sessions en cours sont coupées : si l'oubli cache une compromission,
+          l'ancien mot de passe n'ouvre plus rien.
+        </p>
       </div>
     </Modal>
   );

@@ -1,165 +1,183 @@
 """
-Fenêtres de maintenance planifiée (ops_maintenance_window).
+Fenêtres de maintenance planifiée.
 
-Deux origines possibles :
+CE QU'UNE FENÊTRE FAIT, ET NE FAIT PAS. Elle ne masque pas l'alerte : elle
+la MARQUE. Un exploitant doit voir qu'un site est en coupure programmée —
+sinon il croit à un trou de supervision et envoie quelqu'un sur place pour
+rien. En revanche, une alerte marquée est exclue des indicateurs, parce
+qu'une coupure voulue n'est pas une panne et que la compter fausserait à la
+fois le volume d'incidents et le respect du SLA.
 
-* manuelle — créée depuis le dashboard, `created_by_user_id` renseigné ;
-* importée — poussée par l'ETL via POST /api/internal/maintenance-windows,
-  `source_tool` + `external_id` renseignés (mode maintenance Zabbix,
-  downtime Centreon, etc.).
-
-Toute fenêtre avec `suppress_alerts` neutralise les incidents qu'elle
-recouvre dans la vue `v_incident` (colonne `is_maintenance`), donc dans
-tous les KPI et le SLA.
+PORTÉE : un équipement OU un site. Le second cas est celui qui sert en
+pratique — quand un groupe électrogène est coupé pour entretien, tous les
+équipements du site tombent, et personne n'a le temps de déclarer trente
+fenêtres à la main. La contrainte de schéma interdit une fenêtre sans
+portée : elle s'appliquerait à tout le parc et éteindrait la supervision.
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import logging
+from datetime import datetime, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import text
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.models.operations import MaintenanceWindow, User
-from app.models.warehouse import Node
-from app.services import kpi_service
+from app.models import MaintenanceWindow, User
+from app.services import live_service
+
+logger = logging.getLogger(__name__)
 
 
-def _serialize(db: Session, where: str, params: dict) -> list[dict]:
+def _serialise(window: MaintenanceWindow, author: str | None = None) -> dict:
+    now = datetime.now(timezone.utc)
+    return {
+        "id": window.id,
+        "node_key": window.node_key,
+        "site": window.site,
+        "reason": window.reason,
+        "starts_at": window.starts_at.isoformat(),
+        "ends_at": window.ends_at.isoformat(),
+        "suppress_alerts": window.suppress_alerts,
+        "created_by": author,
+        "created_at": window.created_at.isoformat() if window.created_at else None,
+        # Calculé ici plutôt qu'au frontend : trois clients qui déduisent
+        # chacun « est-elle active ? » de deux dates finiraient par diverger
+        # sur les fuseaux.
+        "active": window.starts_at <= now <= window.ends_at,
+        "upcoming": window.starts_at > now,
+    }
+
+
+def _author_names(db: Session, windows: list[MaintenanceWindow]) -> dict[int, str]:
+    ids = {w.created_by for w in windows if w.created_by}
+    if not ids:
+        return {}
     rows = db.execute(
-        text(
-            f"""
-            SELECT w.id, w.node_id, n.name AS node_name,
-                   w.locality_id, l.name AS locality_name,
-                   w.reason, w.starts_at, w.ends_at, w.suppress_alerts,
-                   w.created_by_user_id, u.full_name AS created_by_full_name,
-                   w.source_tool, w.external_id, w.created_at,
-                   (now() BETWEEN w.starts_at AND w.ends_at) AS is_active
-            FROM ops_maintenance_window w
-            LEFT JOIN dim_node     n ON n.id = w.node_id
-            LEFT JOIN dim_locality l ON l.id = w.locality_id
-            LEFT JOIN dim_user     u ON u.id = w.created_by_user_id
-            WHERE {where}
-            ORDER BY w.starts_at DESC
-            """
-        ),
-        params,
-    ).mappings().all()
-    return [dict(r) for r in rows]
+        select(User.id, User.full_name, User.username).where(User.id.in_(ids))
+    )
+    return {row.id: row.full_name or row.username for row in rows}
 
 
-def list_windows(db: Session, only_active: bool = False, limit: int = 100) -> list[dict]:
-    where = "TRUE"
-    params: dict = {}
-    if only_active:
-        where = "now() BETWEEN w.starts_at AND w.ends_at"
-    windows = _serialize(db, where, params)
-    return windows[:limit]
+def list_windows(
+    db: Session, scope: str = "all", limit: int = 200
+) -> list[dict]:
+    """Fenêtres, filtrées par leur position dans le temps.
+
+    `scope` vaut `active`, `upcoming`, `past` ou `all`. Le filtrage est fait
+    en SQL et non en Python : sur un parc qui accumule des années de
+    fenêtres, tout charger pour n'en garder que trois serait absurde.
+    """
+    now = datetime.now(timezone.utc)
+    query = select(MaintenanceWindow)
+
+    if scope == "active":
+        query = query.where(
+            MaintenanceWindow.starts_at <= now, MaintenanceWindow.ends_at >= now
+        )
+    elif scope == "upcoming":
+        query = query.where(MaintenanceWindow.starts_at > now)
+    elif scope == "past":
+        query = query.where(MaintenanceWindow.ends_at < now)
+
+    windows = list(
+        db.execute(
+            query.order_by(MaintenanceWindow.starts_at.desc()).limit(limit)
+        ).scalars()
+    )
+    authors = _author_names(db, windows)
+    return [_serialise(w, authors.get(w.created_by)) for w in windows]
 
 
-def create_window(
+async def create_window(
     db: Session,
-    user: User,
-    *,
-    node_id: int | None,
-    locality_id: int | None,
+    user_id: int,
     reason: str,
     starts_at: datetime,
     ends_at: datetime,
+    node_key: str | None = None,
+    site: str | None = None,
     suppress_alerts: bool = True,
 ) -> dict:
-    if node_id is None and locality_id is None:
-        raise HTTPException(
-            status_code=422,
-            detail="Préciser au moins un équipement ou un site.",
-        )
     if ends_at <= starts_at:
-        raise HTTPException(status_code=422, detail="La fin doit être postérieure au début.")
-    if node_id is not None and db.get(Node, node_id) is None:
-        raise HTTPException(status_code=404, detail="Équipement introuvable.")
+        raise HTTPException(400, "La fin de la fenêtre doit suivre son début.")
+    if not node_key and not site:
+        raise HTTPException(
+            400,
+            "Une fenêtre doit viser un équipement ou un site. Sans portée, "
+            "elle couvrirait tout le parc et éteindrait la supervision.",
+        )
+
+    # L'équipement est vérifié contre l'instantané : déclarer une maintenance
+    # sur un identifiant qui n'existe pas produirait une fenêtre qui ne
+    # s'appliquerait jamais, sans que personne ne s'en aperçoive avant la
+    # coupure.
+    if node_key:
+        node = await live_service.get_node(node_key)
+        if node is None:
+            raise HTTPException(
+                404,
+                f"Aucun équipement « {node_key} » dans l'instantané courant. "
+                "Vérifier l'identifiant, ou viser le site plutôt que "
+                "l'équipement.",
+            )
 
     window = MaintenanceWindow(
-        node_id=node_id,
-        locality_id=locality_id,
+        node_key=node_key,
+        site=site,
         reason=reason,
         starts_at=starts_at,
         ends_at=ends_at,
         suppress_alerts=suppress_alerts,
-        created_by_user_id=user.id,
+        created_by=user_id,
     )
     db.add(window)
     db.commit()
     db.refresh(window)
 
-    # Une fenêtre nouvellement créée change rétroactivement les KPI :
-    # les incidents qu'elle recouvre en sortent.
-    kpi_service.invalidate_cache()
-    return _serialize(db, "w.id = :id", {"id": window.id})[0]
+    logger.info(
+        "Fenêtre de maintenance créée : %s du %s au %s",
+        node_key or f"site {site}",
+        starts_at.isoformat(),
+        ends_at.isoformat(),
+    )
+    return _serialise(window)
 
 
 def delete_window(db: Session, window_id: int) -> None:
     window = db.get(MaintenanceWindow, window_id)
     if window is None:
-        raise HTTPException(status_code=404, detail="Fenêtre introuvable.")
+        raise HTTPException(404, "Fenêtre de maintenance introuvable.")
     db.delete(window)
     db.commit()
-    kpi_service.invalidate_cache()
 
 
-def import_windows(db: Session, windows: list[dict]) -> dict:
-    """Import en masse depuis l'ETL.
+def active_at(db: Session, at: datetime | None = None) -> list[MaintenanceWindow]:
+    """Fenêtres actives à un instant donné, pour les autres services."""
+    moment = at or datetime.now(timezone.utc)
+    return list(
+        db.execute(
+            select(MaintenanceWindow).where(
+                MaintenanceWindow.starts_at <= moment,
+                MaintenanceWindow.ends_at >= moment,
+            )
+        ).scalars()
+    )
 
-    Rapprochement de l'équipement par son nom : `dim_node` n'a pas de
-    colonne `code`, et `dim_node_source_map.external_ref` n'est pas
-    forcément l'identifiant que l'outil utilise pour ses maintenances.
-    Un nom introuvable n'est pas une erreur bloquante — il est compté et
-    renvoyé, pour qu'un import partiel reste exploitable.
+
+def covers(
+    windows: list[MaintenanceWindow], node_key: str | None, site: str | None
+) -> MaintenanceWindow | None:
+    """Fenêtre couvrant un équipement, s'il y en a une.
+
+    Fonction partagée par alerts_service et node_service : la règle « une
+    fenêtre couvre par équipement OU par site » ne doit exister qu'à un seul
+    endroit, sinon les deux écrans finiront par ne plus s'accorder sur ce
+    qui est en maintenance.
     """
-    created = updated = unknown = 0
-
-    for item in windows:
-        node = db.query(Node).filter(Node.name.ilike(item["node_code"])).first()
-        if node is None:
-            unknown += 1
-            continue
-
-        existing = (
-            db.query(MaintenanceWindow)
-            .filter(
-                MaintenanceWindow.source_tool == item["source_tool"],
-                MaintenanceWindow.external_id == item["external_id"],
-            )
-            .first()
-        )
-        now = datetime.now(UTC)
-        starts_at = item.get("starts_at") or now
-        ends_at = item.get("ends_at") or now
-
-        if existing:
-            existing.node_id = node.id
-            existing.reason = item["reason"]
-            existing.starts_at = starts_at
-            existing.ends_at = ends_at
-            updated += 1
-        else:
-            db.add(
-                MaintenanceWindow(
-                    node_id=node.id,
-                    reason=item["reason"],
-                    starts_at=starts_at,
-                    ends_at=ends_at,
-                    suppress_alerts=True,
-                    source_tool=item["source_tool"],
-                    external_id=item["external_id"],
-                )
-            )
-            created += 1
-
-    db.commit()
-    kpi_service.invalidate_cache()
-    return {
-        "received": len(windows),
-        "created": created,
-        "updated": updated,
-        "unknown_node": unknown,
-    }
+    for window in windows:
+        if window.node_key and window.node_key == node_key:
+            return window
+        if window.site and site and window.site == site:
+            return window
+    return None

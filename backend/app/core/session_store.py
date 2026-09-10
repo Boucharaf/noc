@@ -1,7 +1,7 @@
 import logging
 from datetime import UTC
 
-from app.db.redis_client import redis_client
+from app.db.redis_client import redis_sync as redis_client
 
 logger = logging.getLogger(__name__)
 

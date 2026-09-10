@@ -1,40 +1,41 @@
-"""Modèles ORM.
+"""
+Modèles ORM du NOC.
 
-Séparés en deux fichiers selon qui écrit la table :
-  * warehouse.py  — tables créées ET peuplées par l'ETL (lecture seule ici)
-  * operations.py — dim_user + tables `ops_*`, propres au backend
+UN SEUL FICHIER, désormais. L'ancienne séparation entre `warehouse.py`
+(tables peuplées par l'ETL, lues ici) et `operations.py` n'a plus lieu
+d'être : les tables de l'entrepôt ont disparu avec lui.
+
+L'état courant des équipements et des alertes vit dans l'instantané Redis
+(collector/state.py), l'historique chez les outils sources
+(backend/app/services/history_service.py). Ne reste ici que ce que le NOC
+produit lui-même — voir backend/sql/schema.sql.
 """
 from app.models.operations import (
+    AlertNotified,
+    AlertState,
+    AlertTimeline,
     AuditLog,
     FieldIntervention,
-    IncidentAssignment,
-    IncidentNotified,
-    IncidentTimeline,
+    KpiDaily,
     MaintenanceWindow,
+    ManualIncident,
     NotificationLog,
     PushSubscription,
     SlaTarget,
     User,
 )
-from app.models.warehouse import (
-    Cause,
-    Incident,
-    Link,
-    Locality,
-    MetricValue,
-    Ministry,
-    Node,
-    NodeSourceMap,
-    Region,
-    SupervisionCoverageDaily,
-)
 
 __all__ = [
-    # Entrepôt (ETL)
-    "Ministry", "Region", "Locality", "Node", "Link", "NodeSourceMap",
-    "Cause", "Incident", "SupervisionCoverageDaily", "MetricValue",
-    # Backend
-    "User", "IncidentTimeline", "IncidentAssignment", "SlaTarget",
-    "MaintenanceWindow", "FieldIntervention", "PushSubscription",
-    "NotificationLog", "AuditLog", "IncidentNotified",
+    "AlertNotified",
+    "AlertState",
+    "AlertTimeline",
+    "AuditLog",
+    "FieldIntervention",
+    "KpiDaily",
+    "MaintenanceWindow",
+    "ManualIncident",
+    "NotificationLog",
+    "PushSubscription",
+    "SlaTarget",
+    "User",
 ]

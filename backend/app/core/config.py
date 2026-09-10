@@ -1,14 +1,21 @@
 """
 Configuration du backend NOC.
 
-Point d'alignement principal avec l'ETL : le backend lit la MÊME base que
-celle où l'ETL écrit, via la MÊME variable d'environnement
-`NOC_WAREHOUSE_DSN` (voir etl/config.py::WarehouseConfig et etl/.env.example).
-Il n'y a plus de base `noc_db` distincte : l'entrepôt est la source unique.
+TROIS SOURCES DE DONNÉES, ET UNE SEULE VARIABLE PAR SOURCE :
 
-Idem pour Redis : `REDIS_URL` est la variable que l'ETL utilise déjà pour
-publier son statut de collecte (etl/pipelines/status.py). Le backend s'y
-connecte avec la même URL pour lire ces clés.
+  REDIS_URL          — l'instantané publié par le collecteur, et le cache
+                       d'historique. C'est de LOIN le chemin le plus
+                       fréquenté : tous les écrans « maintenant » n'en
+                       sortent pas.
+  NOC_DATABASE_URL   — la petite base PostgreSQL des données propres au
+                       NOC (comptes, acquittements, maintenances, agrégats
+                       journaliers). Voir backend/sql/schema.sql.
+  <OUTIL>_API_URL    — les outils sources, interrogés à la demande pour
+                       l'historique (integrations/config.py).
+
+L'ancienne variable NOC_WAREHOUSE_DSN reste acceptée en repli pour ne pas
+casser un déploiement existant, mais elle ne désigne plus un entrepôt : la
+base ne contient plus ni métriques ni faits. Voir ARCHITECTURE.md.
 """
 import os
 
@@ -21,77 +28,71 @@ def _csv(name: str, default: str = "") -> list[str]:
     return [item.strip() for item in os.getenv(name, default).split(",") if item.strip()]
 
 
-# ---------------------------------------------------------------------------
-# Journalisation
-# ---------------------------------------------------------------------------
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 
 # ---------------------------------------------------------------------------
-# Entrepôt (partagé avec l'ETL)
+# Base de données du NOC
 # ---------------------------------------------------------------------------
-# Priorité à NOC_WAREHOUSE_DSN pour n'avoir qu'une seule variable à régler
-# pour l'ETL et le backend. Les variables DB_* restent acceptées en repli
-# pour les déploiements Docker qui composent l'URL morceau par morceau.
-def _warehouse_dsn() -> str:
-    dsn = os.getenv("NOC_WAREHOUSE_DSN")
-    if dsn:
-        return dsn
+def _database_url() -> str:
+    for name in ("NOC_DATABASE_URL", "NOC_WAREHOUSE_DSN"):
+        value = os.getenv(name)
+        if value:
+            return value
     from urllib.parse import quote_plus
 
-    user = quote_plus(os.getenv("DB_USER", "noc"))
-    password = quote_plus(os.getenv("DB_PASSWORD", "noc"))
-    host = os.getenv("DB_HOST", "postgres")
-    port = os.getenv("DB_PORT", "5432")
-    name = os.getenv("DB_NAME", "noc_warehouse")
+    user = quote_plus(os.getenv("POSTGRES_USER", "noc"))
+    password = quote_plus(os.getenv("POSTGRES_PASSWORD", "noc"))
+    host = os.getenv("POSTGRES_HOST", "postgres")
+    port = os.getenv("POSTGRES_PORT", "5432")
+    name = os.getenv("POSTGRES_DB", "noc")
     return f"postgresql://{user}:{password}@{host}:{port}/{name}"
 
 
-WAREHOUSE_DSN = _warehouse_dsn()
+DATABASE_URL = _database_url()
 
-DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "10"))
-DB_MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "20"))
+# Un pool modeste : la base ne sert plus le chemin chaud du tableau de bord,
+# seulement les écritures d'exploitation et les agrégats. Dimensionner à
+# trente connexions comme l'ancien entrepôt reviendrait à réserver de la
+# mémoire côté PostgreSQL pour des connexions qui resteraient inactives.
+DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))
+DB_MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "10"))
 
 
 # ---------------------------------------------------------------------------
-# Redis (partagé avec l'ETL)
+# Redis — instantané et cache
 # ---------------------------------------------------------------------------
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-CACHE_TTL = int(os.getenv("CACHE_TTL", "300"))
 
-# Préfixe exact des clés écrites par etl/pipelines/status.py. Toute
-# modification de cette constante côté ETL doit être répercutée ici, sinon
-# la page Interopérabilité affichera tous les outils comme injoignables.
-ETL_STATUS_KEY_PREFIX = os.getenv("ETL_STATUS_KEY_PREFIX", "noc:etl:status:")
+# DOIT valoir la même chose que pour le collecteur : c'est cette valeur qui
+# fixe la durée de vie des clés d'instantané (trois cycles). Si le backend
+# la croit plus courte que le collecteur, il déclarera la collecte
+# interrompue alors qu'elle tourne.
+COLLECT_INTERVAL_S = int(os.getenv("COLLECT_INTERVAL_S", "300"))
 
-# Intervalle de collecte de l'ETL (etl/config.py::collect_interval_s). Sert
-# à décider à partir de quand un statut publié est considéré comme périmé.
-ETL_COLLECT_INTERVAL_S = int(os.getenv("COLLECT_INTERVAL_S", "300"))
-
-# Outils du périmètre. Fixés ici plutôt que déduits des clés Redis : un
-# outil dont le collecteur n'a jamais tourné doit apparaître comme
-# « jamais collecté », pas disparaître de la page.
+# Outils du périmètre, énumérés ici plutôt que déduits des clés Redis
+# présentes : un outil configuré dont le collecteur n'a jamais joint l'API
+# doit apparaître comme « jamais collecté », pas disparaître de la page
+# Interopérabilité.
 SUPERVISION_TOOLS = tuple(
-    _csv("SUPERVISION_TOOLS", "zabbix,itop,netxms,centreon,nagios,nsp")
+    _csv("SUPERVISION_TOOLS", "zabbix,centreon,itop,netxms,nagios,nsp")
 )
 
 
 # ---------------------------------------------------------------------------
 # Sécurité
 # ---------------------------------------------------------------------------
-JWT_SECRET = os.getenv("SECRET_KEY", "dev-secret-key")
+JWT_SECRET = os.getenv("SECRET_KEY", "")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 REFRESH_TOKEN_EXPIRATION_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRATION_DAYS", "7"))
 
-# Clé statique présentée par l'ETL sur les routes /api/internal/*.
-# Sans valeur, ces routes répondent 503 : mieux vaut une intégration
-# visiblement non configurée qu'un endpoint interne ouvert.
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
 
-# Cookie du refresh token. `secure=True` par défaut, ce qui est le
-# comportement correct derrière le reverse proxy TLS. Ne passer à false que
-# pour un dev local servi en http://.
+# `secure=True` par défaut : c'est le comportement correct derrière le
+# reverse proxy TLS. Ne passer à false que pour un développement local servi
+# en http:// — sinon le navigateur refuse le cookie et la session tombe au
+# bout de trente minutes sans explication.
 REFRESH_COOKIE_SECURE = _bool("REFRESH_COOKIE_SECURE", True)
 
 CORS_ORIGINS = _csv("CORS_ORIGINS", "http://localhost,http://localhost:5173")
@@ -102,15 +103,19 @@ RATE_LIMIT_WRITE_PER_MIN = int(os.getenv("RATE_LIMIT_WRITE_PER_MIN", "30"))
 
 
 # ---------------------------------------------------------------------------
-# Veilleur d'incidents (remplace l'ancienne ingestion par webhook)
+# Diffusion temps réel
 # ---------------------------------------------------------------------------
-# Les incidents n'arrivent plus par HTTP : l'ETL les écrit directement dans
-# fact_incident. Le backend les découvre en interrogeant périodiquement la
-# table, et c'est ce veilleur qui déclenche notifications et WebSocket.
-WATCHER_ENABLED = _bool("WATCHER_ENABLED", True)
-WATCHER_INTERVAL_S = int(os.getenv("WATCHER_INTERVAL_S", "30"))
+# Le backend s'abonne au canal Redis que le collecteur alimente, et
+# retransmet vers les navigateurs par WebSocket. Il n'interroge plus aucune
+# table : l'ancien « veilleur » qui relisait fact_incident toutes les 30 s
+# n'a plus de raison d'être, le collecteur sait déjà ce qui est nouveau.
+REALTIME_ENABLED = _bool("REALTIME_ENABLED", True)
+
 # Sévérités normalisées qui déclenchent une notification sortante.
-WATCHER_NOTIFY_SEVERITIES = tuple(_csv("WATCHER_NOTIFY_SEVERITIES", "critical,high"))
+# « info » et « unknown » n'en font jamais partie : réveiller l'astreinte
+# pour une alerte dont on n'a pas su lire la gravité est le meilleur moyen
+# de faire couper les notifications.
+NOTIFY_SEVERITIES = tuple(_csv("NOTIFY_SEVERITIES", "critical,high"))
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +136,18 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 SMTP_FROM = os.getenv("SMTP_FROM", "noc@anptic.bf")
+# STARTTLS : connexion d'abord en clair, chiffrement négocié ensuite (587).
 SMTP_USE_TLS = _bool("SMTP_USE_TLS", True)
+# TLS implicite (SMTPS, 465) : chiffré dès la connexion. Déduit du port
+# quand la variable est vide — un serveur sur 465 ne parle QUE ce mode, et
+# y tenter STARTTLS se solde par un délai d'attente sans message clair.
+SMTP_USE_SSL = (
+    _bool("SMTP_USE_SSL") if os.getenv("SMTP_USE_SSL", "").strip() else SMTP_PORT == 465
+)
+# À false uniquement pour un relais interne à certificat auto-signé.
+SMTP_VERIFY_SSL = _bool("SMTP_VERIFY_SSL", True)
+# Listes de diffusion FIXES (astreinte, direction technique). S'y ajoutent
+# les comptes abonnés depuis l'interface — voir notification_service.
 NOC_EMAIL_RECIPIENTS = _csv("NOC_EMAIL_RECIPIENTS")
 
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "").rstrip("/")
@@ -144,7 +160,7 @@ VAPID_CLAIMS_EMAIL = os.getenv("VAPID_CLAIMS_EMAIL", "noc@anptic.bf")
 # ---------------------------------------------------------------------------
 # Rapports
 # ---------------------------------------------------------------------------
-REPORT_OUTPUT_DIR = os.getenv("REPORT_OUTPUT_DIR", "/tmp/noc-reports")
+REPORT_OUTPUT_DIR = os.getenv("REPORT_OUTPUT_DIR", "/reports")
 REPORT_ORGANISATION = os.getenv("REPORT_ORGANISATION", "ANPTIC — RESINA")
 
 
@@ -153,13 +169,10 @@ REPORT_ORGANISATION = os.getenv("REPORT_ORGANISATION", "ANPTIC — RESINA")
 # ---------------------------------------------------------------------------
 VALID_ROLES = ("directeur", "chef_noc", "technicien", "agent_terrain")
 
-# Vocabulaire de sévérité normalisée, miroir exact de noc_norm_severity()
-# dans sql/01_backend_extensions.sql.
+# Vocabulaire normalisé, miroir exact de integrations/models.py. Toute
+# divergence entre les deux ferait disparaître des alertes des décomptes.
 SEVERITIES = ("critical", "high", "medium", "low", "info", "unknown")
-STATUSES = ("open", "acknowledged", "resolved", "closed")
-
-# Types de métriques produits par l'ETL, miroir de
-# etl/transform/normalize_metrics.py::_VALID_METRIC_TYPES.
+NODE_STATES = ("down", "degraded", "silent", "maintenance", "up", "unknown")
 METRIC_TYPES = (
     "latency_ms",
     "packet_loss_pct",
@@ -170,6 +183,9 @@ METRIC_TYPES = (
     "availability_pct",
 )
 
-# Heures ouvrées du NOC : sert au KPI « incidents détectés hors heures ».
-NOC_BUSINESS_HOURS = (int(os.getenv("NOC_HOUR_START", "6")), int(os.getenv("NOC_HOUR_END", "21")))
+# Heures ouvrées du NOC : sert au KPI « alertes détectées hors heures ».
+NOC_BUSINESS_HOURS = (
+    int(os.getenv("NOC_HOUR_START", "6")),
+    int(os.getenv("NOC_HOUR_END", "21")),
+)
 TIMEZONE = os.getenv("TZ", "Africa/Ouagadougou")

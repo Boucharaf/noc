@@ -14,7 +14,7 @@ from app.core.config import (
     JWT_SECRET,
     REFRESH_TOKEN_EXPIRATION_DAYS,
 )
-from app.models.operations import User
+from app.models import User
 
 
 def hash_password(password: str) -> str:
@@ -37,7 +37,7 @@ def hash_pin(pin: str) -> str:
 
     C'est un affaiblissement réel et assumé : l'espace des PIN numériques
     courts s'énumère en une fraction de seconde, donc quiconque obtient
-    dim_user.pin_hash retrouve tous les PIN, et deux PIN identiques ont
+    noc_user.pin_hash retrouve tous les PIN, et deux PIN identiques ont
     la même empreinte. Acceptable uniquement parce que le PIN est un
     facteur de confort pour la relève d'équipe sur une console partagée,
     jamais la seule protection d'un compte : voir la restriction de rôle

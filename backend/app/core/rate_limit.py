@@ -14,7 +14,7 @@ from app.core.config import (
     RATE_LIMIT_READ_PER_MIN,
     RATE_LIMIT_WRITE_PER_MIN,
 )
-from app.db.redis_client import redis_client
+from app.db.redis_client import redis_sync as redis_client
 
 logger = logging.getLogger(__name__)
 

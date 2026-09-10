@@ -13,16 +13,18 @@ import { PageHeader } from "../components/layout/TopBar";
 import { QueryBoundary, SkeletonRows } from "../components/ui/States";
 import { Segmented } from "../components/ui/Controls";
 import { NodeStateBadge, ToolStateBadge } from "../components/ui/Badge";
-import { ageFrom, duration, num, pct, time } from "../lib/format";
+import { duration, num, pct, time } from "../lib/format";
 import { PERMISSIONS } from "../lib/permissions";
 import { availabilityColor, toolLabel } from "../lib/vocabulary";
 import {
   useAlertSummary,
+  useAlerts,
   useInterop,
   useKpiLocalities,
   useMaintenanceWindows,
   useNetworkKpi,
   useNetworkSeries,
+  useNodeCoverage,
   useNodeStates,
   useNodes,
   useOpenAlerts,
@@ -51,6 +53,15 @@ const WINDOWS = [
   { value: 168, label: "7 j" },
 ];
 
+const DAY_MS = 86_400_000;
+
+/** État d'un outil, dans le vocabulaire de ToolStateBadge. */
+function toolState(tool) {
+  if (tool.never_collected) return "unknown";
+  if (!tool.reachable) return "error";
+  return tool.stale ? "stale" : "ok";
+}
+
 export default function SupervisionView() {
   const [hours, setHours] = useState(24);
   const [metric, setMetric] = useState("availability_pct");
@@ -65,13 +76,35 @@ export default function SupervisionView() {
   const series = useNetworkSeries({ metricType: metric, hours });
   const alertsQuery = useOpenAlerts({ limit: 40 });
   const workload = useWorkload();
+  // Même clé de cache que useWorkload : une seule requête sert les deux.
+  const allAlerts = useAlerts({ limit: 1000 });
   const interop = useInterop();
-  const maintenance = useMaintenanceWindows({ onlyActive: true, limit: 20 });
-  const localities = useKpiLocalities(8);
-  const criticalNodes = useNodes({ state: "down", page_size: 8, sort: "state" });
+  const coverage = useNodeCoverage();
+  const maintenance = useMaintenanceWindows("active");
+  const localities = useKpiLocalities({ limit: 8 });
+  const criticalNodes = useNodes({ state: "down", limit: 8, sort: "state" });
 
   const s = summary.data;
   const states = nodeStates.data;
+
+  // « Non affectés » et « > 24 h » ne sont plus calculés par le serveur :
+  // ils se lisent sur la liste des alertes, déjà chargée pour la charge
+  // par intervenant.
+  const openAlerts = (allAlerts.data?.alerts ?? []).filter((alert) => !alert.resolved_at);
+  const unassigned = openAlerts.filter((alert) => !alert.assigned_to).length;
+  const ageing = openAlerts.filter(
+    (alert) => alert.since && Date.now() - Date.parse(alert.since) > DAY_MS,
+  ).length;
+
+  const nodesByTool = Object.fromEntries(
+    (coverage.data ?? []).map((row) => [row.tool, row.nodes]),
+  );
+  const tools = (interop.data?.tools ?? []).map((tool) => ({
+    ...tool,
+    state: toolState(tool),
+    nodes_supervised: nodesByTool[tool.tool],
+  }));
+  const toolsHealthy = tools.filter((tool) => tool.state === "ok").length;
 
   const severitySegments = [
     { key: "critical", label: "Critiques", value: s?.critical ?? 0, color: "var(--sev-critical)" },
@@ -223,7 +256,7 @@ export default function SupervisionView() {
                 {num(s?.total_open, "0")}
               </span>
               <span className="text-[11px]" style={{ color: "var(--ink-3)" }}>
-                sur {num(s?.nodes_affected, "0")} équipements · {num(s?.localities_affected, "0")} sites
+                sur {num(s?.localities_affected, "0")} sites touchés
               </span>
             </div>
             <StackedBar segments={severitySegments} height={7} />
@@ -247,13 +280,13 @@ export default function SupervisionView() {
               />
               <MiniStat
                 label="Non affectés"
-                value={num(s?.unassigned, "0")}
-                color={s?.unassigned ? "var(--sev-high)" : "var(--state-up)"}
+                value={num(unassigned, "0")}
+                color={unassigned ? "var(--sev-high)" : "var(--state-up)"}
               />
               <MiniStat
                 label="> 24 h"
-                value={num(s?.ageing, "0")}
-                color={s?.ageing ? "var(--sev-critical)" : "var(--state-up)"}
+                value={num(ageing, "0")}
+                color={ageing ? "var(--sev-critical)" : "var(--state-up)"}
               />
             </div>
           </Panel>
@@ -343,18 +376,14 @@ export default function SupervisionView() {
         <div className="col-span-12 sm:col-span-6 lg:col-span-4 min-w-0">
           <Panel
             title="Collecte ETL"
-            subtitle={
-              interop.data
-                ? `${interop.data.tools_healthy}/${interop.data.tools_total} actifs`
-                : undefined
-            }
+            subtitle={interop.data ? `${toolsHealthy}/${tools.length} actifs` : undefined}
             to="/integrations"
             flush
           >
             <QueryBoundary query={interop} compact empty={(d) => !d?.tools?.length}>
-              {(data) => (
+              {() => (
                 <ul className="divide-y" style={{ borderColor: "var(--border)" }}>
-                  {data.tools.map((tool) => (
+                  {tools.map((tool) => (
                     <li key={tool.tool} className="flex items-center gap-2 px-2.5 py-1.5">
                       <span className="text-[12px] font-medium flex-1">
                         {toolLabel(tool.tool)}
@@ -391,7 +420,7 @@ export default function SupervisionView() {
                     <li key={window.id} className="px-2.5 py-1.5">
                       <div className="text-[12px] truncate">{window.reason}</div>
                       <div className="text-[10.5px]" style={{ color: "var(--ink-3)" }}>
-                        {window.node_name || window.locality_name || "périmètre global"} · jusqu'à{" "}
+                        {window.node_name || window.node_key || window.site || "périmètre global"} · jusqu'à{" "}
                         <span className="num">{time(window.ends_at)}</span>
                       </div>
                     </li>
@@ -423,7 +452,7 @@ export default function SupervisionView() {
                   {data.items.map((node) => (
                     <li key={node.node_id}>
                       <Link
-                        to={`/equipements/${node.node_id}`}
+                        to={`/equipements/${encodeURIComponent(node.node_id)}`}
                         className="flex items-center gap-2 px-2.5 py-1.5 hover:bg-[var(--surface-2)]"
                         style={{ textDecoration: "none", color: "inherit" }}
                       >
@@ -433,11 +462,13 @@ export default function SupervisionView() {
                             {node.name}
                           </span>
                           <span className="block text-[10.5px]" style={{ color: "var(--ink-3)" }}>
-                            {node.locality} · {node.node_type || "type inconnu"}
+                            {node.locality || "site inconnu"} · {node.node_type || "type inconnu"}
                           </span>
                         </span>
+                        {/* La date de mise hors service n'est pas publiée par
+                            l'instantané ; le nombre d'alertes actives l'est. */}
                         <span className="num text-[11px]" style={{ color: "var(--sev-critical)" }}>
-                          {node.down_since ? ageFrom(node.down_since) : "—"}
+                          {node.alerts ? `${node.alerts} alerte${node.alerts > 1 ? "s" : ""}` : "—"}
                         </span>
                       </Link>
                     </li>
@@ -469,7 +500,7 @@ export default function SupervisionView() {
                       <tr key={locality.locality_id ?? locality.locality}>
                         <td>
                           <Link
-                            to={`/equipements?locality_id=${locality.locality_id}`}
+                            to={`/equipements?site=${encodeURIComponent(locality.locality ?? "")}`}
                             style={{ color: "var(--ink)", textDecoration: "none" }}
                             className="hover:underline"
                           >

@@ -3,11 +3,12 @@
 Création d'un compte en ligne de commande.
 
 Raison d'être : `POST /api/users` exige d'être déjà connecté en
-directeur ou chef_noc. Au premier démarrage aucun compte n'existe, donc
-personne ne peut se connecter, donc personne ne peut créer de compte.
-Ce script casse cette boucle — c'est le seul chemin de création qui ne
-passe pas par l'API, et il doit rester réservé à l'amorçage et au
-dépannage (mot de passe oublié du seul directeur).
+chef_noc. Au premier démarrage aucun compte n'existe, donc personne ne
+peut se connecter, donc personne ne peut créer de compte. Ce script
+casse cette boucle — c'est le seul chemin de création qui ne passe pas
+par l'API, et il doit rester réservé à l'amorçage (le premier Chef NOC,
+qui crée ensuite tous les autres comptes depuis l'interface) et au
+dépannage (mot de passe oublié du seul Chef NOC).
 
 Usage :
     cd backend
@@ -21,10 +22,10 @@ Usage :
     python scripts/create_user.py -u directeur --reset-password
 
     # Amorçage complet (un compte par rôle), pour une recette :
-    python scripts/create_user.py --demo-set --password "Test1234"
+    python scripts/create_user.py --role-set --password "Test1234"
 
-Variables lues : NOC_WAREHOUSE_DSN (ou DB_HOST/DB_USER/... en repli),
-exactement comme le backend — voir app/core/config.py.
+Variables lues : NOC_DATABASE_URL (ou POSTGRES_* en repli), exactement
+comme le backend — voir app/core/config.py.
 """
 from __future__ import annotations
 
@@ -38,14 +39,16 @@ from pathlib import Path
 # le paquet : le répertoire parent contient `app/`.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.core.config import VALID_ROLES, WAREHOUSE_DSN  # noqa: E402
+from app.core.config import DATABASE_URL, VALID_ROLES  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
-from app.models.operations import User  # noqa: E402
+from app.models import User  # noqa: E402
 from app.services import auth_service  # noqa: E402
 
-# Comptes créés par --demo-set : un par rôle, pour parcourir les quatre
-# tableaux de bord sans avoir à inventer des identifiants.
-DEMO_SET = (
+# Un compte par rôle métier, pour l'amorçage d'une plateforme neuve : les
+# quatre tableaux de bord doivent être accessibles dès la première
+# connexion. Ce ne sont pas des comptes de démonstration — ce sont les
+# quatre rôles que le NOC exploite réellement, et l'exploitant les renomme.
+ROLE_SET = (
     ("directeur", "directeur", "Direction générale"),
     ("chefnoc", "chef_noc", "Chef de salle NOC"),
     ("technicien", "technicien", "Technicien supervision"),
@@ -92,30 +95,30 @@ def main() -> int:
     parser.add_argument("--pin", default=None, help="PIN numérique 4-6 chiffres (connexion terrain)")
     parser.add_argument("--reset-password", action="store_true",
                         help="Ne change que le mot de passe d'un compte existant")
-    parser.add_argument("--demo-set", action="store_true",
+    parser.add_argument("--role-set", action="store_true",
                         help="Crée un compte par rôle (directeur/chefnoc/technicien/terrain)")
     parser.add_argument("--list", action="store_true", help="Liste les comptes existants et sort")
     args = parser.parse_args()
 
-    print(f"Entrepôt : {WAREHOUSE_DSN.split('@')[-1]}")
+    print(f"Base du NOC : {DATABASE_URL.split('@')[-1]}")
     session = SessionLocal()
     try:
         if args.list:
             users = session.query(User).order_by(User.role, User.username).all()
             if not users:
-                print("Aucun compte. Utilisez --demo-set ou -u/-r pour en créer un.")
+                print("Aucun compte. Utilisez --role-set ou -u/-r pour en créer un.")
             for u in users:
                 state = "actif" if u.is_active else "désactivé"
                 pin = ", PIN" if u.pin_hash else ""
                 print(f"  {u.username:<16} {u.role:<14} {state}{pin}  — {u.full_name or ''}")
             return 0
 
-        if args.demo_set:
+        if args.role_set:
             password = args.password or getpass.getpass("Mot de passe commun aux 4 comptes : ")
             if len(password) < 8:
                 print("Le mot de passe doit faire au moins 8 caractères.", file=sys.stderr)
                 return 2
-            for index, (username, role, full_name) in enumerate(DEMO_SET):
+            for index, (username, role, full_name) in enumerate(ROLE_SET):
                 # PIN distinct par compte : deux comptes partageant le même
                 # PIN entreraient en collision sur l'index unique
                 # idx_dim_user_pin_hash (le hash n'est pas salé).
@@ -126,7 +129,7 @@ def main() -> int:
             return 0
 
         if not args.username:
-            parser.error("--username est requis (ou utilisez --demo-set / --list)")
+            parser.error("--username est requis (ou utilisez --role-set / --list)")
         if not args.reset_password and not args.role:
             parser.error("--role est requis à la création")
 
@@ -151,9 +154,9 @@ def main() -> int:
         print(f"Échec : {exc}", file=sys.stderr)
         if "does not exist" in str(exc) or "n'existe pas" in str(exc):
             print(
-                "\nLa table dim_user est absente : appliquez d'abord les DDL\n"
-                "  psql \"$NOC_WAREHOUSE_DSN\" -f etl/sql/schema_dimensions.sql\n"
-                "  psql \"$NOC_WAREHOUSE_DSN\" -f backend/sql/01_backend_extensions.sql",
+                "\nTable ou colonne absente : le schéma de la base est en retard.\n"
+                "Il se rejoue sans danger sur une base en service :\n"
+                "  docker compose exec -T postgres psql -U noc -d noc < backend/sql/schema.sql",
                 file=sys.stderr,
             )
         return 1

@@ -73,7 +73,10 @@ export const PERMISSIONS = Object.freeze({
 
   // --- Administration ---
   DOWNLOAD_REPORT: [ROLES.DIRECTEUR, ROLES.CHEF_NOC], // report.py::_DOWNLOAD
-  MANAGE_USERS: [ROLES.DIRECTEUR, ROLES.CHEF_NOC], // users.py::_MANAGE_USERS
+  // Le Chef NOC SEUL crée les comptes et attribue les rôles. Chacun modifie
+  // ses propres identifiants depuis « Mon compte », qui n'exige aucune
+  // permission (auth.py::update_me).
+  MANAGE_USERS: [ROLES.CHEF_NOC], // users.py::_MANAGE_USERS
   MANAGE_SLA_TARGETS: [ROLES.DIRECTEUR, ROLES.CHEF_NOC], // sla.py update_target
 });
 

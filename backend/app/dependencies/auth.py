@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import INTERNAL_API_KEY
 from app.db.session import get_db
-from app.models.operations import User
+from app.models import User
 from app.services.auth_service import decode_access_token
 
 bearer_scheme = HTTPBearer(auto_error=True)

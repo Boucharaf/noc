@@ -3,12 +3,22 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic==2.10.4
 
-# Entrepôt — psycopg2 comme l'ETL, pour des conversions de types identiques
+# Base du NOC — comptes, travail d'exploitation, agrégats journaliers.
+# Plus aucune métrique ni fait : voir backend/sql/schema.sql.
 sqlalchemy==2.0.36
 psycopg2-binary==2.9.10
 
-# Redis : cache KPI, sessions, statut ETL, diffusion des alertes
+# Redis : instantané du parc, cache d'historique, sessions, temps réel.
+# C'est la dépendance du chemin chaud — tous les écrans « maintenant » en
+# sortent.
 redis==5.2.1
+
+# Client HTTP asynchrone des connecteurs (paquet `integrations/`, partagé
+# avec le collecteur). Le backend s'en sert pour la fédération d'historique :
+# une courbe est lue chez Zabbix ou Centreon au moment où on l'ouvre.
+# La version DOIT rester alignée sur collector/requirements.txt — les deux
+# images embarquent le même paquet `integrations`.
+httpx==0.27.2
 
 # Sécurité
 bcrypt==4.2.1
