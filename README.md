@@ -97,7 +97,7 @@ créer. Ce script crée le premier :
 
 ```bash
 docker compose exec backend python scripts/create_user.py \
-    -u chefnoc -r chef_noc -n "Chef NOC" -p "UnMotDePasseSolide"
+    -u chefnoc -r chef_noc -n "Chef NOC" -p "MotDePasse"
 ```
 
 > Sous Windows, **passez toujours le mot de passe avec `-p`**. La saisie
