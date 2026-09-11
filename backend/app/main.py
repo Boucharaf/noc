@@ -28,11 +28,17 @@ import contextlib
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
-from app.core.config import CORS_ORIGINS, JWT_SECRET, LOG_LEVEL, REALTIME_ENABLED
+from app.core.config import (
+    API_DOCS_ENABLED,
+    CORS_ORIGINS,
+    JWT_SECRET,
+    LOG_LEVEL,
+    REALTIME_ENABLED,
+)
 from app.db.session import SessionLocal
 from app.routes import all_routers
 from app.services.realtime_service import subscribe_loop
@@ -96,9 +102,19 @@ def _check_secret() -> None:
         )
 
 
+def _check_cors() -> None:
+    """`*` avec des cookies de session : n'importe quel site pourrait lire les
+    réponses de l'API au nom de l'utilisateur connecté."""
+    if "*" in CORS_ORIGINS:
+        raise RuntimeError(
+            "CORS_ORIGINS=* est refusé : lister explicitement les origines du NOC."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _check_secret()
+    _check_cors()
     _check_schema()
 
     stop = asyncio.Event()
@@ -146,15 +162,37 @@ app = FastAPI(
     ),
     version="3.0.0",
     lifespan=lifespan,
+    # Documentation interactive fermée par défaut : voir API_DOCS_ENABLED.
+    docs_url="/docs" if API_DOCS_ENABLED else None,
+    redoc_url="/redoc" if API_DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if API_DOCS_ENABLED else None,
 )
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
     allow_credentials=True,  # requis : le refresh token circule en cookie httpOnly
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Les seules méthodes et en-têtes que le frontend emploie
+    # (frontend/src/api/client.js), plutôt qu'un joker.
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-Id"],
 )
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    """En-têtes posés par l'API elle-même, et non par la seule passerelle :
+    ils doivent tenir aussi quand le backend est joint autrement.
+
+    `no-store` sur /api : ces réponses portent des jetons et des données
+    nominatives, qu'aucun cache — navigateur ou proxy — n'a à conserver.
+    """
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    if request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
 
 for router in all_routers:
     app.include_router(router)
@@ -166,5 +204,5 @@ def read_root():
         "service": "API NOC RESINA",
         "version": "3.0.0",
         "architecture": "instantané Redis + fédération d'historique",
-        "docs": "/docs",
+        "docs": "/docs" if API_DOCS_ENABLED else None,
     }

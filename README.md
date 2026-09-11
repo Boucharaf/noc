@@ -35,7 +35,7 @@ Chef NOC, Technicien, Agent terrain.
 | **Disque** | 10 Go pour la plateforme ; +2 Go pour la base NetXMS restaurée ; +5 Go pour les outils de laboratoire. |
 | **Git** | Pour récupérer le code. |
 | **Un terminal bash** | Les scripts `.sh` du dépôt sont en bash. Sous Windows : **Git Bash** (installé avec Git). |
-| **Ports libres** | 8443 et 8888 (interface), 5436 (base du NOC). |
+| **Ports libres** | 8443 et 8888 (interface), 5436 (base du NOC, publiée sur 127.0.0.1 seulement). |
 
 ---
 
@@ -60,6 +60,7 @@ Ouvrir `.env` et renseigner **au minimum** :
 |---|---|
 | `SECRET_KEY` | Une chaîne aléatoire d'au moins 32 caractères. Le backend **refuse de démarrer** sans elle. Générer : `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
 | `POSTGRES_PASSWORD` | Le mot de passe de la base du NOC. ⚠️ Il est figé à la création du volume : le changer ensuite rend la base inaccessible. |
+| `REDIS_PASSWORD` | Le mot de passe de Redis (sessions, instantané). Obligatoire : `docker compose` refuse de démarrer sans lui. Générer avec la même commande que `SECRET_KEY`. |
 
 `.env` contient des secrets : il est exclu de git et ne doit jamais y entrer.
 
@@ -260,7 +261,8 @@ refaire le test.
 | Variable | Rôle | Valeur par défaut |
 |---|---|---|
 | `SECRET_KEY` | Signature des jetons de connexion (≥ 32 caractères) | — (obligatoire) |
-| `POSTGRES_PASSWORD` | Mot de passe de la base du NOC | — |
+| `POSTGRES_PASSWORD` | Mot de passe de la base du NOC | — (obligatoire) |
+| `REDIS_PASSWORD` | Mot de passe de Redis | — (obligatoire) |
 | `COLLECT_INTERVAL_S` | Cadence de lecture des outils, en secondes. **C'est la charge imposée à la production** : une requête par outil par intervalle. | `300` |
 | `<OUTIL>_API_URL`, `_USER`, `_PASSWORD`, `_TOKEN` | Accès à chaque outil. URL vide = outil désactivé. | laboratoire local |
 | `NOTIFICATIONS_ENABLED` | Envoi automatique des courriels et SMS | `false` |
@@ -280,16 +282,27 @@ refaire le test.
 | Service | Adresse depuis le poste | Identifiants |
 |---|---|---|
 | **Interface NOC** | <https://localhost:8443> (et <http://localhost:8888>, redirigé) | comptes créés dans le NOC |
-| Base du NOC (PostgreSQL) | `localhost:5436`, base `noc` | `noc` / `POSTGRES_PASSWORD` |
+| Base du NOC (PostgreSQL) | `127.0.0.1:5436`, base `noc` | `noc` / `POSTGRES_PASSWORD` |
 | Base NetXMS restaurée | `127.0.0.1:5438`, base `netxms` | `netxms` / `netxms` (lecture : `noc_reader`) |
 | Mailpit (courriels de test) | <http://localhost:8025> | — |
 | Zabbix de laboratoire | <http://localhost:8081> | `Admin` / `zabbix` |
 | iTop de laboratoire | <http://localhost:8082> | `admin` / `ITOP_ADMIN_PASSWORD` |
 | Centreon de laboratoire | <http://localhost:8084/centreon> | `admin` / `CENTREON_API_PASSWORD` |
 
-La documentation interactive de l'API (Swagger) est servie par le backend sur
-`/docs`, à l'intérieur du réseau Docker :
-`docker compose port backend 8000` donne le port à ouvrir sur le poste.
+La documentation interactive de l'API (Swagger) est **fermée par défaut**, et
+le backend n'a plus de port publié (seul nginx le joint). Pour la consulter en
+développement : `API_DOCS_ENABLED=true` dans `.env`, puis un fichier
+`docker-compose.override.yml` **non versionné** publiant temporairement le
+backend sur la boucle locale :
+
+```yaml
+services:
+  backend:
+    ports:
+      - "127.0.0.1:8000:8000"
+```
+
+`docker compose up -d backend`, puis <http://127.0.0.1:8000/docs>.
 
 ---
 

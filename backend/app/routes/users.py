@@ -17,6 +17,7 @@ from app.schemas.users import (
     PinResetPayload,
     UserCreate,
     UserOut,
+    UserSummary,
     UserUpdate,
 )
 from app.services import auth_service, user_service
@@ -45,12 +46,17 @@ def _forbid_self_lockout(user_id: int, admin: User) -> None:
         )
 
 
-@router.get("", response_model=list[UserOut])
-def list_users(db: Session = Depends(get_db), _user: User = Depends(get_current_user)):
+@router.get("")
+def list_users(
+    db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+) -> list[dict]:
     # Lecture ouverte à tout compte connecté : la liste sert aussi à
     # peupler les sélecteurs d'assignation d'incident, utilisés par les
-    # techniciens.
-    return user_service.list_users(db)
+    # techniciens. Mais seul le Chef NOC reçoit les coordonnées : un agent
+    # de terrain n'a pas à pouvoir extraire le téléphone et le courriel de
+    # toute l'équipe.
+    schema = UserOut if current_user.role in _MANAGE_USERS else UserSummary
+    return [schema(**user).model_dump(mode="json") for user in user_service.list_users(db)]
 
 
 @router.post("", response_model=UserOut, status_code=status.HTTP_201_CREATED)

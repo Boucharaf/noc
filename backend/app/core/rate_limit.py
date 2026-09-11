@@ -19,8 +19,12 @@ from app.db.redis_client import redis_sync as redis_client
 logger = logging.getLogger(__name__)
 
 
-def _client_ip(request: Request) -> str:
-    # Derrière le reverse proxy nginx, l'IP réelle est dans X-Real-IP.
+def client_ip(request: Request) -> str:
+    # Derrière le reverse proxy nginx, l'IP réelle est dans X-Real-IP. On
+    # peut s'y fier parce que nginx l'ÉCRASE avec $remote_addr et que le
+    # backend n'est joignable que par lui (aucun port publié dans
+    # docker-compose.yml) : publier le port du backend rendrait cet en-tête
+    # falsifiable, et chaque verrouillage contournable.
     return request.headers.get("x-real-ip") or (
         request.client.host if request.client else "unknown"
     )
@@ -31,7 +35,7 @@ def rate_limit(scope: str, limit: int):
         if not RATE_LIMIT_ENABLED:
             return
         window = int(time.time() // 60)
-        key = f"ratelimit:{scope}:{_client_ip(request)}:{window}"
+        key = f"ratelimit:{scope}:{client_ip(request)}:{window}"
         try:
             count = redis_client.incr(key)
             if count == 1:

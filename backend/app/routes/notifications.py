@@ -51,9 +51,11 @@ def subscribe(
 def unsubscribe(
     payload: PushUnsubscribePayload,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
-    push_service.remove_subscription(db, payload.endpoint)
+    # Limité aux abonnements du compte : sinon quiconque connaît l'endpoint
+    # d'un collègue couperait ses notifications.
+    push_service.remove_subscription(db, payload.endpoint, user.id)
 
 
 @router.get("/email/status")

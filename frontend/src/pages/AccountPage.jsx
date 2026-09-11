@@ -415,7 +415,7 @@ function PasswordPanel({ onChanged }) {
             autoComplete="current-password"
           />
         </Field>
-        <Field label="Nouveau mot de passe" required hint="8 caractères minimum.">
+        <Field label="Nouveau mot de passe" required hint="12 caractères minimum.">
           <input
             className="input"
             type="password"
@@ -447,7 +447,7 @@ function PasswordPanel({ onChanged }) {
           type="submit"
           className="btn btn-sm btn-primary"
           disabled={
-            pending || !currentPassword || newPassword.length < 8 || newPassword !== confirmation
+            pending || !currentPassword || newPassword.length < 12 || newPassword !== confirmation
           }
         >
           {pending ? "…" : "Modifier"}

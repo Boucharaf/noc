@@ -5,7 +5,7 @@ DEUX PARTICULARITÉS qui expliquent que ce module reste séparé :
 
   * ces routes sont les seules accessibles au rôle `agent_terrain`, qui n'a
     aucun droit d'exploitation ailleurs — il constate et rend compte, il ne
-    décide pas ;
+    décide pas. Il ne voit et ne fait avancer que SES interventions ;
   * elles sont appelées depuis un téléphone, souvent en réseau dégradé.
     Elles doivent donc rester servies même quand la collecte est arrêtée :
     c'est précisément le moment où un agent est sur le terrain.
@@ -14,42 +14,57 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Body, Depends, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.dependencies.auth import get_current_user, require_role
-from app.models import User
+from app.models import FieldIntervention, User
 from app.services import field_service
 
 router = APIRouter(prefix="/api/field", tags=["terrain"])
 
 DISPATCHERS = ("directeur", "chef_noc", "technicien")
 
+_STATUS_PATTERN = r"^(scheduled|en_route|on_site|done|cancelled)$"
+
 
 class InterventionCreate(BaseModel):
     # Clé de l'équipement dans le parc fusionné (`<outil>:<référence>`), et
     # non un entier : il n'y a plus de table d'équipements dans le NOC.
-    node_key: str
-    alert_key: str | None = None
+    node_key: str = Field(..., min_length=1, max_length=300)
+    alert_key: str | None = Field(None, max_length=300)
     agent_user_id: int
     scheduled_at: datetime | None = None
 
 
 class StatusUpdate(BaseModel):
-    status: str = Field(..., pattern="scheduled|en_route|on_site|done|cancelled")
+    status: str = Field(..., pattern=_STATUS_PATTERN)
     # Position relevée au pointage, pour attester la présence sur site.
     # N'est enregistrée qu'à l'arrivée (`on_site`) : relevée au moment de
     # clore le rapport, depuis le bureau, elle n'attesterait rien.
-    latitude: float | None = None
-    longitude: float | None = None
+    latitude: float | None = Field(None, ge=-90, le=90)
+    longitude: float | None = Field(None, ge=-180, le=180)
     report_text: str | None = Field(None, max_length=4000)
+
+
+def _ensure_visible(db: Session, intervention_id: int, user: User) -> None:
+    """Un agent de terrain n'accède qu'aux interventions qui lui sont confiées.
+
+    404 et non 403 : répondre « interdit » confirmerait l'existence d'une
+    intervention qui n'est pas la sienne.
+    """
+    if user.role in DISPATCHERS:
+        return
+    row = db.get(FieldIntervention, intervention_id)
+    if row is None or row.agent_user_id != user.id:
+        raise HTTPException(404, "Intervention introuvable.")
 
 
 @router.get("/interventions")
 async def list_interventions(
-    status: str | None = Query(None),
+    status: str | None = Query(None, pattern=_STATUS_PATTERN),
     mine: bool = Query(True),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -71,6 +86,7 @@ async def get_intervention(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    _ensure_visible(db, intervention_id, user)
     return await field_service.get_one(db, intervention_id)
 
 
@@ -96,6 +112,7 @@ async def update_intervention(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    _ensure_visible(db, intervention_id, user)
     return await field_service.update_status(
         db,
         intervention_id,

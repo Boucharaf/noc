@@ -13,7 +13,9 @@ NOC est celui où il ne sait pas qu'il est aveugle.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.orm import Session
 
 from app.core.config import METRIC_TYPES, NODE_STATES, SEVERITIES
@@ -31,6 +33,18 @@ from app.services import (
 )
 
 router = APIRouter(prefix="/api", tags=["état courant"])
+
+
+def _one_of(values) -> str:
+    """Motif d'énumération ANCRÉ : sans ^…$, pydantic accepte toute chaîne
+    qui CONTIENT une valeur permise."""
+    return "^(" + "|".join(values) + ")$"
+
+
+_PERIOD_PATTERN = r"^(1h|6h|24h|7d|30d|90d|1y)$"
+
+# Clé d'alerte ou d'équipement en chemin (`zabbix:1042`).
+ResourceKey = Annotated[str, Path(min_length=1, max_length=300)]
 
 
 def _unavailable(exc: live_service.SnapshotUnavailable) -> HTTPException:
@@ -99,9 +113,9 @@ async def hour_distribution(current_user: User = Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 @router.get("/alerts")
 async def list_alerts(
-    severity: str | None = Query(None, pattern="|".join(SEVERITIES)),
-    tool: str | None = None,
-    site: str | None = None,
+    severity: str | None = Query(None, pattern=_one_of(SEVERITIES)),
+    tool: str | None = Query(None, max_length=100),
+    site: str | None = Query(None, max_length=150),
     acknowledged: bool | None = None,
     include_maintenance: bool = True,
     limit: int = Query(500, ge=1, le=5000),
@@ -124,7 +138,7 @@ async def list_alerts(
 
 @router.get("/alerts/{alert_key:path}")
 async def get_alert(
-    alert_key: str,
+    alert_key: ResourceKey,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -148,11 +162,11 @@ async def get_alert(
 # ---------------------------------------------------------------------------
 @router.get("/nodes")
 async def list_nodes(
-    state: str | None = Query(None, pattern="|".join(NODE_STATES)),
-    site: str | None = None,
-    tool: str | None = None,
-    search: str | None = None,
-    sort: str = "state",
+    state: str | None = Query(None, pattern=_one_of(NODE_STATES)),
+    site: str | None = Query(None, max_length=150),
+    tool: str | None = Query(None, max_length=100),
+    search: str | None = Query(None, max_length=200),
+    sort: str = Query("state", pattern=r"^(state|name|site|alerts|tools)$"),
     limit: int = Query(200, ge=1, le=2000),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -191,9 +205,9 @@ async def node_coverage(current_user: User = Depends(get_current_user)):
 
 @router.get("/nodes/{node_id:path}/metrics")
 async def node_metrics(
-    node_id: str,
-    metric: str | None = Query(None, pattern="|".join(METRIC_TYPES)),
-    period: str = Query("24h", pattern="1h|6h|24h|7d|30d|90d|1y"),
+    node_id: ResourceKey,
+    metric: str | None = Query(None, pattern=_one_of(METRIC_TYPES)),
+    period: str = Query("24h", pattern=_PERIOD_PATTERN),
     current_user: User = Depends(get_current_user),
 ):
     """Courbes d'un équipement — INTERROGE L'OUTIL SOURCE.
@@ -226,7 +240,7 @@ async def node_metrics(
 
 @router.get("/nodes/{node_id:path}")
 async def get_node(
-    node_id: str,
+    node_id: ResourceKey,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -271,8 +285,8 @@ async def network_top(
 
 @router.get("/network/series")
 async def network_series(
-    metric: str = Query("latency_ms", pattern="|".join(METRIC_TYPES)),
-    period: str = Query("24h", pattern="1h|6h|24h|7d|30d|90d|1y"),
+    metric: str = Query("latency_ms", pattern=_one_of(METRIC_TYPES)),
+    period: str = Query("24h", pattern=_PERIOD_PATTERN),
     sample: int = Query(12, ge=1, le=50),
     current_user: User = Depends(get_current_user),
 ):

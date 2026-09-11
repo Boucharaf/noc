@@ -15,8 +15,9 @@ décisions d'exploitation, pas des constats.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -37,6 +38,15 @@ router = APIRouter(prefix="/api", tags=["exploitation"])
 # Rôles autorisés à écrire. `agent_terrain` en est exclu pour les décisions
 # d'exploitation, mais reste autorisé sur les routes de terrain (field.py).
 WRITERS = ("directeur", "chef_noc", "technicien")
+
+# ANCRÉ : sans ^…$, pydantic accepte toute chaîne qui CONTIENT une gravité
+# (« xxcriticalxx »), et elle serait enregistrée telle quelle.
+_SEVERITY_PATTERN = "^(" + "|".join(SEVERITIES) + ")$"
+
+# Clé d'alerte en chemin (`zabbix:1042`). Bornée : toute action sur une clé
+# inconnue crée une ligne d'état, et une clé de plusieurs mégaoctets ne
+# désigne aucune alerte.
+AlertKey = Annotated[str, Path(min_length=3, max_length=300)]
 
 
 # ---------------------------------------------------------------------------
@@ -62,19 +72,19 @@ class ResolveIn(BaseModel):
 
 class ManualIncidentIn(BaseModel):
     title: str = Field(..., min_length=3, max_length=200)
-    severity: str = Field("medium", pattern="|".join(SEVERITIES))
+    severity: str = Field("medium", pattern=_SEVERITY_PATTERN)
     description: str | None = Field(None, max_length=4000)
-    node_key: str | None = None
-    node_name: str | None = None
-    site: str | None = None
+    node_key: str | None = Field(None, max_length=300)
+    node_name: str | None = Field(None, max_length=300)
+    site: str | None = Field(None, max_length=150)
 
 
 class MaintenanceIn(BaseModel):
     reason: str = Field(..., min_length=3, max_length=500)
     starts_at: datetime
     ends_at: datetime
-    node_key: str | None = None
-    site: str | None = None
+    node_key: str | None = Field(None, max_length=300)
+    site: str | None = Field(None, max_length=150)
     suppress_alerts: bool = True
 
 
@@ -89,7 +99,7 @@ class SlaTargetIn(BaseModel):
 # ---------------------------------------------------------------------------
 @router.post("/alerts/{alert_key:path}/acknowledge")
 async def acknowledge(
-    alert_key: str,
+    alert_key: AlertKey,
     body: NoteIn = Body(default=NoteIn()),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(*WRITERS)),
@@ -99,7 +109,7 @@ async def acknowledge(
 
 @router.post("/alerts/{alert_key:path}/assign")
 async def assign(
-    alert_key: str,
+    alert_key: AlertKey,
     body: AssignIn,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(*WRITERS)),
@@ -114,7 +124,7 @@ async def assign(
 
 @router.post("/alerts/{alert_key:path}/resolve")
 async def resolve(
-    alert_key: str,
+    alert_key: AlertKey,
     body: ResolveIn = Body(default=ResolveIn()),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(*WRITERS)),
@@ -133,7 +143,7 @@ async def resolve(
 
 @router.post("/alerts/{alert_key:path}/note")
 async def add_note(
-    alert_key: str,
+    alert_key: AlertKey,
     body: NoteIn,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(*WRITERS, "agent_terrain")),
@@ -215,7 +225,7 @@ def resolve_manual_incident(
 # ---------------------------------------------------------------------------
 @router.get("/maintenance")
 def list_maintenance(
-    scope: str = Query("all", pattern="all|active|upcoming|past"),
+    scope: str = Query("all", pattern="^(all|active|upcoming|past)$"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -316,7 +326,7 @@ async def sla_at_risk(
 @router.get("/kpi/trend")
 def kpi_trend(
     days: int = Query(30, ge=1, le=730),
-    site: str | None = None,
+    site: str | None = Query(None, max_length=150),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -327,7 +337,7 @@ def kpi_trend(
 def kpi_monthly(
     year: int = Query(..., ge=2020, le=2100),
     month: int = Query(..., ge=1, le=12),
-    site: str | None = None,
+    site: str | None = Query(None, max_length=150),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):

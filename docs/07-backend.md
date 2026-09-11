@@ -19,7 +19,7 @@
 |---|---|
 | `main.py` | Démarrage : refuse de démarrer si `SECRET_KEY` fait moins de 32 caractères ; vérifie le schéma **sans bloquer** (les écrans temps réel fonctionnent même sans base) ; lance l'abonnement au canal Redis des nouvelles alertes. |
 | `core/config.py` | Toutes les variables d'environnement du backend, commentées. |
-| `core/session_store.py` | Sessions de connexion et verrouillage PIN, dans Redis. |
+| `core/session_store.py` | Sessions de connexion, révocation des jetons d'accès, verrouillage après échecs (mot de passe et PIN), dans Redis. |
 | `dependencies/auth.py` | `get_current_user` (jeton + rôle relu en base) et `require_role(...)`. |
 | `models/operations.py` | Les tables PostgreSQL, en SQLAlchemy. Miroir de `sql/schema.sql`. |
 | `schemas/` | Formats d'entrée et de sortie (comptes, authentification, notifications). |
@@ -38,7 +38,8 @@ Les routes sont séparées selon ce qu'elles touchent :
 ## Les routes
 
 Toutes sont préfixées par `/api`, sauf le WebSocket. La documentation
-interactive (Swagger) est générée sur `/docs`.
+interactive (Swagger) est générée sur `/docs` lorsque `API_DOCS_ENABLED=true` ;
+elle est fermée par défaut.
 
 ### Authentification et comptes
 

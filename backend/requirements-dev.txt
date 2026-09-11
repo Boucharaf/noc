@@ -1,4 +1,5 @@
 -r requirements.txt
-pytest==8.3.4
-httpx==0.28.1
+pytest==9.1.1
+# httpx n'est PAS repinné ici : requirements.txt le fixe déjà (0.27.2, aligné
+# sur le collecteur), et deux versions contradictoires font échouer pip.
 ruff==0.8.6

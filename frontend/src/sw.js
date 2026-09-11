@@ -33,7 +33,10 @@ self.addEventListener("push", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const url = event.notification.data?.url || "/";
+  // Même origine seulement : une notification ne doit pas pouvoir ouvrir un
+  // site tiers qui se ferait passer pour le NOC.
+  const target = new URL(event.notification.data?.url || "/", self.location.origin);
+  const url = target.origin === self.location.origin ? target.href : "/";
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
       for (const client of clients) {

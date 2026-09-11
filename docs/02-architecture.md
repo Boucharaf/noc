@@ -192,7 +192,8 @@ endroit** : `collector/state.py`, que les deux services importent.
 | `noc:hist:<empreinte>` | courbe mise en cache | proportionnelle à la fenêtre demandée |
 | `noc:events:alerts` | canal de publication des nouvelles alertes | — |
 | `refresh:*`, `refresh_user:*` | sessions de connexion (jetons de rafraîchissement) | 7 jours |
-| `pin_attempts:*`, `pin_locked:*` | verrouillage après échecs de connexion par PIN | 15 min |
+| `auth_failures:*`, `auth_locked:*` | verrouillage après échecs de connexion (mot de passe par compte et par adresse, PIN par adresse) | 15 min |
+| `access_revoked_before:*` | instant avant lequel les jetons d'accès d'un compte sont refusés | 31 min |
 
 Une clé d'instantané **absente** signifie « la collecte ne tourne plus » ; une
 liste **vide** signifie « la collecte tourne et ne trouve rien ». Le code

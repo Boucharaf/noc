@@ -5,10 +5,13 @@ C'est ici que vit le vrai contrôle d'accès. Le RBAC du frontend
 sans ces dépendances appliquées à chaque route sensible, un rôle à
 faibles privilèges pourrait appeler ces routes directement en HTTP.
 """
+import hmac
+
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
+from app.core import session_store
 from app.core.config import INTERNAL_API_KEY
 from app.db.session import get_db
 from app.models import User
@@ -36,6 +39,11 @@ def get_current_user(
     # encore valide ne doit pas continuer à porter l'ancien rôle.
     if payload.get("role") != user.role:
         raise HTTPException(status_code=401, detail="Rôle modifié, reconnexion nécessaire.")
+
+    # Mot de passe réinitialisé, sessions coupées : les jetons émis avant ne
+    # doivent plus rien ouvrir, même s'ils n'ont pas encore expiré.
+    if session_store.is_access_token_revoked(user.id, payload.get("iat")):
+        raise HTTPException(status_code=401, detail="Session révoquée, reconnexion nécessaire.")
 
     return user
 
@@ -68,5 +76,7 @@ def require_internal_key(
             status_code=503,
             detail="Intégration interne non configurée (INTERNAL_API_KEY absente).",
         )
-    if credentials.credentials != INTERNAL_API_KEY:
+    # Comparaison à temps constant : `!=` s'arrête au premier caractère
+    # différent, et la durée de la réponse renseignerait sur la clé.
+    if not hmac.compare_digest(credentials.credentials.encode(), INTERNAL_API_KEY.encode()):
         raise HTTPException(status_code=401, detail="Clé interne invalide.")

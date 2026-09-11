@@ -1,12 +1,29 @@
+# Secrets — jamais versionnés. Seuls les modèles *.example le sont.
 .env
+.env.*
+!.env.example
+!**/.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+nginx/certs
+
 frontend/node_modules
 frontend/dist
 __pycache__/
 *.pyc
 .venv/
 venv/
-nginx/certs
+.ruff_cache/
+.pytest_cache/
 endpoints.txt
 SESSION.md
+
+# Dumps de bases de production : données réelles de l'agence.
 netxmsbd07082026.sql
+*.dump
+*.backup
+database/*dump*.sql
+
 informations essentielles par profil.docx

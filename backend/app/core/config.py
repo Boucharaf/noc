@@ -101,6 +101,25 @@ RATE_LIMIT_ENABLED = _bool("RATE_LIMIT_ENABLED", True)
 RATE_LIMIT_READ_PER_MIN = int(os.getenv("RATE_LIMIT_READ_PER_MIN", "100"))
 RATE_LIMIT_WRITE_PER_MIN = int(os.getenv("RATE_LIMIT_WRITE_PER_MIN", "30"))
 
+# Verrouillage de la connexion par mot de passe après échecs répétés, sur une
+# fenêtre glissante. Voir routes/auth.py::_login_scopes pour les trois
+# compteurs et ce que chacun arrête.
+LOGIN_MAX_FAILURES_PER_USER = int(os.getenv("LOGIN_MAX_FAILURES_PER_USER", "10"))
+LOGIN_MAX_FAILURES_PER_IP = int(os.getenv("LOGIN_MAX_FAILURES_PER_IP", "30"))
+LOGIN_LOCK_WINDOW_SECONDS = int(os.getenv("LOGIN_LOCK_WINDOW_SECONDS", "900"))
+
+# Politique des secrets saisis par les utilisateurs. 12 caractères : en deçà,
+# un mot de passe humain tombe en ligne malgré le verrouillage dès qu'une
+# empreinte fuit. Le PIN à 6 chiffres donne un million de combinaisons, contre
+# dix mille à 4 — et il ouvre une session sans identifiant.
+PASSWORD_MIN_LENGTH = 12
+PASSWORD_MAX_LENGTH = 128
+PIN_LENGTH = 6
+
+# /docs, /redoc et /openapi.json. Fermés par défaut : la carte complète de
+# l'API n'a pas à être servie à qui atteint le backend.
+API_DOCS_ENABLED = _bool("API_DOCS_ENABLED", False)
+
 
 # ---------------------------------------------------------------------------
 # Diffusion temps réel
@@ -155,6 +174,20 @@ DASHBOARD_URL = os.getenv("DASHBOARD_URL", "").rstrip("/")
 VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "")
 VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "")
 VAPID_CLAIMS_EMAIL = os.getenv("VAPID_CLAIMS_EMAIL", "noc@anptic.bf")
+
+# Services de push des navigateurs auxquels le backend accepte d'envoyer. Un
+# abonnement est une URL fournie par le client, que le backend appellera :
+# sans liste fermée, n'importe quel compte ferait émettre au serveur des
+# requêtes vers le réseau interne (Redis, PostgreSQL, outils sources).
+# Correspondance sur le domaine et ses sous-domaines.
+PUSH_ALLOWED_HOSTS = tuple(
+    host.lower()
+    for host in _csv(
+        "PUSH_ALLOWED_HOSTS",
+        "fcm.googleapis.com,updates.push.services.mozilla.com,"
+        "notify.windows.com,push.apple.com",
+    )
+)
 
 
 # ---------------------------------------------------------------------------

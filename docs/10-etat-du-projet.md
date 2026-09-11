@@ -63,9 +63,17 @@ tests permanents est la priorité pour sécuriser les évolutions.
 
 ### 4. Sécurité avant exposition réseau
 
-- La base du NOC (`5436`) et le backend sont publiés sur toutes les interfaces.
-- La limitation de débit (`backend/app/core/rate_limit.py`) n'est branchée sur
-  aucune route.
+- Le durcissement réseau, API et authentification est décrit au
+  [chapitre 5](05-comptes-roles-securite.md#durcissement-en-place), avec la
+  liste de ce qu'il reste à faire avant une mise en production.
+- **Identifiants de production exposés** : les commits `2d1131d` et `8fdf1d9`
+  de l'historique git contiennent, dans `.env.example`, le mot de passe et le
+  jeton d'API du Zabbix de l'agence ainsi que le compte iTop. Ils doivent être
+  **changés chez l'agence** ; les retirer de l'historique ne suffit pas, le
+  dépôt ayant été publié.
+- La limitation de débit générique (`backend/app/core/rate_limit.py`) reste
+  non branchée : par adresse IP, elle pénaliserait toute une salle derrière le
+  même NAT. La connexion, elle, est protégée (verrouillage applicatif et nginx).
 - Le certificat est auto-signé, émis pour `noc.anptic.bf` et `localhost`.
 - `INTERNAL_API_KEY` est un reste de l'ancienne ETL : aucune route ne l'utilise.
 

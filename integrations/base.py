@@ -114,12 +114,24 @@ class SourceClient(abc.ABC):
         self.password = password
         self.timeout_s = timeout_s
         self.breaker = CircuitBreaker()
+        if not verify_ssl and self.base_url.startswith("https://"):
+            logger.warning(
+                "%s : vérification du certificat TLS DÉSACTIVÉE (%s_VERIFY_SSL=false). "
+                "Les identifiants de l'outil partent vers quiconque se place sur le "
+                "chemin réseau — à ne jamais laisser en production.",
+                self.name,
+                self.name.upper(),
+            )
         # Un seul client par connecteur : httpx garde les connexions ouvertes,
         # ce qui évite une poignée de main TLS complète à chaque cycle.
         self._client = httpx.AsyncClient(
             verify=verify_ssl,
             timeout=httpx.Timeout(timeout_s),
-            follow_redirects=True,
+            # Redirections NON suivies. iTop envoie son mot de passe dans le
+            # corps de la requête, et une 307/308 le renverrait tel quel vers
+            # l'hôte désigné par la réponse. Une redirection se lit sur l'écran
+            # Interopérabilité et se corrige dans <OUTIL>_API_URL.
+            follow_redirects=False,
             headers={"User-Agent": "NOC-RESINA/3.0 (collecteur)"},
         )
 
@@ -145,9 +157,15 @@ class SourceClient(abc.ABC):
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             self.breaker.record_failure()
-            raise ToolUnavailable(
-                self.name, f"HTTP {exc.response.status_code} sur {url}"
-            ) from exc
+            status_code = exc.response.status_code
+            if 300 <= status_code < 400:
+                raise ToolUnavailable(
+                    self.name,
+                    f"HTTP {status_code} sur {url} : redirection vers "
+                    f"{exc.response.headers.get('location', '?')} non suivie — "
+                    f"renseigner l'URL finale dans {self.name.upper()}_API_URL",
+                ) from exc
+            raise ToolUnavailable(self.name, f"HTTP {status_code} sur {url}") from exc
         except httpx.HTTPError as exc:
             self.breaker.record_failure()
             raise ToolUnavailable(self.name, f"{type(exc).__name__} : {exc}") from exc

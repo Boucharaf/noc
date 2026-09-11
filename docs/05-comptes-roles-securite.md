@@ -99,31 +99,49 @@ sequenceDiagram
 
 | Élément | Détail |
 |---|---|
-| Mots de passe | Empreinte **bcrypt**, 8 caractères minimum. |
-| Jeton d'accès | JWT signé avec `SECRET_KEY`, 30 minutes (`ACCESS_TOKEN_EXPIRE_MINUTES`), gardé **en mémoire** par le navigateur, jamais dans le stockage local. |
+| Mots de passe | Empreinte **bcrypt**, **12 caractères minimum** (72 octets au plus). Les comptes créés avant gardent leur mot de passe jusqu'au prochain changement. |
+| Verrouillage | Après **10 échecs** sur un compte depuis une même adresse, **50** sur un compte toutes adresses confondues, ou **30** depuis une adresse tous comptes confondus, la connexion est bloquée **15 minutes** (réglable : `LOGIN_*`). Le changement de mot de passe compte dans les mêmes compteurs. nginx limite en plus `/api/auth/login` et `/api/auth/pin-login` à 30 requêtes par minute par adresse. |
+| Jeton d'accès | JWT signé avec `SECRET_KEY`, 30 minutes (`ACCESS_TOKEN_EXPIRE_MINUTES`), gardé **en mémoire** par le navigateur, jamais dans le stockage local. **Révoqué immédiatement** quand les sessions du compte sont coupées (mot de passe changé ou réinitialisé, rôle modifié, compte désactivé). |
 | Jeton de rafraîchissement | JWT de 7 jours dans un cookie `httpOnly` limité à `/api/auth`. Chaque utilisation le remplace ; **réutiliser un ancien jeton coupe toutes les sessions du compte** (signe de vol). |
 | Sessions | Enregistrées dans Redis : c'est ce qui permet de les révoquer. |
-| Connexion par PIN | Réservée aux **agents terrain** (confort sur téléphone). 4 à 6 chiffres. Après **5 échecs**, l'adresse IP est bloquée **15 minutes**. Le PIN est un facteur faible, jamais disponible pour les autres rôles. |
-| WebSocket | Le jeton est envoyé dans la **première trame**, pas dans l'URL (qui finirait dans les journaux du proxy). |
+| Connexion par PIN | Réservée aux **agents terrain** (confort sur téléphone). **6 chiffres** pour tout nouveau code (les codes plus courts déjà définis restent acceptés jusqu'à leur remplacement). Deux comptes actifs ne peuvent pas partager un code. Empreinte **HMAC-SHA256** dont la clé est `SECRET_KEY` : changer cette clé oblige à redéfinir les PIN. Après **5 échecs**, l'adresse IP est bloquée **15 minutes**. Le PIN est un facteur faible, jamais disponible pour les autres rôles. |
+| WebSocket | Le jeton est envoyé dans la **première trame**, pas dans l'URL (qui finirait dans les journaux du proxy). Le compte est relu en base à la connexion, et le flux est **fermé à l'expiration du jeton** ; le navigateur se reconnecte avec le jeton rafraîchi. |
+| Liste des comptes | Tout compte connecté la lit (sélecteurs d'affectation), mais seul le **Chef NOC** reçoit téléphones, courriels, matricules et dates de connexion. |
 | Transport | HTTPS par nginx (TLS 1.2 et 1.3). `REFRESH_COOKIE_SECURE=true` dès qu'on est en HTTPS. |
 
 ## Les données sensibles du projet
 
 | Donnée | Où | Protection |
 |---|---|---|
-| Secrets de configuration (`SECRET_KEY`, mots de passe des bases, des outils, du SMTP) | `.env` | Exclu de git. Ne jamais le copier d'un environnement à l'autre : chaque environnement a ses propres secrets. |
+| Secrets de configuration (`SECRET_KEY`, `REDIS_PASSWORD`, mots de passe des bases, des outils, du SMTP) | `.env` | Exclu de git. Ne jamais le copier d'un environnement à l'autre : chaque environnement a ses propres secrets. **Aucune valeur réelle dans `.env.example`**, qui est versionné. |
 | Dump NetXMS de production | `database/netxmsbd07082026.sql` | Exclu de git ; secrets purgés à la restauration ; base accessible sur `127.0.0.1` seulement. |
 | Certificat TLS et sa clé | `nginx/certs/` | Exclu de git. |
 | Comptes et travail d'exploitation | volume Docker `pgdata` | À sauvegarder régulièrement (chapitre 9). |
 
-## Points d'attention avant une exposition réseau
+## Durcissement en place
 
-- **Ports internes publiés** : `docker-compose.yml` publie la base du NOC
-  (`5436`) et le backend (port aléatoire) sur toutes les interfaces. Sur un
-  serveur, ne laisser ouvert que nginx (443 ou 8443). Attention : sous Linux,
-  Docker contourne le pare-feu `ufw` ; il faut restreindre la publication dans
-  le fichier Compose lui-même (`127.0.0.1:5436:5432`).
+| Couche | Mesure |
+|---|---|
+| Réseau | Le backend n'a **aucun port publié** : seul nginx le joint. La base du NOC et les interfaces des outils de laboratoire sont publiées sur `127.0.0.1` seulement. Redis exige un mot de passe (`REDIS_PASSWORD`). |
+| Passerelle nginx | TLS 1.2/1.3 à suites AEAD, en-têtes `Content-Security-Policy`, `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy` ; version masquée ; limitation de débit sur la connexion. |
+| API | Documentation `/docs` fermée (`API_DOCS_ENABLED`). CORS limité aux origines, méthodes et en-têtes utiles, `*` refusé. Réponses `/api` en `Cache-Control: no-store`. Aucune trace d'exception renvoyée au client (santé, rapports). Paramètres bornés en longueur et énumérations ancrées. |
+| Terrain | Un agent terrain ne lit et ne fait avancer que **ses** interventions. |
+| Notifications | Un abonnement push n'est accepté que vers les services de push des navigateurs (`PUSH_ALLOWED_HOSTS`) : le backend ne peut pas être détourné vers le réseau interne. |
+| Connecteurs | Redirections HTTP non suivies (un mot de passe iTop ne part pas vers un autre hôte) ; avertissement au démarrage si `*_VERIFY_SSL=false` sur une URL HTTPS. |
+| Conteneurs | Processus Python sans privilèges, `no-new-privileges` sur les services de la plateforme, dépendances épinglées et auditées (`npm ci` pour le frontend). |
+
+## Avant une mise en production
+
 - **Certificat** : le certificat auto-signé est émis pour `noc.anptic.bf` et
-  `localhost` ; le remplacer par un certificat de l'autorité de l'agence.
-- **Limitation de débit** : écrite (`backend/app/core/rate_limit.py`) mais
-  **pas encore branchée** sur les routes.
+  `localhost` ; le remplacer par un certificat de l'autorité de l'agence, puis
+  **décommenter HSTS** dans `nginx/nginx.conf`.
+- **`.env` de production neuf** : `SECRET_KEY`, `POSTGRES_PASSWORD` et
+  `REDIS_PASSWORD` générés pour ce seul environnement ;
+  `REFRESH_COOKIE_SECURE=true` ; `CORS_ORIGINS` réduit à l'adresse HTTPS du
+  NOC ; `*_VERIFY_SSL=true` pour chaque outil source.
+- **Publication de la base** : retirer le port `5436` de `docker-compose.yml`
+  (sous Linux, Docker contourne `ufw` : la restriction doit vivre dans le
+  fichier Compose). Ne pas lancer les profils de laboratoire.
+- **Comptes de service** : sur les outils de l'agence, des comptes en lecture
+  seule dédiés au NOC, jamais un compte d'administration.
+- **Sauvegardes** : volume `pgdata` (chapitre 9).

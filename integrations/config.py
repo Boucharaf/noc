@@ -13,8 +13,32 @@ jour où l'agence renseignera leur URL, sans une ligne à écrire.
 """
 from __future__ import annotations
 
+import logging
 import os
+import re
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
+_OQL_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _oql_identifiers(variable: str, default: str = "") -> tuple[str, ...]:
+    """Noms de classes ou d'attributs iTop, vérifiés avant d'entrer en OQL.
+
+    integrations/itop.py les CONCATÈNE dans ses requêtes : une valeur comme
+    « Incident WHERE 1=1 » en changerait le sens. Une valeur invalide est
+    écartée et journalisée, plutôt que de faire tomber le collecteur.
+    """
+    kept = []
+    for item in (part.strip() for part in os.getenv(variable, default).split(",")):
+        if not item:
+            continue
+        if _OQL_IDENTIFIER.match(item):
+            kept.append(item)
+        else:
+            logger.error("%s : « %s » ignoré, ce n'est pas un identifiant iTop", variable, item)
+    return tuple(kept)
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -88,14 +112,11 @@ def build_client(name: str):
     if name == "itop":
         from .itop import ITopClient
 
-        classes = tuple(
-            c.strip()
-            for c in os.getenv("ITOP_TICKET_CLASSES", "Incident,UserRequest").split(",")
-            if c.strip()
-        )
+        classes = _oql_identifiers("ITOP_TICKET_CLASSES", "Incident,UserRequest")
+        event_field = next(iter(_oql_identifiers("ITOP_ZBX_EVENT_FIELD")), "")
         return ITopClient(
             config.url, config.user, config.password, config.verify_ssl,
-            config.timeout_s, classes, os.getenv("ITOP_ZBX_EVENT_FIELD", ""),
+            config.timeout_s, classes, event_field,
         )
     if name == "netxms":
         # DEUX ACCÈS, choisis par la forme de l'URL — le même interrupteur

@@ -508,14 +508,17 @@ function UserFormModal({ user, isSelf, onClose, actions, onDone }) {
   const username = form.username.trim();
   const email = form.email.trim();
   const usernameInvalid = isNew && username.length > 0 && !USERNAME_PATTERN.test(username);
-  const passwordTooShort = isNew && form.password.length > 0 && form.password.length < 8;
+  const passwordTooShort = isNew && form.password.length > 0 && form.password.length < 12;
+  const pinInvalid =
+    isNew && form.role === ROLES.AGENT_TERRAIN && form.pin.length > 0 && !/^\d{6}$/.test(form.pin);
   const emailInvalid = email.length > 0 && !EMAIL_PATTERN.test(email);
   const notifyWithoutEmail = form.notify_email && !email;
 
   const valid =
     (isNew
-      ? username.length >= 3 && !usernameInvalid && form.full_name.trim() && form.password.length >= 8
+      ? username.length >= 3 && !usernameInvalid && form.full_name.trim() && form.password.length >= 12
       : form.full_name.trim()) &&
+    !pinInvalid &&
     !emailInvalid &&
     !notifyWithoutEmail;
 
@@ -640,7 +643,7 @@ function UserFormModal({ user, isSelf, onClose, actions, onDone }) {
             <Field
               label="Mot de passe provisoire"
               required
-              error={passwordTooShort ? "8 caractères minimum." : null}
+              error={passwordTooShort ? "12 caractères minimum." : null}
               hint={passwordTooShort ? undefined : "À transmettre ; modifiable depuis « Mon compte »."}
             >
               <input
@@ -653,9 +656,10 @@ function UserFormModal({ user, isSelf, onClose, actions, onDone }) {
             </Field>
             <Field
               label="Code PIN"
+              error={pinInvalid ? "Exactement 6 chiffres." : null}
               hint={
                 form.role === ROLES.AGENT_TERRAIN
-                  ? "4 à 6 chiffres — connexion rapide sur console partagée."
+                  ? "6 chiffres — connexion rapide sur console partagée."
                   : "Sans effet : seuls les agents terrain se connectent par PIN."
               }
             >
@@ -666,7 +670,7 @@ function UserFormModal({ user, isSelf, onClose, actions, onDone }) {
                 inputMode="numeric"
                 pattern="\d*"
                 maxLength={6}
-                placeholder="1234"
+                placeholder="6 chiffres"
                 disabled={form.role !== ROLES.AGENT_TERRAIN}
               />
             </Field>
@@ -781,7 +785,7 @@ function PasswordResetModal({ user, onClose, actions, onDone }) {
           <button
             type="button"
             className="btn btn-sm btn-primary"
-            disabled={password.length < 8 || actions.resetPassword.isPending}
+            disabled={password.length < 12 || actions.resetPassword.isPending}
             onClick={submit}
           >
             {actions.resetPassword.isPending ? "…" : "Réinitialiser"}
@@ -791,7 +795,7 @@ function PasswordResetModal({ user, onClose, actions, onDone }) {
     >
       <div className="space-y-2.5">
         {error && <Notice tone="error">{error}</Notice>}
-        <Field label="Mot de passe provisoire" required hint="8 caractères minimum.">
+        <Field label="Mot de passe provisoire" required hint="12 caractères minimum.">
           <input
             className="input"
             type="text"
@@ -839,7 +843,7 @@ function PinModal({ user, onClose, actions, onDone }) {
           <button
             type="button"
             className="btn btn-sm btn-primary"
-            disabled={pin.length < 4 || actions.resetPin.isPending}
+            disabled={pin.length !== 6 || actions.resetPin.isPending}
             onClick={submit}
           >
             {actions.resetPin.isPending ? "…" : "Définir"}
@@ -849,7 +853,7 @@ function PinModal({ user, onClose, actions, onDone }) {
     >
       <div className="space-y-2.5">
         {error && <Notice tone="error">{error}</Notice>}
-        <Field label="Nouveau code" required hint="4 à 6 chiffres.">
+        <Field label="Nouveau code" required hint="6 chiffres.">
           <input
             className="input num"
             value={pin}

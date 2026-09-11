@@ -11,27 +11,29 @@ qui crée ensuite tous les autres comptes depuis l'interface) et au
 dépannage (mot de passe oublié du seul Chef NOC).
 
 Usage :
-    cd backend
-    python scripts/create_user.py --username directeur --role directeur \\
-        --full-name "Nom Prénom" --password "MotDePasse123"
-
-    # Mot de passe demandé de façon masquée si --password est omis :
+    # Mot de passe demandé de façon masquée (recommandé) :
     python scripts/create_user.py -u chef -r chef_noc -n "Chef NOC"
 
     # Réinitialiser le mot de passe d'un compte existant :
     python scripts/create_user.py -u directeur --reset-password
 
     # Amorçage complet (un compte par rôle), pour une recette :
-    python scripts/create_user.py --role-set --password "Test1234"
+    python scripts/create_user.py --role-set
 
-Variables lues : NOC_DATABASE_URL (ou POSTGRES_* en repli), exactement
-comme le backend — voir app/core/config.py.
+    # --password existe, mais le mot de passe reste alors dans l'historique
+    # du shell et dans la liste des processus : à éviter.
+
+Variables lues : NOC_DATABASE_URL (ou POSTGRES_* en repli) et SECRET_KEY,
+exactement comme le backend — voir app/core/config.py. SECRET_KEY sert à
+l'empreinte des PIN : sans la même valeur que le backend, un PIN défini ici
+ne fonctionnerait pas.
 """
 from __future__ import annotations
 
 import argparse
 import getpass
-import os
+import re
+import secrets
 import sys
 from pathlib import Path
 
@@ -39,7 +41,12 @@ from pathlib import Path
 # le paquet : le répertoire parent contient `app/`.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.core.config import DATABASE_URL, VALID_ROLES  # noqa: E402
+from app.core.config import (  # noqa: E402
+    DATABASE_URL,
+    PASSWORD_MIN_LENGTH,
+    PIN_LENGTH,
+    VALID_ROLES,
+)
 from app.db.session import SessionLocal  # noqa: E402
 from app.models import User  # noqa: E402
 from app.services import auth_service  # noqa: E402
@@ -56,9 +63,38 @@ ROLE_SET = (
 )
 
 
+def _random_pin() -> str:
+    """PIN tiré au hasard. Jamais de suite prévisible (1000, 1111…) : un PIN
+    ouvre une session sans identifiant, le deviner suffit."""
+    return f"{secrets.randbelow(10**PIN_LENGTH):0{PIN_LENGTH}d}"
+
+
+def _read_password(prompt: str, given: str | None) -> str | None:
+    if given:
+        print(
+            "attention : un mot de passe passé en argument reste dans l'historique "
+            "du shell. Préférer la saisie masquée (option omise).",
+            file=sys.stderr,
+        )
+    password = given or getpass.getpass(prompt)
+    if len(password) < PASSWORD_MIN_LENGTH:
+        print(
+            f"Le mot de passe doit faire au moins {PASSWORD_MIN_LENGTH} caractères.",
+            file=sys.stderr,
+        )
+        return None
+    if len(password.encode()) > 72:
+        print("Le mot de passe ne doit pas dépasser 72 octets (limite de bcrypt).", file=sys.stderr)
+        return None
+    return password
+
+
 def _upsert(session, *, username: str, role: str, full_name: str,
             password: str, pin: str | None, reset_only: bool) -> str:
     user = session.query(User).filter(User.username == username).first()
+
+    if pin and auth_service.pin_in_use(session, pin, exclude_user_id=user.id if user else None):
+        return f"! {username} : ce PIN est déjà attribué à un autre compte, rien n'a été modifié"
 
     if user is None:
         if reset_only:
@@ -91,14 +127,19 @@ def main() -> int:
     parser.add_argument("-u", "--username")
     parser.add_argument("-n", "--full-name", default=None)
     parser.add_argument("-r", "--role", choices=VALID_ROLES)
-    parser.add_argument("-p", "--password", default=None)
-    parser.add_argument("--pin", default=None, help="PIN numérique 4-6 chiffres (connexion terrain)")
+    parser.add_argument("-p", "--password", default=None,
+                        help="Déconseillé : omis, le mot de passe est demandé sans écho")
+    parser.add_argument("--pin", default=None,
+                        help=f"PIN de {PIN_LENGTH} chiffres (connexion des agents terrain)")
     parser.add_argument("--reset-password", action="store_true",
                         help="Ne change que le mot de passe d'un compte existant")
     parser.add_argument("--role-set", action="store_true",
                         help="Crée un compte par rôle (directeur/chefnoc/technicien/terrain)")
     parser.add_argument("--list", action="store_true", help="Liste les comptes existants et sort")
     args = parser.parse_args()
+
+    if args.pin is not None and not re.fullmatch(rf"\d{{{PIN_LENGTH}}}", args.pin):
+        parser.error(f"--pin doit compter exactement {PIN_LENGTH} chiffres")
 
     print(f"Base du NOC : {DATABASE_URL.split('@')[-1]}")
     session = SessionLocal()
@@ -114,18 +155,23 @@ def main() -> int:
             return 0
 
         if args.role_set:
-            password = args.password or getpass.getpass("Mot de passe commun aux 4 comptes : ")
-            if len(password) < 8:
-                print("Le mot de passe doit faire au moins 8 caractères.", file=sys.stderr)
+            password = _read_password("Mot de passe commun aux 4 comptes : ", args.password)
+            if password is None:
                 return 2
-            for index, (username, role, full_name) in enumerate(ROLE_SET):
-                # PIN distinct par compte : deux comptes partageant le même
-                # PIN entreraient en collision sur l'index unique
-                # idx_dim_user_pin_hash (le hash n'est pas salé).
+            pins: dict[str, str] = {}
+            for username, role, full_name in ROLE_SET:
+                # Seul l'agent terrain se connecte par PIN : en attribuer aux
+                # autres rôles n'ouvrirait rien et ferait un secret de plus.
+                pin = _random_pin() if role == "agent_terrain" else None
                 print(_upsert(session, username=username, role=role, full_name=full_name,
-                              password=password, pin=f"{1000 + index * 111}", reset_only=False))
+                              password=password, pin=pin, reset_only=False))
+                if pin:
+                    pins[username] = pin
             session.commit()
             print("\nComptes prêts. Connexion : identifiant ci-dessus + le mot de passe saisi.")
+            for username, pin in pins.items():
+                print(f"PIN de {username} (affiché une seule fois) : {pin}")
+            print("Imposer un changement de mot de passe à chacun dès la première connexion.")
             return 0
 
         if not args.username:
@@ -133,9 +179,8 @@ def main() -> int:
         if not args.reset_password and not args.role:
             parser.error("--role est requis à la création")
 
-        password = args.password or getpass.getpass(f"Mot de passe pour {args.username} : ")
-        if len(password) < 8:
-            print("Le mot de passe doit faire au moins 8 caractères.", file=sys.stderr)
+        password = _read_password(f"Mot de passe pour {args.username} : ", args.password)
+        if password is None:
             return 2
 
         print(_upsert(

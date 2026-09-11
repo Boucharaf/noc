@@ -67,6 +67,10 @@ def create_user(db: Session, payload: dict) -> dict:
         raise HTTPException(status_code=422, detail="Rôle inconnu.")
     if db.query(User).filter(User.username == payload["username"]).first():
         raise HTTPException(status_code=409, detail="Ce nom d'utilisateur existe déjà.")
+    if payload.get("pin") and auth_service.pin_in_use(db, payload["pin"]):
+        raise HTTPException(
+            status_code=409, detail="Ce code PIN est déjà attribué à un autre compte."
+        )
 
     user = User(
         username=payload["username"],

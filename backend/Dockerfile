@@ -63,4 +63,9 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 # notification est protégée par une contrainte d'unicité en base
 # (ops_alert_notified) — plusieurs workers, et même plusieurs conteneurs,
 # peuvent cohabiter sans qu'une alerte soit notifiée deux fois.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+#
+# --no-server-header : ne pas annoncer « uvicorn » et sa version.
+# --ws-max-size : le client n'envoie qu'une trame d'authentification ; le
+# défaut de 16 Mo par message laisserait saturer la mémoire du worker.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", \
+     "--no-server-header", "--ws-max-size", "65536"]

@@ -23,6 +23,7 @@ laisserait repartir toutes les notifications.
 from __future__ import annotations
 
 import html
+import json
 import logging
 import smtplib
 import ssl
@@ -65,6 +66,14 @@ _SEVERITY_LABEL = {
     "info": "Information",
     "unknown": "Inconnu",
 }
+
+
+def _one_line(value: str) -> str:
+    """Texte ramené sur une ligne. Le nom d'un équipement vient d'un outil
+    source, le titre d'un incident manuel d'un utilisateur : un saut de ligne
+    dans l'objet d'un courriel en ferait échouer l'envoi — ou, avec une
+    bibliothèque moins stricte, y injecterait des en-têtes."""
+    return " ".join(str(value).split())
 
 
 def _log_notification(
@@ -124,7 +133,10 @@ def send_sms(alert_key: str, body: str) -> None:
                 # prédéfinis : le modèle est donc requis tant que le
                 # compte n'est pas passé en production.
                 kwargs["content_sid"] = TWILIO_CONTENT_SID
-                kwargs["content_variables"] = f'{{"1": "{body[:100]}"}}'
+                # json.dumps et non une chaîne formatée : un guillemet dans
+                # le message d'une sonde casserait le JSON, ou y ajouterait
+                # des variables.
+                kwargs["content_variables"] = json.dumps({"1": body[:100]}, ensure_ascii=False)
             else:
                 kwargs["body"] = body[:320]
             client.messages.create(**kwargs)
@@ -323,7 +335,7 @@ def notify_alert(
         return
 
     label = _SEVERITY_LABEL.get(severity, severity)
-    title = f"[NOC] Alerte {label.upper()} — {node_name}"
+    title = _one_line(f"[NOC] Alerte {label.upper()} — {node_name}")
     detail = message or "Aucun détail fourni par l'outil de supervision."
     location = site or "site non renseigné"
     # La page des incidents, et non une fiche : une clé d'alerte n'est pas

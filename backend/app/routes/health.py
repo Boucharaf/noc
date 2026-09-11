@@ -20,6 +20,8 @@ décide si le conteneur est retiré du répartiteur de charge.
 """
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, Response
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -29,7 +31,13 @@ from app.db.redis_client import redis_sync
 from app.db.session import get_db
 from app.services import live_service
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api", tags=["santé"])
+
+# Cette route est PUBLIQUE (sondes, répartiteur). Le texte d'une exception —
+# nom d'hôte et utilisateur de la base, adresse interne de Redis — part donc
+# dans les journaux, jamais dans la réponse.
 
 
 @router.get("/health")
@@ -41,7 +49,8 @@ async def health(response: Response, db: Session = Depends(get_db)):
         redis_sync.ping()
         checks["redis"] = {"status": "ok"}
     except Exception as exc:  # noqa: BLE001
-        checks["redis"] = {"status": "error", "detail": str(exc)[:200]}
+        logger.warning("Santé : Redis injoignable (%s)", exc)
+        checks["redis"] = {"status": "error", "detail": "Redis injoignable."}
 
     # -- Collecteur -------------------------------------------------------
     try:
@@ -63,7 +72,8 @@ async def health(response: Response, db: Session = Depends(get_db)):
         else:
             checks["collector"] = {"status": "ok", "age_s": round(age)}
     except Exception as exc:  # noqa: BLE001
-        checks["collector"] = {"status": "error", "detail": str(exc)[:200]}
+        logger.warning("Santé : instantané illisible (%s)", exc)
+        checks["collector"] = {"status": "error", "detail": "Instantané illisible."}
 
     # -- Base -------------------------------------------------------------
     try:
@@ -91,7 +101,8 @@ async def health(response: Response, db: Session = Depends(get_db)):
             }
         )
     except Exception as exc:  # noqa: BLE001
-        checks["database"] = {"status": "error", "detail": str(exc)[:200]}
+        logger.warning("Santé : base du NOC injoignable (%s)", exc)
+        checks["database"] = {"status": "error", "detail": "Base du NOC injoignable."}
 
     if any(c.get("status") == "error" for c in checks.values()):
         overall = "error"

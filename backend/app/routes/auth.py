@@ -5,7 +5,14 @@ from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 from app.core import session_store
-from app.core.config import JWT_EXPIRATION_MINUTES, REFRESH_COOKIE_SECURE
+from app.core.config import (
+    JWT_EXPIRATION_MINUTES,
+    LOGIN_LOCK_WINDOW_SECONDS,
+    LOGIN_MAX_FAILURES_PER_IP,
+    LOGIN_MAX_FAILURES_PER_USER,
+    REFRESH_COOKIE_SECURE,
+)
+from app.core.rate_limit import client_ip
 from app.db.session import get_db
 from app.dependencies.auth import get_current_user, require_role
 from app.models import User
@@ -32,12 +39,6 @@ REFRESH_COOKIE_PATH = "/api/auth"
 PIN_LOGIN_ALLOWED_ROLES = {"agent_terrain"}
 
 
-def _client_ip(request: Request) -> str:
-    return request.headers.get("x-real-ip") or (
-        request.client.host if request.client else "unknown"
-    )
-
-
 def _set_refresh_cookie(response: Response, token: str, expire_at: datetime) -> None:
     response.set_cookie(
         key=REFRESH_COOKIE_NAME,
@@ -46,12 +47,52 @@ def _set_refresh_cookie(response: Response, token: str, expire_at: datetime) -> 
         path=REFRESH_COOKIE_PATH,
         httponly=True,
         secure=REFRESH_COOKIE_SECURE,
-        samesite="lax",
+        # `strict` : l'interface et l'API sont servies par la même origine,
+        # le cookie n'a aucune raison de partir d'une page tierce.
+        samesite="strict",
     )
 
 
 def _clear_refresh_cookie(response: Response) -> None:
     response.delete_cookie(key=REFRESH_COOKIE_NAME, path=REFRESH_COOKIE_PATH)
+
+
+def _login_scopes(ip: str, username: str) -> tuple[tuple[str, str, int], ...]:
+    """Les trois compteurs d'échecs de la connexion par mot de passe.
+
+    login_ip       une source qui essaie beaucoup d'identifiants ;
+    login_user_ip  une source qui s'acharne sur un compte ;
+    login_user     un compte attaqué depuis de nombreuses sources. Seuil
+                   cinq fois plus haut : quelques essais depuis n'importe où
+                   ne doivent pas suffire à bloquer le Chef NOC en pleine
+                   crise.
+    """
+    account = username.strip().lower()
+    return (
+        ("login_ip", ip, LOGIN_MAX_FAILURES_PER_IP),
+        ("login_user_ip", f"{account}|{ip}", LOGIN_MAX_FAILURES_PER_USER),
+        ("login_user", account, LOGIN_MAX_FAILURES_PER_USER * 5),
+    )
+
+
+def _ensure_not_locked(scopes) -> None:
+    remaining = max((session_store.lock_ttl(scope, subject) or 0) for scope, subject, _ in scopes)
+    if remaining:
+        # Même forme de détail que le verrouillage du PIN : l'écran de
+        # connexion sait déjà l'afficher (LoginPage.jsx).
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "message": "Trop de tentatives — réessayez plus tard.",
+                "retry_after_seconds": remaining,
+            },
+            headers={"Retry-After": str(remaining)},
+        )
+
+
+def _record_failure(scopes) -> None:
+    for scope, subject, limit in scopes:
+        session_store.register_failure(scope, subject, limit, LOGIN_LOCK_WINDOW_SECONDS)
 
 
 def _issue_session(db: Session, user: User, response: Response) -> TokenResponse:
@@ -67,8 +108,25 @@ def _issue_session(db: Session, user: User, response: Response) -> TokenResponse
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(payload: LoginPayload, response: Response, db: Session = Depends(get_db)):
-    user = auth_service.authenticate_with_password(db, payload.username, payload.password)
+def login(
+    payload: LoginPayload,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    scopes = _login_scopes(client_ip(request), payload.username)
+    _ensure_not_locked(scopes)
+
+    try:
+        user = auth_service.authenticate_with_password(db, payload.username, payload.password)
+    except HTTPException:
+        _record_failure(scopes)
+        raise
+
+    # Le compteur de l'IP n'est PAS remis à zéro : un attaquant qui détient
+    # un compte valide effacerait sinon ses échecs en s'y connectant.
+    for scope, subject, _ in scopes[1:]:
+        session_store.clear_failures(scope, subject)
     return _issue_session(db, user, response)
 
 
@@ -79,7 +137,7 @@ def pin_login(
     response: Response,
     db: Session = Depends(get_db),
 ):
-    ip = _client_ip(request)
+    ip = client_ip(request)
     locked_ttl = session_store.is_pin_locked(ip)
     if locked_ttl is not None:
         raise HTTPException(
@@ -189,12 +247,21 @@ def update_me(
 @router.patch("/me/password", status_code=status.HTTP_204_NO_CONTENT)
 def change_my_password(
     payload: PasswordChangePayload,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    auth_service.authenticate_with_password(
-        db, current_user.username, payload.current_password
-    )
+    # Mêmes compteurs que la connexion : une session restée ouverte sur un
+    # poste de salle ne doit pas servir à deviner le mot de passe du compte.
+    scopes = _login_scopes(client_ip(request), current_user.username)
+    _ensure_not_locked(scopes)
+    try:
+        auth_service.authenticate_with_password(
+            db, current_user.username, payload.current_password
+        )
+    except HTTPException:
+        _record_failure(scopes)
+        raise
     auth_service.set_password(db, current_user.id, payload.new_password)
     # Changer son mot de passe invalide les autres sessions : c'est le
     # geste attendu quand on soupçonne une compromission.
