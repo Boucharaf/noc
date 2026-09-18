@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import METRIC_TYPES, NODE_STATES, SEVERITIES
 from app.db.session import get_db
-from app.dependencies.auth import get_current_user
+from app.dependencies.auth import get_current_user, require_role
 from app.models import User
 from app.services import (
     alerts_service,
@@ -307,12 +307,16 @@ async def network_series(
 # Interopérabilité
 # ---------------------------------------------------------------------------
 @router.get("/interop/status")
-async def interop_status(current_user: User = Depends(get_current_user)):
+async def interop_status(
+    current_user: User = Depends(require_role("directeur", "chef_noc", "technicien")),
+):
     """État de la chaîne de collecte. Reste servi même quand tout le reste
     ne l'est plus — c'est précisément à ce moment qu'on en a besoin."""
     return await interop_service.status()
 
 
 @router.get("/interop/merge")
-async def interop_merge(current_user: User = Depends(get_current_user)):
+async def interop_merge(
+    current_user: User = Depends(require_role("directeur", "chef_noc", "technicien")),
+):
     return await interop_service.merge_report()

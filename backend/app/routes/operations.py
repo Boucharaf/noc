@@ -167,6 +167,13 @@ def create_manual_incident(
 ):
     from app.models import ManualIncident
 
+    if current_user.role == "agent_terrain" and current_user.site:
+        if body.site != current_user.site:
+            raise HTTPException(
+                403,
+                "Un agent terrain ne peut signaler un incident que sur son site.",
+            )
+
     incident = ManualIncident(
         title=body.title,
         severity=body.severity,
@@ -214,6 +221,8 @@ def resolve_manual_incident(
 
     incident = db.get(ManualIncident, incident_id)
     if incident is None:
+        raise HTTPException(404, "Incident manuel introuvable.")
+    if current_user.role == "agent_terrain" and incident.created_by != current_user.id:
         raise HTTPException(404, "Incident manuel introuvable.")
     incident.resolved_at = datetime.now(timezone.utc)
     db.commit()

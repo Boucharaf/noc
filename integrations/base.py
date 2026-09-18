@@ -26,15 +26,49 @@ from __future__ import annotations
 
 import abc
 import logging
+import re
 import time
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
 from .models import Alert, MetricPoint, Node, ToolHealth
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_url(value: str) -> str:
+    """Remove URL credentials and sensitive query values before diagnostics."""
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname or ""
+        if parts.port:
+            host = f"{host}:{parts.port}"
+        netloc = f"{host}" if not parts.username else f"{parts.username}:***@{host}"
+        query = re.sub(
+            r"(?i)(token|api[_-]?key|password|passwd|secret)=([^&]*)",
+            r"\1=***",
+            parts.query,
+        )
+        return urlunsplit((parts.scheme, netloc, parts.path, query, ""))
+    except (TypeError, ValueError):
+        return "<URL invalide>"
+
+
+def _safe_error(value: object) -> str:
+    """Prevent credentials embedded in client/network errors from leaking."""
+    text = re.sub(
+        r"(?i)(https?://)([^\s/@:]+):([^\s/@]+)@",
+        r"\1\2:***@",
+        str(value),
+    )
+    return re.sub(
+        r"(?i)(token|api[_-]?key|password|passwd|secret)([=:])([^\s&,;]+)",
+        r"\1\2***",
+        text,
+    )
 
 
 class ToolUnavailable(RuntimeError):
@@ -161,14 +195,16 @@ class SourceClient(abc.ABC):
             if 300 <= status_code < 400:
                 raise ToolUnavailable(
                     self.name,
-                    f"HTTP {status_code} sur {url} : redirection vers "
-                    f"{exc.response.headers.get('location', '?')} non suivie — "
+                    f"HTTP {status_code} sur {_safe_url(url)} : redirection vers "
+                    f"{_safe_url(exc.response.headers.get('location', '?'))} non suivie — "
                     f"renseigner l'URL finale dans {self.name.upper()}_API_URL",
                 ) from exc
-            raise ToolUnavailable(self.name, f"HTTP {status_code} sur {url}") from exc
+            raise ToolUnavailable(self.name, f"HTTP {status_code} sur {_safe_url(url)}") from exc
         except httpx.HTTPError as exc:
             self.breaker.record_failure()
-            raise ToolUnavailable(self.name, f"{type(exc).__name__} : {exc}") from exc
+            raise ToolUnavailable(
+                self.name, f"{type(exc).__name__} : {_safe_error(exc)}"
+            ) from exc
         self.breaker.record_success()
         return response
 
@@ -229,5 +265,7 @@ class SourceClient(abc.ABC):
             # faire tomber le cycle de collecte, quelle que soit la surprise.
             logger.exception("Contrôle de santé %s : exception inattendue", self.name)
             return ToolHealth(
-                tool=self.name, reachable=False, error=f"{type(exc).__name__} : {exc}"
+                tool=self.name,
+                reachable=False,
+                error=f"{type(exc).__name__} : {_safe_error(exc)}",
             )

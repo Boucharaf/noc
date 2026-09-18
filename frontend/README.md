@@ -6,20 +6,8 @@ structurels et non cosmétiques.
 
 ---
 
-## 1. Ce qui n'allait pas, et ce qui a changé
 
-| Constat sur l'ancienne interface | Ce qui a été fait |
-|---|---|
-| La vue Chef NOC se retrouvait dans la vue Décideur : mêmes blocs, mêmes chiffres, seul le titre changeait | **Un écran par profil**, avec un contenu réellement distinct — le Directeur n'a aucun bouton d'action sur un incident, le Chef NOC est le seul à voir la charge par intervenant |
-| Les informations affichées ne disaient pas ce qu'un exploitant a besoin de savoir | Reprise du document métier « informations essentielles par profil » : les quatre niveaux (Décideur / Chef NOC / Agent NOC / technique) sont désormais quatre écrans |
-| Rien ne ressemblait à un NOC | Bandeau d'état permanent, ticker d'alertes, horloge à la seconde, mode mur d'écrans, densité de console (13 px, lignes de 28 px) |
-| Le drill-down n'existait pas | Tout nom d'équipement, de site ou de ministère est cliquable, dans les deux sens : KPI global → ministère → site → équipement → incident |
-| Aucun inventaire d'équipements | Écran **Équipements** complet, avec état dérivé (HS / dégradé / muet / maintenance / nominal) et fiche technique par équipement |
-| Pas de création de compte | Écran **Utilisateurs** : création, rôle, périmètre, PIN, désactivation |
-
----
-
-## 2. Les quatre profils et leurs écrans
+## 1. Les quatre profils et leurs écrans
 
 Chaque rôle atterrit sur **son** tableau de bord après connexion. Les
 écrans transverses sont partagés mais protégés par permission.
@@ -45,7 +33,7 @@ de détail qui fonctionne aussi pour ce profil.
 
 ---
 
-## 3. Parti pris visuel — et pourquoi
+## 2. Parti pris visuel — et pourquoi
 
 Ce n'est volontairement pas un dashboard SaaS. Quatre contraintes ont
 dicté la forme :
@@ -89,7 +77,7 @@ ligne cesse de réclamer l'attention de toute la salle.
 
 ---
 
-## 4. Temps réel
+## 3. Temps réel
 
 Un **seul** WebSocket pour toute l'application, ouvert par `AppShell` et
 jamais par une page — sinon chaque navigation ouvrirait une connexion de
@@ -117,7 +105,7 @@ politique d'autoplay à contourner.
 
 ---
 
-## 5. Cadences de rafraîchissement
+## 4. Cadences de rafraîchissement
 
 Décidées requête par requête dans `hooks/queries.js`, parce que c'est une
 décision d'exploitation et pas un détail de composant :
@@ -133,7 +121,7 @@ liaison de secours, un poll permanent coûte plus qu'il ne rapporte.
 
 ---
 
-## 6. Sécurité côté client
+## 5. Sécurité côté client
 
 Le RBAC de `lib/permissions.js` est du **confort d'interface**, jamais une
 protection. La seule autorisation qui compte est le 403 renvoyé par le
@@ -154,7 +142,7 @@ appels sauf un — déconnectant un utilisateur dont la session est valide.
 
 ---
 
-## 7. Structure
+## 6. Structure
 
 ```
 src/
@@ -190,7 +178,7 @@ inaperçue.
 
 ---
 
-## 8. Développement
+## 7. Développement
 
 ```bash
 cd frontend
@@ -228,7 +216,7 @@ EOF
 
 ---
 
-## 9. Points d'attention connus
+## 8. Points d'attention connus
 
 **La carte peut être vide.** `dim_locality.latitude` n'est renseignée que
 par `etl/scripts/discover_geography.py`. Tant qu'il n'a pas tourné, aucun

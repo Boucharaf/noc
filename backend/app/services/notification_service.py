@@ -29,6 +29,8 @@ import smtplib
 import ssl
 from email.message import EmailMessage
 
+from sqlalchemy import or_
+
 from app.core.config import (
     DASHBOARD_URL,
     NOC_EMAIL_RECIPIENTS,
@@ -152,7 +154,7 @@ def send_sms(alert_key: str, body: str) -> None:
 # ---------------------------------------------------------------------------
 # Courriel
 # ---------------------------------------------------------------------------
-def email_recipients() -> list[str]:
+def email_recipients(site: str | None = None) -> list[str]:
     """Destinataires effectifs : listes fixes + comptes actifs abonnés.
 
     Relu à chaque envoi, jamais mis en cache : un compte désactivé à 3 h 10
@@ -161,16 +163,15 @@ def email_recipients() -> list[str]:
     addresses = list(NOC_EMAIL_RECIPIENTS)
     db = SessionLocal()
     try:
-        rows = (
-            db.query(User.email)
-            .filter(
-                User.is_active.is_(True),
-                User.notify_email.is_(True),
-                User.email.isnot(None),
-            )
-            .order_by(User.username)
-            .all()
-        )
+        site_filter = User.role.in_(("directeur", "chef_noc"))
+        if site:
+            site_filter = or_(site_filter, User.site == site)
+        rows = db.query(User.email).filter(
+            User.is_active.is_(True),
+            User.notify_email.is_(True),
+            User.email.isnot(None),
+            site_filter,
+        ).order_by(User.username).all()
         addresses.extend(email for (email,) in rows if email)
     except Exception as exc:  # noqa: BLE001
         # Base injoignable : prévenir au moins les listes fixes vaut mieux
@@ -221,11 +222,17 @@ def _deliver(subject: str, html_body: str, text_body: str, recipients: list[str]
         server.send_message(message)
 
 
-def send_email(alert_key: str, subject: str, html_body: str, text_body: str) -> None:
+def send_email(
+    alert_key: str,
+    subject: str,
+    html_body: str,
+    text_body: str,
+    site: str | None = None,
+) -> None:
     if not SMTP_HOST:
         logger.info("Courriel non configuré (SMTP_HOST vide), envoi ignoré")
         return
-    recipients = email_recipients()
+    recipients = email_recipients(site)
     if not recipients:
         logger.info(
             "Aucun destinataire courriel (ni NOC_EMAIL_RECIPIENTS ni compte abonné), "
@@ -377,7 +384,7 @@ def notify_alert(
     """
 
     send_sms(alert_key, f"{title} — {location}. {detail[:120]}")
-    send_email(alert_key, title, html_body, text_body)
+    send_email(alert_key, title, html_body, text_body, site=site)
 
 
 def notify_manual_incident(
