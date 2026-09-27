@@ -31,7 +31,7 @@ export function Modal({ open, onClose, title, subtitle, children, footer, width 
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center p-4 sm:p-8 overflow-auto"
+      className="fixed inset-0 z-[2000] flex items-start justify-center p-4 sm:p-8 overflow-auto"
       style={{ background: "rgba(0,0,0,.6)" }}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose?.();
@@ -77,6 +77,28 @@ export function Modal({ open, onClose, title, subtitle, children, footer, width 
   );
 }
 
+export function ConfirmModal({ open, onClose, onConfirm, title, children, pending = false }) {
+  return (
+    <Modal
+      open={open}
+      onClose={pending ? undefined : onClose}
+      title={title}
+      footer={
+        <>
+          <button type="button" className="btn btn-sm" onClick={onClose} disabled={pending}>
+            Annuler
+          </button>
+          <button type="button" className="btn btn-sm btn-primary" onClick={onConfirm} disabled={pending}>
+            {pending ? "…" : "Confirmer"}
+          </button>
+        </>
+      }
+    >
+      {children}
+    </Modal>
+  );
+}
+
 /**
  * Tiroir latéral — support du détail d'un incident ou d'un équipement.
  *
@@ -90,7 +112,7 @@ export function Drawer({ open, onClose, title, subtitle, badge, children, footer
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex justify-end"
+      className="fixed inset-0 z-[2000] flex justify-end"
       style={{ background: "rgba(0,0,0,.5)" }}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose?.();

@@ -293,7 +293,7 @@ export const report = {
     apiClient.get("/report/monthly", {
       params: { month, year, format },
       responseType: "blob",
-    }),
+    }).then((response) => response.data),
 };
 
 export const health = () => get("/health");

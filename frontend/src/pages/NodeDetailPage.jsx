@@ -48,7 +48,8 @@ const WINDOWS = [
 export default function NodeDetailPage() {
   const { nodeId } = useParams();
   const navigate = useNavigate();
-  const id = Number(nodeId);
+  // Les identifiants de fusion sont textuels (par ex. `netxms:123`).
+  const id = nodeId;
 
   const [hours, setHours] = useState(24);
   const [metric, setMetric] = useState(null);
@@ -62,7 +63,10 @@ export default function NodeDetailPage() {
   const node = nodeQuery.data;
   const availableMetrics = node?.metric_types?.length ? node.metric_types : [];
   const activeMetric = metric ?? availableMetrics[0] ?? null;
-  const series = useNodeSeries(id, activeMetric, hours);
+  const series = useNodeSeries(id, {
+    metric: activeMetric,
+    period: `${hours}h`,
+  });
 
   const meta = activeMetric ? metricMeta(activeMetric) : null;
   const stateMeta = node ? nodeStateMeta(node.state) : null;
@@ -235,9 +239,9 @@ export default function NodeDetailPage() {
                   </DefRow>
                   <DefRow label="Type">{data.node_type || "non renseigné"}</DefRow>
                   <DefRow label="État">
-                    <span style={{ color: stateMeta.color }}>{stateMeta.label}</span>
+                    <span style={{ color: stateMeta?.color }}>{stateMeta?.label ?? "inconnu"}</span>
                     <span className="block text-[10.5px]" style={{ color: "var(--ink-3)" }}>
-                      {stateMeta.hint}
+                      {stateMeta?.hint ?? "État non fourni par l'instantané."}
                     </span>
                   </DefRow>
                   <DefRow label="Site">

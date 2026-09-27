@@ -72,7 +72,7 @@ BEGIN
        AND to_regclass('donnebase.siteadministratif') IS NOT NULL THEN
         GRANT SELECT (siteadmin_id) ON public.object_properties TO noc_reader;
         GRANT USAGE ON SCHEMA donnebase TO noc_reader;
-        GRANT SELECT (id_siteadministratif, nomsiteadministratif)
+        GRANT SELECT (id_siteadministratif, nomsiteadministratif, latitude, longitude)
             ON donnebase.siteadministratif TO noc_reader;
     END IF;
 END $$;

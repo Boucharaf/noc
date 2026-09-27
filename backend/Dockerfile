@@ -44,11 +44,11 @@ COPY backend/scripts ./scripts
 COPY integrations ./integrations
 COPY collector ./collector
 
-RUN mkdir -p /var/lib/noc/reports
+RUN mkdir -p /var/lib/noc/reports /reports
 
 # L'API ne tourne pas en root : une faille dans une dépendance ne doit pas
 # donner les droits d'administration du conteneur.
-RUN useradd --system --create-home noc && chown -R noc:noc /app /var/lib/noc
+RUN useradd --system --create-home noc && chown -R noc:noc /app /var/lib/noc /reports
 USER noc
 
 EXPOSE 8000

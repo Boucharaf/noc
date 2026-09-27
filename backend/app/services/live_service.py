@@ -173,14 +173,34 @@ async def sites_summary() -> list[dict]:
         # qualité des conventions de nommage côté outils sources.
         key = node.get("site") or "Localité non renseignée"
         bucket = sites.setdefault(
-            key, {"site": key, "nodes": 0, "down": 0, "degraded": 0, "alerts": 0}
+            key,
+            {
+                "site": key,
+                "nodes": 0,
+                "down": 0,
+                "degraded": 0,
+                "alerts": 0,
+                "latitude": None,
+                "longitude": None,
+            },
         )
         bucket["nodes"] += 1
+        if bucket["latitude"] is None and node.get("latitude") is not None:
+            bucket["latitude"] = node["latitude"]
+        if bucket["longitude"] is None and node.get("longitude") is not None:
+            bucket["longitude"] = node["longitude"]
         if node.get("state") == "down":
             bucket["down"] += 1
         elif node.get("state") == "degraded":
             bucket["degraded"] += 1
         bucket["alerts"] += node.get("alerts", 0)
+
+    for bucket in sites.values():
+        bucket["availability_pct"] = (
+            round(100 * (bucket["nodes"] - bucket["down"]) / bucket["nodes"], 2)
+            if bucket["nodes"]
+            else None
+        )
 
     rows = list(sites.values())
     rows.sort(key=lambda r: (-r["down"], -r["degraded"], -r["alerts"], r["site"]))

@@ -45,10 +45,13 @@ logger = logging.getLogger(__name__)
 _SITE_REFERENTIAL_PROBE = """
 SELECT count(*) = 2
 FROM information_schema.columns
-WHERE (table_schema = 'public' AND table_name = 'object_properties'
-       AND column_name = 'siteadmin_id')
-   OR (table_schema = 'donnebase' AND table_name = 'siteadministratif'
-       AND column_name = 'nomsiteadministratif')
+WHERE (
+        (table_schema = 'public' AND table_name = 'object_properties'
+         AND column_name = 'siteadmin_id')
+        OR (table_schema = 'donnebase' AND table_name = 'siteadministratif'
+                AND column_name = 'nomsiteadministratif')
+    )
+    AND has_table_privilege(current_user, 'donnebase.siteadministratif', 'SELECT')
 """
 
 _NODES_SQL = """
@@ -59,6 +62,8 @@ SELECT n.id,
        p.status,
        p.city,
        {site_column} AS site,
+    {latitude_column} AS latitude,
+    {longitude_column} AS longitude,
        (SELECT array_agg(cp.name ORDER BY cp.name)
           FROM container_members cm
           JOIN object_properties cp ON cp.object_id = cm.container_id
@@ -204,17 +209,24 @@ class NetXMSDatabaseClient(SourceClient):
         if await self._uses_site_referential():
             sql = _NODES_SQL.format(
                 site_column="s.nomsiteadministratif",
+                latitude_column="s.latitude",
+                longitude_column="s.longitude",
                 site_join=(
                     "LEFT JOIN donnebase.siteadministratif s "
                     "ON s.id_siteadministratif = p.siteadmin_id"
                 ),
             )
         else:
-            sql = _NODES_SQL.format(site_column="NULL", site_join="")
+            sql = _NODES_SQL.format(
+                site_column="NULL",
+                latitude_column="NULL",
+                longitude_column="NULL",
+                site_join="",
+            )
 
         nodes: list[Node] = []
         rows = await self._query(sql)
-        for node_id, name, primary_name, ip, status, city, site, containers in rows:
+        for node_id, name, primary_name, ip, status, city, site, latitude, longitude, containers in rows:
             # Site : le référentiel de l'agence d'abord, sinon la ville saisie
             # dans NetXMS. Rien d'autre — un site deviné serait pire qu'absent.
             if not site and city and city.strip():
@@ -238,6 +250,8 @@ class NetXMSDatabaseClient(SourceClient):
                     # des groupes et ne servent pas de site.
                     groups=tuple(containers or ()),
                     site=site or None,
+                    latitude=float(latitude) if latitude is not None else None,
+                    longitude=float(longitude) if longitude is not None else None,
                 )
             )
         return nodes

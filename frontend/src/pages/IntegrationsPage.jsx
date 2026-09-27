@@ -1,8 +1,11 @@
+import { useState } from "react";
+
 import Panel from "../components/ui/Panel";
 import Stat, { Meter } from "../components/ui/Stat";
 import { Donut, LineChart } from "../components/charts";
 import { PageHeader } from "../components/layout/TopBar";
 import { QueryBoundary } from "../components/ui/States";
+import { Pagination } from "../components/ui/Table";
 import { ToolStateBadge } from "../components/ui/Badge";
 import { ageFrom, dateTime, num, pct } from "../lib/format";
 import { toolLabel } from "../lib/vocabulary";
@@ -28,6 +31,7 @@ import {
  * même quand la valeur date de trois jours.
  */
 export default function IntegrationsPage() {
+  const [coveragePage, setCoveragePage] = useState(1);
   const interop = useInterop();
   const coverage = useCoverage();
   const trend = useCoverageTrend(60);
@@ -35,6 +39,10 @@ export default function IntegrationsPage() {
   const nodeStates = useNodeStates();
 
   const trendPoints = trend.data ?? [];
+  const toolsHealthy = (interop.data?.tools ?? []).filter(
+    (tool) => tool.reachable && !tool.stale,
+  ).length;
+  const toolsTotal = interop.data?.tools?.length ?? 0;
 
   return (
     <div className="space-y-2.5">
@@ -48,13 +56,13 @@ export default function IntegrationsPage() {
           label="Connecteurs actifs"
           value={
             interop.data
-              ? `${interop.data.tools_healthy}/${interop.data.tools_total}`
+              ? `${toolsHealthy}/${toolsTotal}`
               : "—"
           }
           color={
-            interop.data?.tools_healthy === 0
+            toolsTotal > 0 && toolsHealthy === 0
               ? "var(--sev-critical)"
-              : interop.data?.tools_healthy < interop.data?.tools_total
+              : toolsHealthy < toolsTotal
                 ? "var(--sev-medium)"
                 : "var(--state-up)"
           }
@@ -62,7 +70,9 @@ export default function IntegrationsPage() {
         <Stat
           label="Intervalle de collecte"
           value={
-            interop.data ? `${Math.round(interop.data.interval_seconds / 60)} min` : "—"
+            interop.data?.collector?.interval_s
+              ? `${Math.round(interop.data.collector.interval_s / 60)} min`
+              : "—"
           }
           hint="COLLECT_INTERVAL_S"
         />
@@ -258,6 +268,7 @@ export default function IntegrationsPage() {
       <Panel title="Couverture par site" flush>
         <QueryBoundary query={coverage} compact empty={(d) => !d?.by_locality?.length}>
           {(data) => (
+            <>
             <div style={{ maxHeight: 360, overflow: "auto" }}>
               <table className="tbl">
                 <thead>
@@ -272,7 +283,9 @@ export default function IntegrationsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {data.by_locality.map((row, index) => (
+                  {data.by_locality
+                    .slice((coveragePage - 1) * 25, coveragePage * 25)
+                    .map((row, index) => (
                     <tr key={`${row.locality_id ?? row.locality}-${index}`}>
                       <td>{row.locality}</td>
                       <td style={{ color: "var(--ink-3)" }}>{row.region}</td>
@@ -312,10 +325,19 @@ export default function IntegrationsPage() {
                         </div>
                       </td>
                     </tr>
-                  ))}
+                    ))}
                 </tbody>
               </table>
             </div>
+            <Pagination
+              page={coveragePage}
+              pages={Math.max(1, Math.ceil(data.by_locality.length / 25))}
+              total={data.by_locality.length}
+              pageSize={25}
+              onChange={setCoveragePage}
+              label="sites"
+            />
+            </>
           )}
         </QueryBoundary>
       </Panel>

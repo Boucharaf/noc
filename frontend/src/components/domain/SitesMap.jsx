@@ -1,6 +1,7 @@
-import { CircleMarker, MapContainer, TileLayer, Tooltip, useMap } from "react-leaflet";
-import { useEffect, useMemo } from "react";
+import { CircleMarker, GeoJSON, MapContainer, Tooltip, useMap } from "react-leaflet";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { geoJSON } from "leaflet";
 import "leaflet/dist/leaflet.css";
 
 import { availabilityColor } from "../../lib/vocabulary";
@@ -24,22 +25,44 @@ import { num, pct } from "../../lib/format";
 // site n'a encore de coordonnées.
 const DEFAULT_CENTER = [12.3, -1.6];
 const DEFAULT_ZOOM = 6;
+const BURKINA_BOUNDS = [
+  [9.3, -5.7],
+  [15.2, 2.5],
+];
 
-function FitBounds({ points }) {
+function FitBounds({ points, countryGeoJson }) {
   const map = useMap();
   useEffect(() => {
+    const countryBounds = countryGeoJson ? geoJSON(countryGeoJson).getBounds() : null;
+    if (countryBounds?.isValid()) {
+      map.fitBounds(countryBounds, { padding: [18, 18] });
+    }
     if (points.length === 0) return;
     if (points.length === 1) {
       map.setView(points[0], 9);
       return;
     }
     map.fitBounds(points, { padding: [28, 28], maxZoom: 9 });
-  }, [map, points]);
+  }, [countryGeoJson, map, points]);
   return null;
 }
 
 export default function SitesMap({ localities, height = 420, onSelect }) {
   const navigate = useNavigate();
+  const [countryGeoJson, setCountryGeoJson] = useState(null);
+
+  useEffect(() => {
+    let active = true;
+    fetch("/region.geojson")
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        if (active) setCountryGeoJson(data);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const located = useMemo(
     () => (localities ?? []).filter((l) => l.latitude != null && l.longitude != null),
@@ -56,15 +79,26 @@ export default function SitesMap({ localities, height = 420, onSelect }) {
         <MapContainer
           center={DEFAULT_CENTER}
           zoom={DEFAULT_ZOOM}
+          minZoom={DEFAULT_ZOOM}
+          maxBounds={BURKINA_BOUNDS}
+          maxBoundsViscosity={1}
           scrollWheelZoom
-          style={{ height: "100%", width: "100%" }}
+          style={{ height: "100%", width: "100%", background: "var(--surface-inset)" }}
           attributionControl
         >
-          <TileLayer
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-            attribution="&copy; OpenStreetMap"
-          />
-          <FitBounds points={points} />
+          {countryGeoJson && (
+            <GeoJSON
+              data={countryGeoJson}
+              style={{
+                color: "var(--accent-ink)",
+                weight: 1.2,
+                opacity: 0.7,
+                fillColor: "var(--surface-2)",
+                fillOpacity: 0.18,
+              }}
+            />
+          )}
+          <FitBounds points={points} countryGeoJson={countryGeoJson} />
           {located.map((locality) => {
             const share = (locality.total_incidents ?? 0) / maxIncidents;
             const color = availabilityColor(locality.availability_pct);
@@ -72,6 +106,7 @@ export default function SitesMap({ localities, height = 420, onSelect }) {
               <CircleMarker
                 key={locality.locality_id ?? locality.locality}
                 center={[locality.latitude, locality.longitude]}
+                pane="markerPane"
                 radius={6 + share * 14}
                 pathOptions={{
                   color,

@@ -198,6 +198,17 @@ export default function NodesPage() {
               options={(reference?.node_types ?? []).map((type) => ({ value: type, label: type }))}
             />
             <FilterSelect
+              label="État"
+              value={params.get("state")}
+              onChange={(value) => setParam("state", value)}
+              allLabel="Tous les états"
+              width={140}
+              options={NODE_STATES.map((state) => ({
+                value: state,
+                label: nodeStateMeta(state).label,
+              }))}
+            />
+            <FilterSelect
               label="Supervisé par"
               value={params.get("source_tool")}
               onChange={(value) => setParam("source_tool", value)}

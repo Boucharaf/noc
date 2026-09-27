@@ -9,6 +9,7 @@ import {
   Play,
   Sun,
 } from "lucide-react";
+import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import StatusStrip from "./StatusStrip";
@@ -17,6 +18,7 @@ import { auth } from "../../api/noc";
 import { useAuthStore } from "../../store/auth";
 import { useClock } from "../../hooks/useClock";
 import { useUiStore } from "../../store/ui";
+import { ConfirmModal } from "../ui/Overlay";
 
 /**
  * Barre supérieure — le « fronton » de la salle.
@@ -42,6 +44,8 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
   const logout = useAuthStore((s) => s.logout);
   const navigate = useNavigate();
   const now = useClock();
+  const [logoutOpen, setLogoutOpen] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
 
   const theme = useUiStore((s) => s.theme);
   const toggleTheme = useUiStore((s) => s.toggleTheme);
@@ -59,6 +63,7 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
         : "var(--sev-critical)";
 
   const handleLogout = async () => {
+    setLoggingOut(true);
     try {
       await auth.logout();
     } catch {
@@ -68,6 +73,7 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
     }
     logout();
     navigate("/connexion", { replace: true });
+    setLoggingOut(false);
   };
 
   return (
@@ -210,7 +216,7 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
         <button
           type="button"
           className="btn btn-ghost btn-sm"
-          onClick={handleLogout}
+          onClick={() => setLogoutOpen(true)}
           title="Se déconnecter"
           // Bouton sans texte : sans aria-label, un lecteur d'écran
           // n'annonce rien du tout et le contrôle est inatteignable au
@@ -220,6 +226,17 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
           <LogOut size={13} />
         </button>
       </div>
+      <ConfirmModal
+        open={logoutOpen}
+        onClose={() => setLogoutOpen(false)}
+        onConfirm={handleLogout}
+        title="Confirmer la déconnexion"
+        pending={loggingOut}
+      >
+        <p className="text-[12.5px]" style={{ color: "var(--ink-2)" }}>
+          Voulez-vous vraiment vous déconnecter de cette session ?
+        </p>
+      </ConfirmModal>
     </header>
   );
 }

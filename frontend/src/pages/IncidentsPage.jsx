@@ -37,7 +37,7 @@ export default function IncidentsPage() {
   const [exportError, setExportError] = useState(null);
   const [exporting, setExporting] = useState(false);
 
-  const selectedId = params.get("id") ? Number(params.get("id")) : null;
+  const selectedId = params.get("id") || null;
   const page = Number(params.get("page") ?? 1);
 
   const setParam = useCallback(

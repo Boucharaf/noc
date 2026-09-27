@@ -61,6 +61,8 @@ class MergedNode:
     ip: str | None
     state: str
     site: str | None
+    latitude: float | None
+    longitude: float | None
     organisation: str | None
     node_type: str | None
     groups: list[str] = field(default_factory=list)
@@ -205,12 +207,16 @@ def _fold(group_id: str, members: list[Node]) -> MergedNode:
     site = None
     organisation = None
     node_type = None
+    latitude = None
+    longitude = None
     for tool in REFERENCE_PRIORITY:
         node = by_tool.get(tool)
         if node is None:
             continue
         name = name or node.name
         site = site or node.site
+        latitude = latitude if latitude is not None else node.latitude
+        longitude = longitude if longitude is not None else node.longitude
         organisation = organisation or node.organisation
         node_type = node_type or node.node_type
 
@@ -227,6 +233,8 @@ def _fold(group_id: str, members: list[Node]) -> MergedNode:
         ip=ip,
         state=state,
         site=site,
+        latitude=latitude,
+        longitude=longitude,
         organisation=organisation,
         node_type=node_type,
         groups=groups,

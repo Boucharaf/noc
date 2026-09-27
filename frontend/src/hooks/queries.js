@@ -181,10 +181,13 @@ export function useAlertActions() {
  * champs (`node_id`, `locality`) — à côté de `nodes`, la forme native.
  */
 export function useNodes(params = {}) {
-  const { q, page_size: pageSize, ...rest } = params;
+  const { q, page, page_size: pageSize, ...rest } = params;
   const query = { ...rest };
   if (q !== undefined && query.search === undefined) query.search = q;
   if (pageSize !== undefined && query.limit === undefined) query.limit = pageSize;
+  if (page !== undefined && query.offset === undefined) {
+    query.offset = (Math.max(1, Number(page)) - 1) * (query.limit ?? 200);
+  }
 
   return useQuery({
     queryKey: ["nodes", "list", query],
@@ -193,10 +196,17 @@ export function useNodes(params = {}) {
     select: (data) =>
       data && {
         ...data,
+        page: Math.floor((data.offset ?? 0) / (data.limit || 1)) + 1,
+        page_size: data.limit ?? pageSize ?? 200,
+        pages: Math.max(1, Math.ceil((data.total ?? 0) / (data.limit ?? pageSize ?? 200))),
         items: (data.nodes ?? []).map((node) => ({
           ...node,
           node_id: node.id,
           locality: node.site,
+          ip_address: node.ip,
+          node_type: node.node_type ?? node.type,
+          source_tools: Object.keys(node.sources ?? {}),
+          open_incidents: node.alerts,
         })),
       },
   });
@@ -208,6 +218,20 @@ export function useNode(nodeId) {
     queryFn: () => api.nodes.get(nodeId),
     enabled: Boolean(nodeId),
     refetchInterval: useInterval(REFRESH.OPERATIONAL),
+    select: (node) =>
+      node && {
+        ...node,
+        ip_address: node.ip_address ?? node.ip,
+        locality: node.locality ?? node.site,
+        node_type: node.node_type ?? node.type,
+        source_tools: node.source_tools ?? Object.keys(node.sources ?? {}),
+        source_refs:
+          node.source_refs ??
+          Object.entries(node.sources ?? {}).map(([source_tool, external_ref]) => ({
+            source_tool,
+            external_ref,
+          })),
+      },
   });
 }
 
@@ -216,6 +240,14 @@ export function useNodeStates() {
     queryKey: ["nodes", "states"],
     queryFn: api.nodes.states,
     refetchInterval: useInterval(REFRESH.LIVE),
+    select: (data) =>
+      data && {
+        ...data,
+        total: data.total ?? Object.values(data).reduce(
+          (sum, value) => (typeof value === "number" ? sum + value : sum),
+          0,
+        ),
+      },
   });
 }
 
@@ -242,6 +274,14 @@ export function useNodesDown() {
   return useQuery({
     queryKey: ["network", "down"],
     queryFn: api.metrics.down,
+    select: (nodes) =>
+      (nodes ?? []).map((node) => ({
+        ...node,
+        node_id: node.node_id ?? node.id,
+        node_name: node.node_name ?? node.name,
+        locality: node.locality ?? node.site,
+        source_tools: node.source_tools ?? node.tools ?? [],
+      })),
     refetchInterval: useInterval(REFRESH.LIVE),
   });
 }
@@ -254,6 +294,14 @@ export function useTopNodes(options = 10) {
   return useQuery({
     queryKey: ["network", "top", limit],
     queryFn: () => api.metrics.top(limit),
+    select: (rows) =>
+      (rows ?? []).map((node) => ({
+        ...node,
+        node_id: node.node_id ?? node.id,
+        locality: node.locality ?? node.site,
+        total_incidents: node.total_incidents ?? node.alerts,
+        main_cause: node.main_cause ?? null,
+      })),
     refetchInterval: useInterval(REFRESH.LIVE),
   });
 }
@@ -330,10 +378,19 @@ export function useNetworkSeries({ metric, metricType, period, hours, sample } =
 /* ================================================================== */
 /* Tendances — agrégats journaliers                                    */
 /* ================================================================== */
-export function useKpiTrend({ days = 30, site } = {}) {
+export function useKpiTrend(options = {}) {
+  const { days = 30, site } =
+    typeof options === "number" ? { days: options } : options;
   return useQuery({
     queryKey: ["kpi", "trend", days, site],
     queryFn: () => api.kpi.trend({ days, site }),
+    select: (rows) =>
+      (rows ?? []).map((row) => ({
+        ...row,
+        label: row.label ?? row.day,
+        total_incidents: row.total_incidents ?? row.alerts,
+        resolved: row.resolved ?? null,
+      })),
     refetchInterval: useInterval(REFRESH.ANALYTIC),
   });
 }
@@ -344,6 +401,31 @@ export function useKpiMonthly(params) {
   return useQuery({
     queryKey: ["kpi", "monthly", query],
     queryFn: () => api.kpi.monthly(query),
+    select: (data) => {
+      if (!data) return data;
+      const current = data.current ?? {};
+      const delta = data.delta ?? {};
+      return {
+        ...data,
+        kpi: {
+          network_availability_pct: current.availability_pct,
+          total_incidents: current.avg_alerts,
+          critical: current.avg_critical,
+          open: current.avg_down,
+          resolution_rate_pct: null,
+          avg_mttr_minutes: null,
+          avg_mtta_minutes: null,
+          critical_localities: null,
+          recurrent_nodes: null,
+          off_hours_detected: null,
+        },
+        vs_previous_month: {
+          availability_delta: delta.availability_pct,
+          incidents_delta: delta.avg_alerts,
+          critical_delta: delta.avg_critical,
+        },
+      };
+    },
     refetchInterval: useInterval(REFRESH.ANALYTIC),
   });
 }
@@ -360,6 +442,16 @@ export function useKpiCauses({ days = 90 } = {}) {
   return useQuery({
     queryKey: ["kpi", "causes", days],
     queryFn: () => api.kpi.causes({ days }),
+    select: (rows) => {
+      const total = (rows ?? []).reduce((sum, row) => sum + (row.count ?? 0), 0);
+      return (rows ?? []).map((row) => ({
+        ...row,
+        category: row.category ?? row.cause,
+        label: row.label ?? row.cause,
+        total_incidents: row.total_incidents ?? row.count,
+        share_pct: row.share_pct ?? (total ? (row.count / total) * 100 : 0),
+      }));
+    },
     refetchInterval: useInterval(REFRESH.ANALYTIC),
   });
 }
@@ -426,6 +518,9 @@ export function useUpdateSlaTarget() {
 /* Interopérabilité                                                    */
 /* ================================================================== */
 export function useInterop() {
+  const nodes = useNodes({ limit: 2000 });
+  const alerts = useAlerts({ limit: 2000 });
+
   return useQuery({
     queryKey: ["interop", "status"],
     queryFn: api.interop.status,
@@ -433,6 +528,26 @@ export function useInterop() {
     // Cet écran doit rester affichable quand tout le reste ne l'est plus :
     // on ne renonce pas au premier échec.
     retry: 3,
+    select: (data) => ({
+      ...data,
+      tools: (data?.tools ?? []).map((tool) => {
+        const toolNodes = nodes.data?.items?.filter((node) =>
+          (node.source_tools ?? []).includes(tool.tool),
+        ).length;
+        const toolAlerts = (alerts.data?.alerts ?? []).filter(
+          (alert) => alert.tool === tool.tool,
+        ).length;
+        return {
+          ...tool,
+          state: tool.reachable ? (tool.stale ? "stale" : "ok") : "error",
+          last_run_at: tool.checked_at,
+          detail: tool.error ?? tool.version ?? "Aucun détail fourni",
+          nb_nodes: tool.nb_nodes ?? (nodes.data ? toolNodes : null),
+          nb_incidents: tool.nb_incidents ?? (alerts.data ? toolAlerts : null),
+          nb_metrics: tool.nb_metrics ?? null,
+        };
+      }),
+    }),
   });
 }
 
@@ -612,13 +727,14 @@ function toIncident(alert) {
     detected_at: alert.since,
     age_minutes: Number.isNaN(detectedAt) ? null : Math.max(0, (Date.now() - detectedAt) / 60_000),
     status: alert.resolved_at ? "resolved" : alert.acknowledged ? "acknowledged" : "open",
-    description: alert.message,
+    description: alert.message ?? alert.description,
     locality: alert.site,
     node_id: alert.node_key,
     source_tool: alert.tool,
     external_id: alert.ref,
     assigned_to_full_name: alert.assigned_to,
-    cause_label: alert.cause,
+    cause_label: alert.cause ?? alert.cause_label ?? alert.cause_category,
+    cause_category: alert.cause_category ?? alert.cause,
     itop_ticket_ref: alert.ticket_ref,
   };
 }
@@ -694,12 +810,49 @@ export function useNetworkKpi() {
 
 /** Incidents, devenus alertes — voir l'en-tête de api/noc.js. */
 export function useIncidents(params = {}) {
-  const query = useAlerts(params);
+  const {
+    page = 1,
+    page_size: pageSize = 50,
+    severity,
+    source_tool: tool,
+    ...filters
+  } = params;
+  const query = useQuery({
+    queryKey: ["alerts", "incidents", params],
+    queryFn: () => api.alerts.list({ severity, tool, limit: 5000 }),
+    refetchInterval: useInterval(REFRESH.LIVE),
+    select: (data) => {
+      let rows = (data?.alerts ?? []).map(toIncident);
+      if (filters.status) rows = rows.filter((row) => row.status === filters.status);
+      if (filters.node_code) {
+        const needle = filters.node_code.toLowerCase();
+        rows = rows.filter((row) =>
+          [row.node_name, row.node_key, row.message, row.description]
+            .filter(Boolean)
+            .some((value) => String(value).toLowerCase().includes(needle)),
+        );
+      }
+      if (filters.cause_category) {
+        rows = rows.filter(
+          (row) => row.cause_category === filters.cause_category || row.cause_label === filters.cause_category,
+        );
+      }
+      if (filters.date_from) rows = rows.filter((row) => row.detected_at >= filters.date_from);
+      if (filters.date_to) rows = rows.filter((row) => row.detected_at <= filters.date_to);
+      const total = rows.length;
+      const first = (Math.max(1, Number(page)) - 1) * pageSize;
+      return {
+        items: rows.slice(first, first + pageSize),
+        total,
+        page: Math.max(1, Number(page)),
+        page_size: pageSize,
+        pages: Math.max(1, Math.ceil(total / pageSize)),
+      };
+    },
+  });
   return {
     ...query,
-    data: query.data
-      ? { items: query.data.alerts.map(toIncident), total: query.data.total }
-      : undefined,
+    data: query.data,
   };
 }
 
@@ -764,7 +917,54 @@ export function useIncidentActions() {
 }
 
 export function useCoverage() {
-  return useNodeCoverage();
+  const coverage = useNodeCoverage();
+  const nodes = useNodes({ limit: 2000 });
+  return {
+    ...coverage,
+    isLoading: coverage.isLoading || nodes.isLoading,
+    isPending: coverage.isPending || nodes.isPending,
+    data: coverage.data && nodes.data
+      ? (() => {
+          const inventory = nodes.data.items ?? [];
+          const total = nodes.data.total ?? inventory.length;
+          const monitored = inventory.filter((node) => node.source_tools?.length).length;
+          const bySite = Object.values(
+            inventory.reduce((groups, node) => {
+              const site = node.locality || "Site non renseigné";
+              const row = groups[site] ?? {
+                locality: site,
+                locality_id: site,
+                region: null,
+                ministry: null,
+                total_assets: 0,
+                monitored_assets: 0,
+                unmonitored_assets: 0,
+              };
+              row.total_assets += 1;
+              if (node.source_tools?.length) row.monitored_assets += 1;
+              else row.unmonitored_assets += 1;
+              groups[site] = row;
+              return groups;
+            }, {}),
+          ).map((row) => ({
+            ...row,
+            coverage_pct: row.total_assets
+              ? Math.round((1000 * row.monitored_assets) / row.total_assets) / 10
+              : 0,
+          }));
+          return {
+            total_assets: total,
+            monitored_assets: monitored,
+            unmonitored_assets: Math.max(0, total - monitored),
+            coverage_pct: total ? Math.round((1000 * monitored) / total) / 10 : 0,
+            as_of: null,
+            source: "instantané de collecte",
+            is_complete_inventory: false,
+            by_locality: bySite,
+          };
+        })()
+      : undefined,
+  };
 }
 
 export function useCoverageTrend({ days = 30 } = {}) {
@@ -807,7 +1007,23 @@ export function useKpiLocalities(params = {}) {
  * correct ; poser des points au jugé sur le Burkina serait pire.
  */
 export function useKpiLocalitiesMap() {
-  return { data: [], isLoading: false, isError: false, error: null };
+  const query = useQuery({
+    queryKey: ["sites", "map"],
+    queryFn: api.sites.list,
+    refetchInterval: useInterval(REFRESH.OPERATIONAL),
+  });
+  return {
+    ...query,
+    data: query.data?.map((row) => ({
+      ...row,
+      locality: row.site,
+      locality_id: row.site,
+      region: null,
+      total_incidents: row.alerts ?? 0,
+      critical: 0,
+      nb_nodes: row.nodes ?? 0,
+    })),
+  };
 }
 
 /**

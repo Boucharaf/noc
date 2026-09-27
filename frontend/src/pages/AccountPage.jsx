@@ -15,6 +15,7 @@ import { errorMessage } from "../api/client";
 import { useAuthStore } from "../store/auth";
 import { useCurrentUser } from "../hooks/useSession";
 import { useUiStore } from "../store/ui";
+import { ConfirmModal } from "../components/ui/Overlay";
 
 /**
  * Compte et préférences.
@@ -47,6 +48,8 @@ export default function AccountPage() {
   const setAutoRefresh = useUiStore((s) => s.setAutoRefresh);
 
   const [feedback, setFeedback] = useState(null);
+  const [logoutOpen, setLogoutOpen] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
 
   const [pushState, setPushState] = useState(
     typeof Notification !== "undefined" ? Notification.permission : "unsupported",
@@ -84,6 +87,7 @@ export default function AccountPage() {
   };
 
   const handleLogout = async (reason = null) => {
+    setLoggingOut(true);
     try {
       await auth.logout();
     } catch {
@@ -91,6 +95,7 @@ export default function AccountPage() {
     }
     logout(reason);
     navigate("/connexion", { replace: true });
+    setLoggingOut(false);
   };
 
   return (
@@ -115,7 +120,7 @@ export default function AccountPage() {
               queryClient.invalidateQueries({ queryKey: ["users"] });
               setFeedback({ tone: "success", message });
             }}
-            onLogout={() => handleLogout()}
+            onLogout={() => setLogoutOpen(true)}
           />
         )}
 
@@ -193,6 +198,18 @@ export default function AccountPage() {
           </div>
         </Panel>
       </div>
+
+      <ConfirmModal
+        open={logoutOpen}
+        onClose={() => setLogoutOpen(false)}
+        onConfirm={() => handleLogout()}
+        title="Confirmer la déconnexion"
+        pending={loggingOut}
+      >
+        <p className="text-[12.5px]" style={{ color: "var(--ink-2)" }}>
+          Voulez-vous vraiment vous déconnecter de cette session ?
+        </p>
+      </ConfirmModal>
     </div>
   );
 }

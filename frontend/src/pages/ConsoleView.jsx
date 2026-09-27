@@ -141,13 +141,14 @@ export default function ConsoleView() {
         />
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-4 gap-2.5">
+      <div className="grid grid-cols-1 xl:grid-cols-4 gap-2.5 items-stretch">
         {/* --- File de traitement --- */}
-        <div className="xl:col-span-3 min-w-0">
+        <div className="xl:col-span-3 min-w-0 flex">
           <Panel
             title="File de traitement"
             accent="var(--sev-critical)"
             flush
+            className="w-full h-full"
             actions={
               <Segmented
                 ariaLabel="Filtre de file"
@@ -161,7 +162,13 @@ export default function ConsoleView() {
               />
             }
           >
-            <div style={{ maxHeight: "calc(100vh - 340px)", overflow: "auto" }}>
+            <div
+              style={{
+                minHeight: "calc(100vh - 360px)",
+                maxHeight: "calc(100vh - 260px)",
+                overflow: "auto",
+              }}
+            >
               <QueryBoundary
                 query={alertsQuery}
                 skeleton={<SkeletonRows rows={8} columns={6} />}

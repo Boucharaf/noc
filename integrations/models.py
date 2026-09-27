@@ -87,6 +87,8 @@ class Node:
     # Site/localité déduits des groupes de l'outil quand la convention de
     # nommage le permet ; None sinon — on ne devine pas.
     site: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
     # Renseigné par les outils d'ITSM (iTop) uniquement.
     organisation: str | None = None
     node_type: str | None = None

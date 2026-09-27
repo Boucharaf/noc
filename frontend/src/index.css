@@ -28,11 +28,11 @@
 
 :root {
   /* Surfaces — le thème sombre est la base, pas la variante. */
-  --page: #0a0d14;
-  --surface: #111722;
-  --surface-2: #161f2e;
-  --surface-3: #1e2939;
-  --surface-inset: #0c111a;
+  --page: #101827;
+  --surface: #182235;
+  --surface-2: #202d42;
+  --surface-3: #2b3a51;
+  --surface-inset: #121d2d;
   --border: rgba(255, 255, 255, 0.07);
   --border-strong: rgba(255, 255, 255, 0.14);
 
@@ -80,17 +80,17 @@
 }
 
 .light {
-  --page: #eef1f6;
-  --surface: #ffffff;
-  --surface-2: #f5f7fa;
-  --surface-3: #e8edf3;
-  --surface-inset: #f0f3f8;
+  --page: #dfe6ef;
+  --surface: #f5f7fb;
+  --surface-2: #e8eef5;
+  --surface-3: #d8e2ee;
+  --surface-inset: #e6edf5;
   --border: rgba(15, 23, 42, 0.1);
   --border-strong: rgba(15, 23, 42, 0.2);
 
-  --ink: #0f1a2b;
-  --ink-2: #4a5a70;
-  --ink-3: #8494a8;
+  --ink: #172238;
+  --ink-2: #52627a;
+  --ink-3: #718096;
 
   --accent: #2265ac;
   --accent-ink: #1b5390;

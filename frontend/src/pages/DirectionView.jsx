@@ -86,7 +86,11 @@ export default function DirectionView() {
     <div className="space-y-2.5">
       <PageHeader
         title="Pilotage RESINA"
-        subtitle="Synthèse mensuelle de la disponibilité, des incidents et des engagements de service"
+        subtitle={
+          isCurrent
+            ? "Synthèse de la période en cours, actualisée jusqu'à aujourd'hui"
+            : "Synthèse mensuelle de la disponibilité, des incidents et des engagements de service"
+        }
         actions={
           <>
             <PeriodPicker
@@ -437,7 +441,7 @@ export default function DirectionView() {
               emptyMessage="Aucun site géolocalisé"
               emptyHint="Les coordonnées viennent de dim_locality, peuplée par le script de découverte géographique de l'ETL."
             >
-              {(items) => <SitesMap localities={items} height={360} />}
+              {(items) => <SitesMap localities={items} height={460} />}
             </QueryBoundary>
           </Panel>
         </div>

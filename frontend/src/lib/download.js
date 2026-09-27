@@ -14,6 +14,9 @@
  */
 
 export async function saveBlob(blob, filename) {
+  if (!(blob instanceof Blob)) {
+    throw new Error("Le serveur n'a pas renvoyé un fichier téléchargeable.");
+  }
   if (blob && blob.type && blob.type.includes("application/json")) {
     const text = await blob.text();
     let detail = "Le fichier n'a pas pu être généré.";
