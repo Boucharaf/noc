@@ -27,26 +27,24 @@
 @custom-variant light (&:where(.light, .light *));
 
 :root {
-  /* Surfaces — le thème sombre est la base, pas la variante. */
-  --page: #101827;
-  --surface: #182235;
-  --surface-2: #202d42;
-  --surface-3: #2b3a51;
-  --surface-inset: #121d2d;
-  --border: rgba(255, 255, 255, 0.07);
-  --border-strong: rgba(255, 255, 255, 0.14);
+  /* Surfaces — thème sombre adouci : moins profond, moins fatiguant. */
+  --page: #1a2537;
+  --surface: #21304a;
+  --surface-2: #293b55;
+  --surface-3: #334663;
+  --surface-inset: #192030;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
 
-  --ink: #e6edf6;
-  --ink-2: #93a2b8;
-  --ink-3: #5d6b80;
+  --ink: #dce8f5;
+  --ink-2: #8ea5be;
+  --ink-3: #5e7491;
 
   --accent: #3d7fc4;
-  --accent-ink: #8ab8ec;
-  --accent-soft: rgba(61, 127, 196, 0.15);
+  --accent-ink: #82b8ef;
+  --accent-soft: rgba(61, 127, 196, 0.18);
 
-  /* Sévérités — même valeur dans les deux thèmes : ce sont des codes,
-     pas des couleurs d'habillage. Un critique doit être le même rouge
-     sur le mur d'écrans que sur le portable de l'astreinte. */
+  /* Sévérités — codes fonctionnels : identiques dans les deux thèmes. */
   --sev-critical: #e5484d;
   --sev-high: #ef7c22;
   --sev-medium: #d9a33a;
@@ -69,7 +67,6 @@
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
     "Helvetica Neue", Arial, sans-serif;
 
-  /* Angles quasi droits : un panneau d'instrumentation, pas une carte. */
   --radius: 3px;
   --radius-lg: 5px;
 
@@ -80,21 +77,33 @@
 }
 
 .light {
-  --page: #dfe6ef;
-  --surface: #f5f7fb;
-  --surface-2: #e8eef5;
-  --surface-3: #d8e2ee;
-  --surface-inset: #e6edf5;
-  --border: rgba(15, 23, 42, 0.1);
-  --border-strong: rgba(15, 23, 42, 0.2);
+  /* Thème clair aux couleurs de l'ANPTIC.
+     · Le « blanc » est #F1F1F1 (gris perle) : jamais de #fff pur, qui
+       éblouit sur un écran de salle et fait paraître les bordures dures.
+     · Le bleu ciel du logo n'arrive qu'en DÉGRADÉ, par petites touches :
+       fond de page, barre haute, rail de navigation. Les panneaux de
+       données restent des surfaces calmes pour ne pas gêner la lecture.
+     · Le marine du logo (#262a6b) sert d'encre : texte, titres. */
+  --page: #f1f1f1;
+  --page-bg: linear-gradient(165deg, #f1f1f1 0%, #ebf2f8 52%, #dcebf7 100%);
+  --topbar-bg: linear-gradient(90deg, #f1f1f1 0%, #e6f1fa 100%);
+  --rail-bg: linear-gradient(180deg, #f1f1f1 0%, #e4f0f9 60%, #d3e8f6 100%);
 
-  --ink: #172238;
-  --ink-2: #52627a;
-  --ink-3: #718096;
+  --surface: #f7f8f9;
+  --surface-2: #ebeff3;
+  --surface-3: #dde6ee;
+  --surface-inset: #eef2f6;
+  --border: rgba(38, 42, 107, 0.1);
+  --border-strong: rgba(38, 42, 107, 0.2);
 
-  --accent: #2265ac;
-  --accent-ink: #1b5390;
-  --accent-soft: rgba(34, 101, 172, 0.1);
+  --ink: #1c2140;
+  --ink-2: #434a70;
+  --ink-3: #6a7291;
+
+  --accent: #0e7ec2;
+  --accent-ink: #0b5f97;
+  --accent-soft: rgba(26, 154, 217, 0.14);
+  --accent-grad: linear-gradient(135deg, #1a9ad9 0%, #0d6fb0 100%);
 
   --sev-critical: #cc2f34;
   --sev-high: #cf6412;
@@ -129,7 +138,8 @@ body {
   /* 13 px : la densité visée est celle d'une console, pas d'un site. */
   font-size: 13px;
   line-height: 1.45;
-  background: var(--page);
+  background: var(--page-bg, var(--page));
+  background-attachment: fixed;
   color: var(--ink);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -344,6 +354,10 @@ body {
   background: var(--accent);
   border-color: var(--accent);
 }
+.light .btn-primary {
+  background: var(--accent-grad);
+  border-color: transparent;
+}
 .btn-danger {
   background: transparent;
   border-color: var(--sev-critical);
@@ -465,7 +479,6 @@ body {
   font-size: 12.5px;
   text-decoration: none;
   white-space: nowrap;
-  border-left: 2px solid transparent;
 }
 .nav-item:hover {
   background: var(--surface-2);
@@ -474,7 +487,6 @@ body {
 .nav-item.active {
   background: var(--accent-soft);
   color: var(--accent-ink);
-  border-left-color: var(--accent);
   font-weight: 600;
 }
 .nav-section {
@@ -589,11 +601,8 @@ body {
   background: var(--surface-inset);
   font-family: var(--font-sans);
 }
-:root:not(.light) .leaflet-tile {
-  filter: grayscale(0.85) brightness(0.62) contrast(1.05) invert(0.92) hue-rotate(180deg);
-}
 .leaflet-control-attribution {
-  background: rgba(0, 0, 0, 0.4) !important;
+  background: color-mix(in srgb, var(--surface) 80%, transparent) !important;
   color: var(--ink-3) !important;
   font-size: 9px !important;
 }
@@ -613,4 +622,56 @@ body {
 }
 .wallboard .panel-title {
   font-size: 13px;
+}
+
+/* --- Écran de connexion ---------------------------------------------
+   Le « jaune » venait de l'autofill de Chrome/Edge, qui impose son propre
+   fond (#fffbe6 / jaune pâle) par-dessus le style inline. Seule parade
+   fiable : repeindre le fond avec une ombre interne, puisque
+   `background` est ignoré par le navigateur dans cet état. */
+.login-input {
+  display: block;
+  width: 100%;
+  height: 40px;
+  padding: 0 12px 0 34px;
+  border-radius: 6px;
+  border: 1px solid #cdd6e0;
+  background-color: #f4f6f9;
+  color: #1c2140;
+  font-size: 13px;
+  font-family: inherit;
+  box-sizing: border-box;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+}
+.login-input:focus {
+  border-color: #1a9ad9;
+  background-color: #fbfcfd;
+  box-shadow: 0 0 0 3px rgba(26, 154, 217, 0.18);
+}
+.login-input:-webkit-autofill,
+.login-input:-webkit-autofill:hover,
+.login-input:-webkit-autofill:focus {
+  -webkit-text-fill-color: #1c2140;
+  caret-color: #1c2140;
+  -webkit-box-shadow: 0 0 0 1000px #f4f6f9 inset;
+  box-shadow: 0 0 0 1000px #f4f6f9 inset;
+  transition: background-color 9999s ease-in-out 0s;
+}
+
+/* --- Modale de confirmation compacte ------------------------------- */
+.confirm-body {
+  text-align: center;
+  padding: 18px 20px 6px;
+}
+.confirm-icon {
+  width: 40px;
+  height: 40px;
+  margin: 0 auto 10px;
+  border-radius: 99px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
 }

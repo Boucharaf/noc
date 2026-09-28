@@ -129,7 +129,7 @@ export default function SideNav({ role, toolsDown = 0, onNavigate }) {
       style={{
         width: collapsed ? "var(--rail-w-collapsed)" : "var(--rail-w)",
         borderColor: "var(--border)",
-        background: "var(--surface)",
+        background: "var(--rail-bg, var(--surface))",
         transition: "width .14s ease",
       }}
       aria-label="Navigation principale"

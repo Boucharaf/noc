@@ -20,11 +20,12 @@ export default defineConfig({
         type: "module",
       },
       manifest: {
-        name: "Network Operations Center",
-        short_name: "NOC",
+        name: "ANPTIC — Network Operations Center",
+        short_name: "ANPTIC NOC",
         description:
           "A web application for monitoring and managing network operations.",
-        theme_color: "#ffffff",
+        theme_color: "#1a2537",
+        background_color: "#F1F1F1",
         display: "standalone",
         orientation: "portrait",
         start_url: "/",
@@ -57,6 +58,7 @@ export default defineConfig({
             src: "/icon-512.png",
             sizes: "512x512",
             type: "image/png",
+            purpose: "any",
           },
         ],
       },

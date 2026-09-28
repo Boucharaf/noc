@@ -1,4 +1,4 @@
-import { X } from "lucide-react";
+import { LogOut, X } from "lucide-react";
 import { useEffect } from "react";
 import { createPortal } from "react-dom";
 
@@ -25,14 +25,16 @@ function useDismiss(open, onClose) {
   }, [open, onClose]);
 }
 
-export function Modal({ open, onClose, title, subtitle, children, footer, width = 480 }) {
+export function Modal({ open, onClose, title, subtitle, children, footer, width = 480, centered = false }) {
   useDismiss(open, onClose);
   if (!open) return null;
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[2000] flex items-start justify-center p-4 sm:p-8 overflow-auto"
-      style={{ background: "rgba(0,0,0,.6)" }}
+      className={`fixed inset-0 z-[2000] flex justify-center p-4 overflow-auto ${
+        centered ? "items-center" : "items-start sm:p-8"
+      }`}
+      style={{ background: "rgba(10, 20, 40, .55)" }}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose?.();
       }}
@@ -78,23 +80,33 @@ export function Modal({ open, onClose, title, subtitle, children, footer, width 
 }
 
 export function ConfirmModal({ open, onClose, onConfirm, title, children, pending = false }) {
+  // Dialogue de confirmation : 360 px, centré à l'écran, boutons de même
+  // largeur. Une confirmation qui occupe 480 px de large donne à une
+  // simple question oui/non le poids d'un formulaire.
   return (
     <Modal
       open={open}
       onClose={pending ? undefined : onClose}
       title={title}
+      width={360}
+      centered
       footer={
-        <>
-          <button type="button" className="btn btn-sm" onClick={onClose} disabled={pending}>
+        <div className="grid grid-cols-2 gap-2 w-full">
+          <button type="button" className="btn" onClick={onClose} disabled={pending}>
             Annuler
           </button>
-          <button type="button" className="btn btn-sm btn-primary" onClick={onConfirm} disabled={pending}>
+          <button type="button" className="btn btn-primary" onClick={onConfirm} disabled={pending}>
             {pending ? "…" : "Confirmer"}
           </button>
-        </>
+        </div>
       }
     >
-      {children}
+      <div className="confirm-body">
+        <div className="confirm-icon" aria-hidden="true">
+          <LogOut size={18} />
+        </div>
+        {children}
+      </div>
     </Modal>
   );
 }
@@ -175,7 +187,8 @@ export function ConfirmDialog({ open, onClose, onConfirm, title, message, confir
       open={open}
       onClose={onClose}
       title={title}
-      width={400}
+      width={380}
+      centered
       footer={
         <>
           <button type="button" className="btn btn-sm" onClick={onClose} disabled={pending}>

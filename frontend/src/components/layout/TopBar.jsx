@@ -82,7 +82,7 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
       style={{
         height: "var(--topbar-h)",
         borderColor: "var(--border)",
-        background: "var(--surface)",
+        background: "var(--topbar-bg, var(--surface))",
       }}
     >
       <button
@@ -111,9 +111,11 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
               : "État du backend inconnu"
           }
         />
-        <span className="font-semibold tracking-tight text-[13.5px] whitespace-nowrap">
-          NOC RESINA
-        </span>
+        <img
+          src="/images.jpg"
+          alt="ANPTIC"
+          style={{ height: 28, width: "auto", objectFit: "contain", display: "block" }}
+        />
       </Link>
 
       <div

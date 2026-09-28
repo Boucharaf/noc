@@ -11,17 +11,13 @@ import { useAuthStore } from "../store/auth";
 /**
  * Écran de connexion.
  *
- * Deux modes, parce qu'il y a deux contextes d'usage réels :
- *
+ * Deux modes :
  * · identifiant + mot de passe, pour un poste personnel ;
  * · code PIN, pour la relève d'équipe sur une console partagée en salle.
- *   Le backend ne l'autorise QU'aux agents terrain
- *   (routes/auth.py::PIN_LOGIN_ALLOWED_ROLES) : un compte directeur ou
- *   chef NOC porte trop de privilèges pour un facteur à quatre chiffres.
- *   Le pavé numérique s'utilise au doigt sur une tablette, gants compris.
  *
- * L'écran affiche l'heure : sur une console de salle, c'est aussi
- * l'horloge murale.
+ * Le fond utilise la carte du Burkina Faso avec un effet de flou et un
+ * dégradé bleu vers le bas. Le formulaire est toujours affiché en thème
+ * clair, quelle que soit la préférence de l'utilisateur.
  */
 export default function LoginPage() {
   const token = useAuthStore((s) => s.token);
@@ -44,7 +40,6 @@ export default function LoginPage() {
       setError("Votre session a expiré. Reconnectez-vous.");
       clearLogoutReason();
     } else if (logoutReason === "password_changed") {
-      // Posé par « Mon compte » : le backend a fermé toutes les sessions.
       setError("Mot de passe modifié. Reconnectez-vous avec le nouveau mot de passe.");
       clearLogoutReason();
     }
@@ -64,8 +59,6 @@ export default function LoginPage() {
       login(data.access_token, data.user, data.expires_in);
       navigate(homeRoute(data.user.role), { replace: true });
     } catch (loginError) {
-      // Le verrouillage par IP renvoie un objet `detail` structuré ;
-      // errorMessage() ne saurait pas le lire.
       const detail = loginError.response?.data?.detail;
       if (detail && typeof detail === "object" && detail.retry_after_seconds) {
         setError(
@@ -89,26 +82,86 @@ export default function LoginPage() {
   };
 
   return (
+    /* Conteneur plein écran avec fond carte du BF */
     <div
-      className="h-full flex items-center justify-center p-4"
       style={{
-        background:
-          "radial-gradient(1100px 520px at 50% -10%, color-mix(in srgb, var(--accent) 12%, transparent), transparent), var(--page)",
+        position: "relative",
+        minHeight: "100%",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "24px 16px",
+        overflow: "hidden",
       }}
     >
-      <div className="w-full" style={{ maxWidth: 460 }}>
-        <div className="text-center mb-5">
-          <div className="flex items-center justify-center gap-2 mb-1">
-            <span className="live-dot" />
-            <h1 className="text-[19px] font-semibold tracking-tight">NOC RESINA</h1>
-          </div>
+      {/* Image de fond */}
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          backgroundImage: "url(/carte_du_BF.jpg)",
+          backgroundSize: "cover",
+          backgroundPosition: "center",
+          filter: "blur(5px)",
+          transform: "scale(1.06)", /* évite les bords blancs du blur */
+          zIndex: 0,
+        }}
+      />
+
+      {/* Dégradé bleu vers le bas, par-dessus l'image floutée */}
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          background:
+            "linear-gradient(to bottom, rgba(20, 60, 120, 0.38) 0%, rgba(10, 35, 90, 0.72) 100%)",
+          zIndex: 1,
+        }}
+      />
+
+      {/* Formulaire centré — thème clair forcé */}
+      <div
+        className="light"
+        style={{
+          position: "relative",
+          zIndex: 2,
+          width: "100%",
+          maxWidth: 380,
+        }}
+      >
+        {/* En-tête avec logo */}
+        <div style={{ textAlign: "center", marginBottom: 16 }}>
+          <img
+            src="/images.jpg"
+            alt="ANPTIC"
+            style={{
+              height: 56,
+              width: "auto",
+              objectFit: "contain",
+              display: "inline-block",
+              filter: "drop-shadow(0 2px 8px rgba(0,0,0,0.4))",
+            }}
+          />
         </div>
 
+        {/* Carte du formulaire */}
         <div
-          className="panel"
-          style={{ minHeight: 410, boxShadow: "0 24px 64px rgba(0,0,0,.35)" }}
+          style={{
+            background: "rgba(245, 247, 249, 0.97)",
+            borderRadius: 12,
+            boxShadow:
+              "0 8px 40px rgba(10, 35, 90, 0.28), 0 2px 8px rgba(0,0,0,0.12)",
+            overflow: "hidden",
+            border: "1px solid rgba(34, 101, 172, 0.15)",
+          }}
         >
-          <div className="flex border-b" style={{ borderColor: "var(--border)" }}>
+          {/* Onglets */}
+          <div
+            style={{
+              display: "flex",
+              borderBottom: "1px solid rgba(34, 101, 172, 0.15)",
+            }}
+          >
             {[
               { value: "password", label: "Mot de passe", icon: Lock },
               { value: "pin", label: "Code PIN", icon: KeyRound },
@@ -119,12 +172,23 @@ export default function LoginPage() {
                 <button
                   key={tab.value}
                   type="button"
-                  className="flex-1 flex items-center justify-center gap-1.5 text-[12px] font-medium border-b-2 -mb-px"
                   style={{
-                    height: 34,
-                    color: active ? "var(--ink)" : "var(--ink-3)",
-                    borderColor: active ? "var(--accent)" : "transparent",
-                    background: active ? "var(--surface)" : "var(--surface-2)",
+                    flex: 1,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 6,
+                    height: 36,
+                    fontSize: 12,
+                    fontWeight: 500,
+                    fontFamily: "inherit",
+                    border: "none",
+                    borderBottom: `2px solid ${active ? "#0e7ec2" : "transparent"}`,
+                    marginBottom: -1,
+                    cursor: "pointer",
+                    color: active ? "#0e7ec2" : "#718096",
+                    background: active ? "#e8f3fb" : "#f1f3f6",
+                    transition: "all 0.15s ease",
                   }}
                   onClick={() => {
                     setMode(tab.value);
@@ -138,66 +202,118 @@ export default function LoginPage() {
             })}
           </div>
 
-          <form onSubmit={submit} className="p-6 space-y-4">
+          {/* Corps du formulaire */}
+          <form
+            onSubmit={submit}
+            style={{ padding: "20px 24px 24px", display: "flex", flexDirection: "column", gap: 14 }}
+          >
             {error && <Notice tone="error">{error}</Notice>}
 
             {mode === "password" ? (
               <>
-                <p className="text-[12px]" style={{ color: "var(--ink-2)" }}>
+                <p style={{ fontSize: 12, color: "#52627a", margin: 0 }}>
                   Entrez votre identifiant et votre mot de passe pour continuer.
                 </p>
-                <label className="block">
-                  <span className="field-label">Identifiant</span>
-                  <div className="relative">
+
+                <label style={{ display: "block" }}>
+                  <span
+                    style={{
+                      display: "block",
+                      fontSize: 10.5,
+                      fontWeight: 600,
+                      letterSpacing: "0.06em",
+                      textTransform: "uppercase",
+                      color: "#52627a",
+                      marginBottom: 4,
+                    }}
+                  >
+                    Identifiant
+                  </span>
+                  <div style={{ position: "relative" }}>
                     <User
                       size={13}
-                      className="absolute left-2 top-1/2 -translate-y-1/2"
-                      style={{ color: "var(--ink-3)" }}
+                      style={{
+                        position: "absolute",
+                        left: 10,
+                        top: "50%",
+                        transform: "translateY(-50%)",
+                        color: "#718096",
+                      }}
                     />
                     <input
-                      className="input"
-                      style={{ paddingLeft: 24, minHeight: 42 }}
+                      className="login-input"
                       value={username}
-                      onChange={(event) => setUsername(event.target.value)}
+                      onChange={(e) => setUsername(e.target.value)}
                       autoComplete="username"
                       autoFocus
                       required
                     />
                   </div>
                 </label>
-                <label className="block">
-                  <span className="field-label">Mot de passe</span>
-                  <div className="relative">
+
+                <label style={{ display: "block" }}>
+                  <span
+                    style={{
+                      display: "block",
+                      fontSize: 10.5,
+                      fontWeight: 600,
+                      letterSpacing: "0.06em",
+                      textTransform: "uppercase",
+                      color: "#52627a",
+                      marginBottom: 4,
+                    }}
+                  >
+                    Mot de passe
+                  </span>
+                  <div style={{ position: "relative" }}>
                     <Lock
                       size={13}
-                      className="absolute left-2 top-1/2 -translate-y-1/2"
-                      style={{ color: "var(--ink-3)" }}
+                      style={{
+                        position: "absolute",
+                        left: 10,
+                        top: "50%",
+                        transform: "translateY(-50%)",
+                        color: "#718096",
+                      }}
                     />
                     <input
-                      className="input"
-                      style={{ paddingLeft: 24, paddingRight: 40, minHeight: 42 }}
+                      className="login-input"
+                      style={{ paddingRight: 40 }}
                       type={showPassword ? "text" : "password"}
                       value={password}
-                      onChange={(event) => setPassword(event.target.value)}
+                      onChange={(e) => setPassword(e.target.value)}
                       autoComplete="current-password"
                       required
                     />
                     <button
                       type="button"
-                      className="absolute right-2 top-1/2 -translate-y-1/2"
-                      style={{ color: "var(--ink-3)" }}
-                      onClick={() => setShowPassword((visible) => !visible)}
+                      style={{
+                        position: "absolute",
+                        right: 10,
+                        top: "50%",
+                        transform: "translateY(-50%)",
+                        background: "none",
+                        border: "none",
+                        cursor: "pointer",
+                        color: "#718096",
+                        padding: 0,
+                        display: "flex",
+                      }}
+                      onClick={() => setShowPassword((v) => !v)}
                       aria-label={showPassword ? "Masquer le mot de passe" : "Afficher le mot de passe"}
-                      title={showPassword ? "Masquer le mot de passe" : "Afficher le mot de passe"}
                     >
                       {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
                     </button>
                   </div>
                 </label>
+
                 <button
                   type="submit"
-                  className="btn btn-primary w-full"
-                  style={{ minHeight: 42 }}
+                  style={{
+                    ...submitBtnStyle,
+                    opacity: pending || !username || !password ? 0.55 : 1,
+                    cursor: pending || !username || !password ? "not-allowed" : "pointer",
+                  }}
                   disabled={pending || !username || !password}
                 >
                   {pending ? "Connexion…" : "Se connecter"}
@@ -205,26 +321,32 @@ export default function LoginPage() {
               </>
             ) : (
               <>
-                <div className="flex justify-center gap-2 my-2" aria-label="Code saisi">
+                {/* indicateur PIN */}
+                <div
+                  style={{ display: "flex", justifyContent: "center", gap: 8 }}
+                  aria-label="Code saisi"
+                >
                   {Array.from({ length: 6 }).map((_, index) => (
                     <span
                       key={index}
-                      className="rounded-full"
                       style={{
                         width: 10,
                         height: 10,
-                        background: index < pin.length ? "var(--accent)" : "var(--surface-3)",
+                        borderRadius: "50%",
+                        background: index < pin.length ? "#0e7ec2" : "#d1dde8",
+                        display: "inline-block",
                       }}
                     />
                   ))}
                 </div>
-                <div className="grid grid-cols-3 gap-1.5">
+
+                {/* Pavé numérique */}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
                   {["1", "2", "3", "4", "5", "6", "7", "8", "9"].map((digit) => (
                     <button
                       key={digit}
                       type="button"
-                      className="btn num"
-                      style={{ height: 40, fontSize: 16 }}
+                      style={pinBtnStyle}
                       onClick={() => pressDigit(digit)}
                     >
                       {digit}
@@ -232,8 +354,7 @@ export default function LoginPage() {
                   ))}
                   <button
                     type="button"
-                    className="btn"
-                    style={{ height: 40 }}
+                    style={{ ...pinBtnStyle, fontSize: 12 }}
                     onClick={() => setPin("")}
                     aria-label="Effacer"
                   >
@@ -241,25 +362,28 @@ export default function LoginPage() {
                   </button>
                   <button
                     type="button"
-                    className="btn num"
-                    style={{ height: 40, fontSize: 16 }}
+                    style={pinBtnStyle}
                     onClick={() => pressDigit("0")}
                   >
                     0
                   </button>
                   <button
                     type="button"
-                    className="btn"
-                    style={{ height: 40 }}
+                    style={{ ...pinBtnStyle, fontSize: 12 }}
                     onClick={() => setPin(pin.slice(0, -1))}
                     aria-label="Corriger"
                   >
                     <Delete size={15} />
                   </button>
                 </div>
+
                 <button
                   type="submit"
-                  className="btn btn-primary w-full"
+                  style={{
+                    ...submitBtnStyle,
+                    opacity: pending || pin.length < 4 ? 0.55 : 1,
+                    cursor: pending || pin.length < 4 ? "not-allowed" : "pointer",
+                  }}
                   disabled={pending || pin.length < 4}
                 >
                   {pending ? "Vérification…" : "Valider"}
@@ -268,8 +392,43 @@ export default function LoginPage() {
             )}
           </form>
         </div>
-
       </div>
     </div>
   );
 }
+
+/* ---------- styles inline partagés ---------- */
+
+const submitBtnStyle = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: "100%",
+  height: 42,
+  borderRadius: 6,
+  border: "none",
+  background: "linear-gradient(135deg, #1a9ad9 0%, #0d6fb0 100%)",
+  color: "#fff",
+  fontSize: 13.5,
+  fontWeight: 600,
+  fontFamily: "inherit",
+  letterSpacing: "0.02em",
+  cursor: "pointer",
+  transition: "filter 0.15s ease",
+  boxShadow: "0 2px 8px rgba(13, 111, 176, 0.35)",
+};
+
+const pinBtnStyle = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  height: 40,
+  borderRadius: 6,
+  border: "1px solid #cdd6e0",
+  background: "#eef2f6",
+  color: "#172238",
+  fontSize: 17,
+  fontFamily: "inherit",
+  cursor: "pointer",
+  transition: "background 0.12s ease",
+};

@@ -1,4 +1,4 @@
-import { CircleMarker, GeoJSON, MapContainer, Tooltip, useMap } from "react-leaflet";
+import { CircleMarker, GeoJSON, MapContainer, TileLayer, Tooltip, useMap } from "react-leaflet";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { geoJSON } from "leaflet";
@@ -30,6 +30,22 @@ const BURKINA_BOUNDS = [
   [15.2, 2.5],
 ];
 
+/**
+ * Fond de carte.
+ *
+ * C'est lui qui fait apparaître les villes, les routes et le relief : la
+ * couche GeoJSON ne dessine que la frontière du pays, et les marqueurs
+ * que les sites suivis. Sans TileLayer, la carte est un contour vide sur
+ * lequel flottent des cercles — exactement ce qui était observé.
+ *
+ * Fond clair OpenStreetMap : le style routier et les libellés des villes
+ * restent visibles comme sur une carte routière classique, quel que soit
+ * le thème de l'application.
+ */
+const TILE_URL = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
+const TILE_ATTRIBUTION =
+  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+
 function FitBounds({ points, countryGeoJson }) {
   const map = useMap();
   useEffect(() => {
@@ -54,7 +70,17 @@ export default function SitesMap({ localities, height = 420, onSelect }) {
   useEffect(() => {
     let active = true;
     fetch("/region.geojson")
-      .then((response) => (response.ok ? response.json() : null))
+      .then((response) => {
+        // Si le fichier est absent de /public, nginx et Vite renvoient
+        // index.html avec un statut 200 : `response.ok` est alors vrai
+        // et `.json()` échoue en silence. On vérifie donc le type.
+        const type = response.headers.get("content-type") ?? "";
+        if (!response.ok || type.includes("text/html")) {
+          console.warn("[SitesMap] /region.geojson introuvable dans public/");
+          return null;
+        }
+        return response.json();
+      })
       .then((data) => {
         if (active) setCountryGeoJson(data);
       })
@@ -86,15 +112,22 @@ export default function SitesMap({ localities, height = 420, onSelect }) {
           style={{ height: "100%", width: "100%", background: "var(--surface-inset)" }}
           attributionControl
         >
+          <TileLayer
+            url={TILE_URL}
+            attribution={TILE_ATTRIBUTION}
+            maxZoom={18}
+          />
           {countryGeoJson && (
             <GeoJSON
               data={countryGeoJson}
+              // Contour seul, sans remplissage : un aplat par-dessus les
+              // tuiles masquerait justement les villes qu'on veut voir.
               style={{
-                color: "var(--accent-ink)",
-                weight: 1.2,
-                opacity: 0.7,
-                fillColor: "var(--surface-2)",
-                fillOpacity: 0.18,
+                color: "#0b5f97",
+                weight: 2,
+                opacity: 0.9,
+                fillOpacity: 0,
+                interactive: false,
               }}
             />
           )}
