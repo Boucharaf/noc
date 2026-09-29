@@ -132,7 +132,7 @@ export default function LoginPage() {
         {/* En-tête avec logo */}
         <div style={{ textAlign: "center", marginBottom: 16 }}>
           <img
-            src="/images.jpg"
+            src="/images.png"
             alt="ANPTIC"
             style={{
               height: 56,

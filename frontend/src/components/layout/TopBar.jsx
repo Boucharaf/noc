@@ -112,7 +112,7 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
           }
         />
         <img
-          src="/images.jpg"
+          src="/images.png"
           alt="ANPTIC"
           style={{ height: 28, width: "auto", objectFit: "contain", display: "block" }}
         />

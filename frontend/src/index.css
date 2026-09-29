@@ -27,22 +27,30 @@
 @custom-variant light (&:where(.light, .light *));
 
 :root {
-  /* Surfaces — thème sombre adouci : moins profond, moins fatiguant. */
-  --page: #1a2537;
-  --surface: #21304a;
-  --surface-2: #293b55;
-  --surface-3: #334663;
-  --surface-inset: #192030;
-  --border: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.16);
+  /* Surfaces — thème sombre neutre.
+     L'ancienne base était un bleu marine (#1a2537) : sur 8 h d'affichage
+     de nuit, une teinte saturée fatigue plus qu'un neutre, même sombre,
+     parce que l'œil doit constamment compenser la dominante colorée.
+     Base proche du charbon (#1a1a1a), légèrement chaude (une trace de
+     brun dans le gris, pas de bleu) : elle repose l'œil et laisse
+     l'accent bleu ANPTIC ressortir davantage qu'il ne le faisait sur un
+     fond déjà bleu. Les trois plans (page < surface < surface-2/3) ne se
+     distinguent que par la clarté, pas par la teinte. */
+  --page: #1a1a1a;
+  --surface: #212121;
+  --surface-2: #262626;
+  --surface-3: #303030;
+  --surface-inset: #161616;
+  --border: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.14);
 
-  --ink: #dce8f5;
-  --ink-2: #8ea5be;
-  --ink-3: #5e7491;
+  --ink: #e8e6e3;
+  --ink-2: #a3a09b;
+  --ink-3: #706d68;
 
-  --accent: #3d7fc4;
-  --accent-ink: #82b8ef;
-  --accent-soft: rgba(61, 127, 196, 0.18);
+  --accent: #2f8fd0;
+  --accent-ink: #7cc2f4;
+  --accent-soft: rgba(47, 143, 208, 0.2);
 
   /* Sévérités — codes fonctionnels : identiques dans les deux thèmes. */
   --sev-critical: #e5484d;
@@ -85,16 +93,28 @@
        données restent des surfaces calmes pour ne pas gêner la lecture.
      · Le marine du logo (#262a6b) sert d'encre : texte, titres. */
   --page: #f1f1f1;
-  --page-bg: linear-gradient(165deg, #f1f1f1 0%, #ebf2f8 52%, #dcebf7 100%);
-  --topbar-bg: linear-gradient(90deg, #f1f1f1 0%, #e6f1fa 100%);
-  --rail-bg: linear-gradient(180deg, #f1f1f1 0%, #e4f0f9 60%, #d3e8f6 100%);
+  /* Dégradé accentué : le point d'arrivée descend vers un bleu plus
+     soutenu et le point milieu avance à 40 % — la teinte ANPTIC se voit
+     dès le haut d'écran, pas seulement en bas de page. */
+  --page-bg: linear-gradient(165deg, #f1f1f1 0%, #e3eff9 40%, #c9e6f8 100%);
+  --topbar-bg: linear-gradient(90deg, #f1f1f1 0%, #d9ecf9 100%);
+  --rail-bg: linear-gradient(180deg, #f1f1f1 0%, #d7ecf9 55%, #b9defa 100%);
 
+  /* Cartes : même base qu'avant (#F7F8F9), mais avec un très léger
+     dégradé interne, un liséré froid et une ombre bleutée — un plan qui
+     se détache du fond dégradé au lieu d'un aplat qui s'y fond. */
   --surface: #f7f8f9;
-  --surface-2: #ebeff3;
-  --surface-3: #dde6ee;
+  /* Réservé aux panneaux (fond + ombre) : color-mix() et les composants
+     JS qui recolorent --surface exigent une couleur unie, pas un
+     dégradé — d'où cette variable séparée plutôt qu'une redéfinition de
+     --surface elle-même. */
+  --panel-bg: linear-gradient(180deg, #fbfcfd 0%, #f7f8f9 100%);
+  --surface-2: #e8edf3;
+  --surface-3: #d7e3ee;
   --surface-inset: #eef2f6;
-  --border: rgba(38, 42, 107, 0.1);
-  --border-strong: rgba(38, 42, 107, 0.2);
+  --border: rgba(14, 126, 194, 0.12);
+  --border-strong: rgba(14, 126, 194, 0.24);
+  --panel-shadow: 0 1px 2px rgba(15, 45, 78, 0.05), 0 6px 16px -8px rgba(14, 126, 194, 0.22);
 
   --ink: #1c2140;
   --ink-2: #434a70;
@@ -183,7 +203,8 @@ body {
    ombre portée simule une élévation qui n'a pas de sens sur un mur
    d'instruments où tout est au même plan. */
 .panel {
-  background: var(--surface);
+  background: var(--panel-bg, var(--surface));
+  box-shadow: var(--panel-shadow, none);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   display: flex;

@@ -99,6 +99,14 @@ LAB_HOSTS = [
         "http_path": "/",
         "site": "Laboratoire",
     },
+    {
+        "name": "outil-netxms",
+        "dns": "netxms-server",
+        "role": "Supervision NetXMS — serveur et API Legacy Web",
+        "http_port": 8080,
+        "http_path": "/netxms-websvc/",
+        "site": "Laboratoire",
+    },
 ]
 
 
@@ -417,6 +425,84 @@ class ITop:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  NetXMS
+# ═══════════════════════════════════════════════════════════════════════
+class NetXMS:
+    """Provisionnement via l'API Legacy Web (netxms-websvc).
+
+    Contrairement à Centreon, cette API accepte la création d'objets depuis
+    l'extérieur (POST /objects) : pas besoin d'un script embarqué dans le
+    conteneur.
+
+    ⚠️ `OBJECT_NODE` et `OBJECT_CONTAINER` reprennent l'énumération publique
+    de NetXMS (nxcldefs.h) telle que documentée par ses développeurs pour les
+    scripts NXSL ; seule la valeur ZONE=6 de cette même énumération est
+    confirmée par un exemple d'appel HTTP réel (rapport de bogue de
+    l'éditeur, NX-2596). NODE=2 et CONTAINER=5 suivent la même énumération
+    mais n'ont pas été vérifiés par un appel HTTP équivalent — à confirmer si
+    la création échoue avec un code inattendu.
+    """
+
+    OBJECT_NODE = 2
+    OBJECT_CONTAINER = 5
+    SERVICE_ROOT = 2  # id fixe de l'objet « Infrastructure Services »
+
+    def __init__(self, url: str, user: str, password: str):
+        self.api = url.rstrip("/")
+        body = Http.post_json(f"{self.api}/sessions", {"login": user, "password": password})
+        self.session = body["sessionHandle"]
+
+    def _call(self, method: str, path: str, payload: dict | None = None):
+        headers = {"Session-Id": self.session}
+        url = f"{self.api}{path}"
+        if method == "GET":
+            return Http.get(url, headers)
+        return Http.post_json(url, payload or {}, headers)
+
+    def _find(self, object_class: str, name: str):
+        objects = self._call("GET", f"/objects?class={object_class}")
+        if isinstance(objects, dict):
+            objects = objects.get("objects", objects.get("object", []))
+        for obj in objects or []:
+            if obj.get("objectName") == name or obj.get("name") == name:
+                return obj.get("objectId") or obj.get("id")
+        return None
+
+    def ensure_container(self, name: str, parent_id: int) -> int:
+        found = self._find("container", name)
+        if found:
+            return found
+        log.info("NetXMS : création du conteneur « %s »", name)
+        created = self._call(
+            "POST", "/objects",
+            {"objectType": self.OBJECT_CONTAINER, "name": name, "parentId": parent_id},
+        )
+        return created.get("objectId") or created.get("id")
+
+    def ensure_node(self, host: dict, parent_id: int):
+        if self._find("node", host["name"]):
+            log.info("NetXMS : nœud « %s » déjà présent", host["name"])
+            return
+        log.info("NetXMS : création du nœud « %s » (%s)", host["name"], host["dns"])
+        self._call(
+            "POST", "/objects",
+            {
+                "objectType": self.OBJECT_NODE,
+                "name": host["name"],
+                "parentId": parent_id,
+                "primaryHostName": host["dns"],
+            },
+        )
+
+    def run(self):
+        # Convention identique aux trois autres outils : un conteneur
+        # « Site/<nom> » porte la localité lue par integrations/netxms.py.
+        site_container = self.ensure_container("Site/Laboratoire", self.SERVICE_ROOT)
+        for host in LAB_HOSTS:
+            self.ensure_node(host, site_container)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -441,7 +527,7 @@ def main() -> int:
         password = os.getenv(f"{tool.upper()}_API_PASSWORD", "")
         try:
             log.info("─── %s ───", tool)
-            {"zabbix": Zabbix, "centreon": Centreon, "itop": ITop}[tool](
+            {"zabbix": Zabbix, "centreon": Centreon, "itop": ITop, "netxms": NetXMS}[tool](
                 url, user, password
             ).run()
         except Exception as exc:  # noqa: BLE001 — un outil en échec ne doit

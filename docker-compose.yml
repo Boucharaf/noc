@@ -550,6 +550,13 @@ services:
       - ITOP_API_URL=${ITOP_API_URL:-http://itop}
       - ITOP_API_USER=${ITOP_ADMIN_USER:-admin}
       - ITOP_API_PASSWORD=${ITOP_ADMIN_PASSWORD:-Admin!2026}
+      # Vide par défaut : NetXMS n'est provisionné que si l'opérateur a
+      # explicitement démarré le profil « netxms » et renseigné ces valeurs
+      # (voir .env.example, section 4) — contrairement aux trois autres
+      # outils qui tournent par défaut avec le profil « tools ».
+      - NETXMS_API_URL=${NETXMS_API_URL:-}
+      - NETXMS_API_USER=${NETXMS_API_USER:-}
+      - NETXMS_API_PASSWORD=${NETXMS_API_PASSWORD:-}
       - PROVISION_TOOLS=${PROVISION_TOOLS:-zabbix,centreon,itop}
       - TZ=${TZ:-Africa/Ouagadougou}
     restart: "no"
@@ -590,6 +597,66 @@ services:
       timeout: 5s
       retries: 10
 
+  # ─────────────────────── NetXMS : serveur NEUF (activable) ───────────────────────
+  # Même logique que Zabbix/Centreon/iTop ci-dessus : une installation NEUVE
+  # de la version exacte de l'agence (5.0.8), PAS une restauration du dump de
+  # production. Voir tools/netxms/Dockerfile pour le raisonnement complet et
+  # les deux points à confirmer au premier build.
+  #
+  # Base DISTINCTE de `netxms-db` ci-dessus, à dessein : `netxms-db` ne reçoit
+  # que le dump de production (jamais de netxmsd par-dessus, voir plus haut) ;
+  # celle-ci est vierge, et un netxmsd peut y tourner sans risque puisqu'il
+  # n'hérite d'aucun canal de notification ni d'aucune communauté SNMP réels.
+  #
+  #     docker compose --profile netxms up -d
+  #
+  # active alors NetXMS exactement comme les trois autres outils : interface
+  # (port 127.0.0.1:8087 → API Legacy Web sur /netxms-websvc) et connecteur
+  # NETXMS_API_URL=http://netxms-server:8080/netxms-websvc côté collecteur.
+  netxms-server-db:
+    profiles: ["netxms"]
+    image: postgis/postgis:16-3.5-alpine
+    environment:
+      - POSTGRES_USER=${NETXMS_SERVER_DB_USER:-netxms}
+      - POSTGRES_PASSWORD=${NETXMS_SERVER_DB_PASSWORD:-netxms}
+      - POSTGRES_DB=${NETXMS_SERVER_DB_NAME:-netxms}
+      - TZ=${TZ:-Africa/Ouagadougou}
+    volumes:
+      - netxms_server_pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${NETXMS_SERVER_DB_USER:-netxms} -d ${NETXMS_SERVER_DB_NAME:-netxms}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  netxms-server:
+    profiles: ["netxms"]
+    build: ./tools/netxms
+    image: noc-tools/netxms:5.0.8
+    environment:
+      - NETXMS_SERVER_DB_HOST=netxms-server-db
+      - NETXMS_SERVER_DB_NAME=${NETXMS_SERVER_DB_NAME:-netxms}
+      - NETXMS_SERVER_DB_USER=${NETXMS_SERVER_DB_USER:-netxms}
+      - NETXMS_SERVER_DB_PASSWORD=${NETXMS_SERVER_DB_PASSWORD:-netxms}
+      - NETXMS_SERVER_NAME=${NETXMS_SERVER_NAME:-NOC Laboratoire}
+      - TZ=${TZ:-Africa/Ouagadougou}
+    ports:
+      - "127.0.0.1:8087:8080"
+    volumes:
+      # /etc/netxmsd.conf est régénéré à chaque démarrage (voir entrypoint) ;
+      # ce qui doit survivre à une reconstruction d'image est l'état de la
+      # base — déjà couvert par netxms_server_pgdata — et rien côté
+      # application, contrairement à Centreon ou iTop.
+      - netxms_server_var:/var/lib/netxms
+    depends_on:
+      netxms-server-db:
+        condition: service_healthy
+
   # ─────────────────────────── Mailpit : courriel de laboratoire ───────────────────────────
   # Faux serveur SMTP : il accepte tout et ne remet rien à personne. Les
   # courriels d'alerte se lisent sur http://localhost:8025. Il valide le
@@ -620,3 +687,5 @@ volumes:
   centreon_varlib:
   centreon_broker_varlib:
   netxms_pgdata:
+  netxms_server_pgdata:
+  netxms_server_var:

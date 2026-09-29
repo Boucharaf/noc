@@ -8,6 +8,7 @@ d'outils que celles exploitées en production par l'agence :
 | Zabbix | **7.0.23** | <http://localhost:8081> — `Admin` / `zabbix` | `http://zabbix-web:8080/api_jsonrpc.php` |
 | Centreon | **22.10.7** | <http://localhost:8084/centreon> — `admin` | `http://centreon/centreon/api/latest` |
 | iTop | **3.2.3-2** (build 20678) | <http://localhost:8082> — `admin` | `http://itop/webservices/rest.php` |
+| NetXMS | **5.0.8** | <http://localhost:8087/netxms-websvc/> — `admin` (mot de passe vide au premier démarrage) | `http://netxms-server:8080/netxms-websvc` |
 
 ## Pourquoi à l'identique
 
@@ -28,18 +29,28 @@ temps que la plateforme. Ils se lancent par profil :
 docker compose --profile zabbix   up -d     # ~1,0 Go
 docker compose --profile itop     up -d     # ~0,8 Go
 docker compose --profile centreon up -d     # ~2,0 Go
-docker compose --profile tools    up -d     # les trois
+docker compose --profile netxms   up -d     # ~0,6 Go — serveur NEUF, pas le dump
+docker compose --profile tools    up -d     # zabbix + centreon + itop (netxms non inclus, voir plus bas)
 ```
 
 Sur une machine de 8 Go, le mode d'emploi réaliste est : Zabbix et iTop
-ensemble, Centreon séparément.
+ensemble, Centreon séparément. NetXMS est plus léger que les trois et peut
+s'ajouter à l'une ou l'autre combinaison.
 
-**Premier démarrage.** Centreon et iTop s'installent tout seuls et cela
-prend quelques minutes ; les conteneurs ne sont déclarés sains qu'une fois
-leur API capable de répondre à une authentification — pas avant. Suivre :
+**Pourquoi `netxms` n'est pas dans `tools`.** Le profil `netxms` réunit deux
+usages distincts qui ne doivent jamais tourner en même temps sur la même
+base : le serveur neuf (`netxms-server` + `netxms-server-db`, décrit
+ci-dessous) et l'inspection du dump de production (`netxms-db`, resté séparé
+et documenté en bas de ce fichier). Les grouper avec les trois autres sous
+`tools` aurait rendu cette distinction moins visible.
+
+**Premier démarrage.** Centreon, iTop et NetXMS s'installent tout seuls et
+cela prend quelques minutes ; les conteneurs ne sont déclarés sains qu'une
+fois leur API capable de répondre à une authentification — pas avant.
+Suivre :
 
 ```bash
-docker compose logs -f centreon itop
+docker compose logs -f centreon itop netxms-server
 ```
 
 ## Peupler avec l'inventaire réel
@@ -49,11 +60,20 @@ docker compose --profile provision run --rm provision
 docker compose exec centreon /usr/local/bin/provision-lab
 ```
 
-Ces deux commandes déclarent, dans les trois outils, **les machines qui
+Ces deux commandes déclarent, dans Zabbix/Centreon/iTop, **les machines qui
 tournent réellement sur cette pile** — le backend du NOC, son frontend,
 Redis, PostgreSQL, et les outils eux-mêmes — et les font superviser par de
 **vraies sondes** : agent Zabbix, `check_ping` ICMP côté Centreon, CI dans
 la CMDB iTop.
+
+NetXMS suit le même principe mais n'a besoin que de la première commande —
+son API Legacy Web accepte la création d'objets depuis l'extérieur, à
+la différence de Centreon dont c'est CLAPI, local au conteneur, qui écrit la
+configuration :
+
+```bash
+docker compose --profile provision run --rm provision --only netxms
+```
 
 Aucune donnée n'est inventée. C'est ce qui distingue ce laboratoire d'un jeu
 d'essai : un jeu de données semé en base ne traverse aucune ligne de code
@@ -118,6 +138,31 @@ l'archive publiée par Combodo sur GitHub.
   lecture seule, on retient la combinaison la plus étroite qui couvre ce que
   le NOC lit.
 
+### `netxms/` — NetXMS 5.0.8
+
+NetXMS ne publie aucune image Docker officielle. L'image installe les
+paquets Debian de l'éditeur depuis `packages.netxms.org`, puis déploie l'API
+Legacy Web — un `.war` Java autonome, distribué en dehors du système de
+paquets — dans un Tomcat.
+
+* **Une installation NEUVE, jamais le dump de production.** Ce conteneur a
+  sa **propre base vierge** (`netxms-server-db`, distincte de `netxms-db`
+  décrit plus bas) : sans les canaux de notification ni les communautés
+  SNMP réelles de la production, un `netxmsd` neuf peut tourner et recevoir
+  des sondes sans aucun risque.
+
+* **Le mot de passe `admin` est VIDE au premier démarrage.** C'est le
+  comportement documenté d'une installation NetXMS neuve, pas un oubli — le
+  changer avant d'ouvrir ce laboratoire à qui que ce soit d'autre que vous
+  (interface web du `.war`, ou `nxadm` en console).
+
+* **Deux points n'ont pas pu être vérifiés contre une instance réelle** avant
+  livraison de cette image, faute d'environnement pour la tester : le
+  découpage exact des paquets Debian de la 5.0 (métapaquet unique ou pilote
+  de base séparé), et l'URL exacte du `.war` de l'API. Les deux sont
+  documentés en tête de `tools/netxms/Dockerfile`, avec la commande de
+  diagnostic à lancer si le build échoue à cet endroit.
+
 ### `provision/` — peuplement du laboratoire
 
 Script Python sans dépendance hors bibliothèque standard. Deux corrections
@@ -157,17 +202,18 @@ docker compose --profile itop up -d
 
 ## Ce qui n'est pas dans le laboratoire
 
-**Serveur NetXMS, Nagios et Nokia NSP.** Leurs connecteurs sont écrits et
-prêts (`integrations/netxms.py`, `nagios.py`, `nsp.py`) : renseigner
-`<OUTIL>_API_URL` dans `.env` suffit à les activer, sans une ligne de code à
-écrire. Nokia ne distribue pas NSP publiquement.
+**Nagios et Nokia NSP.** Leurs connecteurs sont écrits et prêts
+(`integrations/nagios.py`, `nsp.py`) : renseigner `<OUTIL>_API_URL` dans
+`.env` suffit à les activer, sans une ligne de code à écrire. Nokia ne
+distribue pas NSP publiquement.
 
-NetXMS est présent sous une autre forme : sa **base de production**,
-restaurée depuis `database/netxmsbd07082026.sql` dans le service
-`netxms-db` (profil `netxms`) et lue en lecture seule par
+**Le dump de production NetXMS** coexiste avec le serveur neuf décrit
+ci-dessus, dans un service séparé (`netxms-db`, même profil `netxms`) :
+restauré depuis `database/netxmsbd07082026.sql` et lu en lecture seule par
 `integrations/netxms_db.py` — voir le README principal. Aucun serveur
-`netxmsd` n'est démarré dessus : il exécuterait les actions de production
-(courriels, Telegram) vers de vraies personnes.
+`netxmsd` n'est démarré sur cette base précise : il exécuterait les actions
+de production (courriels, Telegram) vers de vraies personnes. Ce dump ne
+doit jamais quitter le poste où il a été restauré, préproduction comprise.
 
 Deux réglages restent à confirmer auprès de l'agence :
 
