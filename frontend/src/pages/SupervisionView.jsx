@@ -11,11 +11,11 @@ import { StackedBar } from "../components/ui/Stat";
 import { Donut, LineChart } from "../components/charts";
 import { PageHeader } from "../components/layout/TopBar";
 import { QueryBoundary, SkeletonRows } from "../components/ui/States";
-import { Segmented } from "../components/ui/Controls";
+import { FilterSelect, Segmented, Toolbar } from "../components/ui/Controls";
 import { NodeStateBadge, ToolStateBadge } from "../components/ui/Badge";
 import { duration, num, pct, time } from "../lib/format";
 import { PERMISSIONS } from "../lib/permissions";
-import { availabilityColor, toolLabel } from "../lib/vocabulary";
+import { availabilityColor, toolLabel, metricMeta, METRIC_TYPES } from "../lib/vocabulary";
 import {
   useAlertSummary,
   useAlerts,
@@ -65,6 +65,8 @@ function toolState(tool) {
 export default function SupervisionView() {
   const [hours, setHours] = useState(24);
   const [metric, setMetric] = useState("availability_pct");
+  const [organisation, setOrganisation] = useState(null);
+  const [nodeType, setNodeType] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
   const [manualOpen, setManualOpen] = useState(false);
 
@@ -74,15 +76,20 @@ export default function SupervisionView() {
   const nodeStates = useNodeStates();
   const network = useNetworkKpi({ hours });
   const series = useNetworkSeries({ metricType: metric, hours });
-  const alertsQuery = useOpenAlerts({ limit: 40 });
-  const workload = useWorkload();
+  const alertsQuery = useOpenAlerts({ limit: 40, organisation, node_type: nodeType });
+  const workload = useWorkload({ organisation, node_type: nodeType });
   // Même clé de cache que useWorkload : une seule requête sert les deux.
-  const allAlerts = useAlerts({ limit: 1000 });
+  const allAlerts = useAlerts({ limit: 1000, organisation, node_type: nodeType });
   const interop = useInterop();
   const coverage = useNodeCoverage();
   const maintenance = useMaintenanceWindows("active");
   const localities = useKpiLocalities({ limit: 8 });
-  const criticalNodes = useNodes({ state: "down", limit: 8, sort: "state" });
+  const criticalNodes = useNodes({ state: "down", limit: 8, sort: "state", organisation, node_type: nodeType });
+
+  const allNodesQuery = useNodes({ limit: 2000 });
+  const allNodes = allNodesQuery.data?.items ?? [];
+  const orgOptions = [...new Set(allNodes.map(n => n.organisation).filter(Boolean))].map(o => ({ value: o, label: o }));
+  const typeOptions = [...new Set(allNodes.map(n => n.node_type).filter(Boolean))].map(t => ({ value: t, label: t }));
 
   const s = summary.data;
   const states = nodeStates.data;
@@ -130,7 +137,27 @@ export default function SupervisionView() {
         title="Salle de supervision"
         subtitle="État du réseau, charge de l'équipe et santé de la collecte"
         actions={
-          <>
+          <Toolbar>
+            {orgOptions.length > 0 && (
+              <FilterSelect
+                label="Organisation"
+                value={organisation}
+                onChange={setOrganisation}
+                allLabel="Toutes"
+                width={160}
+                options={orgOptions}
+              />
+            )}
+            {typeOptions.length > 0 && (
+              <FilterSelect
+                label="Type"
+                value={nodeType}
+                onChange={setNodeType}
+                allLabel="Tous types"
+                width={140}
+                options={typeOptions}
+              />
+            )}
             <Segmented
               ariaLabel="Fenêtre d'observation"
               value={hours}
@@ -142,7 +169,7 @@ export default function SupervisionView() {
                 <PlusCircle size={13} /> Signaler
               </button>
             )}
-          </>
+          </Toolbar>
         }
       />
 
@@ -159,16 +186,12 @@ export default function SupervisionView() {
             to="/performance"
             toLabel="Analyser"
             actions={
-              <Segmented
+              <FilterSelect
                 ariaLabel="Métrique affichée"
                 value={metric}
                 onChange={setMetric}
-                options={[
-                  { value: "availability_pct", label: "Dispo." },
-                  { value: "latency_ms", label: "Latence" },
-                  { value: "packet_loss_pct", label: "Pertes" },
-                  { value: "bandwidth_in_mbps", label: "Trafic" },
-                ]}
+                options={METRIC_TYPES.map(type => ({ value: type, label: metricMeta(type).label }))}
+                width={150}
               />
             }
           >
@@ -181,29 +204,13 @@ export default function SupervisionView() {
               <LineChart
                 labels={metricLabels}
                 height={196}
-                yMax={metric === "availability_pct" ? 100 : undefined}
-                targetLine={
-                  metric === "availability_pct" ? 99 : metric === "latency_ms" ? 100 : undefined
-                }
+                yMax={metricMeta(metric).unit === "%" ? 100 : undefined}
+                targetLine={metricMeta(metric).target}
                 series={[
                   {
-                    label:
-                      metric === "availability_pct"
-                        ? "Disponibilité"
-                        : metric === "latency_ms"
-                          ? "Latence"
-                          : metric === "packet_loss_pct"
-                            ? "Perte de paquets"
-                            : "Trafic entrant",
+                    label: metricMeta(metric).label,
                     data: seriesData.map((point) => point.value),
-                    color:
-                      metric === "availability_pct"
-                        ? "var(--state-up)"
-                        : metric === "latency_ms"
-                          ? "var(--sev-info)"
-                          : metric === "packet_loss_pct"
-                            ? "var(--sev-high)"
-                            : "var(--accent)",
+                    color: metricMeta(metric).color ?? "var(--accent)",
                     fill: true,
                   },
                   // La bande max n'est pas un ornement : sur un agrégat de

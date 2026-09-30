@@ -142,6 +142,30 @@ export const METRICS = {
     target: null,
     color: "var(--sev-low)",
   },
+  disk_pct: {
+    label: "Disque", unit: "%", digits: 0, higherIsBetter: false, target: 90, color: "var(--sev-high)",
+  },
+  temp_cpu: {
+    label: "Temp. CPU", unit: "°C", digits: 1, higherIsBetter: false, target: 75, color: "var(--sev-high)",
+  },
+  cpu_load: {
+    label: "Charge (Load)", unit: "", digits: 2, higherIsBetter: false, target: null, color: "var(--sev-info)",
+  },
+  proc_count: {
+    label: "Processus", unit: "", digits: 0, higherIsBetter: null, target: null, color: "var(--ink-2)",
+  },
+  uptime: {
+    label: "Uptime", unit: " j", digits: 1, higherIsBetter: true, target: null, color: "var(--state-up)",
+  },
+  if_errors: {
+    label: "Err. réseau", unit: "", digits: 0, higherIsBetter: false, target: 0, color: "var(--sev-critical)",
+  },
+  dci_custom: {
+    label: "Sonde divers", unit: "", digits: 1, higherIsBetter: null, target: null, color: "var(--accent)",
+  },
+  rssi: {
+    label: "Signal Radio", unit: "dBm", digits: 0, higherIsBetter: true, target: -70, color: "var(--state-up)",
+  },
 };
 
 export const METRIC_TYPES = Object.keys(METRICS);

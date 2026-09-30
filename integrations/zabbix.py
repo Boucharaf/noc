@@ -52,6 +52,14 @@ _ITEM_KEYS = {
     "vm.memory.util": "ram_pct",
     "vm.memory.utilization": "ram_pct",
     "agent.ping": "availability_pct",
+    "vfs.fs.size": "disk_pct",
+    "vfs.fs.pused": "disk_pct",
+    "system.hw.sensors": "temp_cpu",
+    "system.cpu.load": "cpu_load",
+    "proc.num": "proc_count",
+    "system.uptime": "uptime",
+    "net.if.errors": "if_errors",
+    "net.if.collisions": "if_errors",
 }
 
 # Conversions d'unité vers celles du NOC. Zabbix rend icmppingsec en
@@ -62,6 +70,7 @@ _SCALE = {
     "bandwidth_in_mbps": 8 / 1e6,  # o/s  -> Mbit/s
     "bandwidth_out_mbps": 8 / 1e6,
     "availability_pct": 100.0,     # 0|1  -> %
+    "uptime": 1.0 / 86400.0,       # s    -> jours
 }
 
 

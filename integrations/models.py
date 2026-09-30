@@ -49,6 +49,14 @@ METRIC_TYPES: tuple[str, ...] = (
     "cpu_pct",
     "ram_pct",
     "availability_pct",
+    "disk_pct",
+    "temp_cpu",
+    "cpu_load",
+    "proc_count",
+    "uptime",
+    "if_errors",
+    "dci_custom",
+    "rssi",
 )
 
 

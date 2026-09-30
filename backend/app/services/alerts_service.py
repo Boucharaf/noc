@@ -141,6 +141,8 @@ async def list_alerts(
     severity: str | None = None,
     tool: str | None = None,
     site: str | None = None,
+    organisation: str | None = None,
+    node_type: str | None = None,
     acknowledged: bool | None = None,
     include_maintenance: bool = True,
     limit: int = 500,
@@ -233,6 +235,12 @@ async def list_alerts(
             return False
         if site and alert.get("site") != site:
             return False
+        if organisation or node_type:
+            node = nodes.get(alert.get("node_key") or "") or {}
+            if organisation and node.get("organisation") != organisation:
+                return False
+            if node_type and node.get("type") != node_type and node.get("node_type") != node_type:
+                return False
         if acknowledged is not None and bool(alert.get("acknowledged")) != acknowledged:
             return False
         if not include_maintenance and alert.get("is_maintenance"):

@@ -116,6 +116,8 @@ async def list_alerts(
     severity: str | None = Query(None, pattern=_one_of(SEVERITIES)),
     tool: str | None = Query(None, max_length=100),
     site: str | None = Query(None, max_length=150),
+    organisation: str | None = Query(None, max_length=200),
+    node_type: str | None = Query(None, max_length=100),
     acknowledged: bool | None = None,
     include_maintenance: bool = True,
     limit: int = Query(500, ge=1, le=5000),
@@ -128,6 +130,8 @@ async def list_alerts(
             severity=severity,
             tool=tool,
             site=site,
+            organisation=organisation,
+            node_type=node_type,
             acknowledged=acknowledged,
             include_maintenance=include_maintenance,
             limit=limit,
@@ -166,6 +170,8 @@ async def list_nodes(
     site: str | None = Query(None, max_length=150),
     tool: str | None = Query(None, max_length=100),
     search: str | None = Query(None, max_length=200),
+    organisation: str | None = Query(None, max_length=200),
+    node_type: str | None = Query(None, max_length=100),
     sort: str = Query("state", pattern=r"^(state|name|site|alerts|tools)$"),
     limit: int = Query(200, ge=1, le=2000),
     offset: int = Query(0, ge=0),
@@ -175,6 +181,7 @@ async def list_nodes(
     try:
         return await node_service.list_nodes(
             db, state=state, site=site, tool=tool, search=search,
+            organisation=organisation, node_type=node_type,
             sort=sort, limit=limit, offset=offset,
         )
     except live_service.SnapshotUnavailable as exc:

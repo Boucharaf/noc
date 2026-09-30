@@ -775,8 +775,8 @@ export function useAlertSummary() {
 }
 
 /** Alertes ouvertes, en liste plate comme l'attendaient les anciens écrans. */
-export function useOpenAlerts({ limit = 50 } = {}) {
-  const query = useAlerts({ limit, acknowledged: false });
+export function useOpenAlerts({ limit = 50, ...rest } = {}) {
+  const query = useAlerts({ limit, acknowledged: false, ...rest });
   return { ...query, data: query.data?.alerts?.map(toIncident) };
 }
 
@@ -1136,8 +1136,8 @@ export function useSla(params = {}) {
  * d'agrégat dédié, et le calcul est trivial sur une liste déjà chargée par
  * l'écran.
  */
-export function useWorkload() {
-  const query = useAlerts({ limit: 1000 });
+export function useWorkload(params = {}) {
+  const query = useAlerts({ limit: 1000, ...params });
   const rows = query.data?.alerts ?? [];
   const now = Date.now();
   const byAssignee = new Map();

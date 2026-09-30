@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 
 from .base import SourceClient, ToolUnavailable
-from .models import Alert, Node, ToolHealth
+from .models import Alert, MetricPoint, Node, ToolHealth
 from .normalize import epoch_to_dt, severity
 
 logger = logging.getLogger(__name__)
@@ -108,3 +108,46 @@ class NetXMSClient(SourceClient):
                 )
             )
         return [a for a in alerts if a.since is not None]
+
+    async def fetch_history(
+        self, node_ref: str, metric_type: str, start: datetime, end: datetime
+    ) -> list[MetricPoint]:
+        try:
+            dcis = await self._get(f"/objects/{node_ref}/dcis")
+            items = dcis.get("dcis", dcis) if isinstance(dcis, dict) else dcis
+            
+            dci_id = None
+            for item in items:
+                name = str(item.get("name") or item.get("description") or "").lower()
+                # Mapping empirique pour les métriques personnalisées
+                if metric_type == "rssi" and "rssi" in name:
+                    dci_id = item.get("id")
+                    break
+                if metric_type == "temp_cpu" and ("temp" in name or "température" in name):
+                    dci_id = item.get("id")
+                    break
+                if metric_type == "dci_custom":
+                    dci_id = item.get("id")
+                    break
+
+            if not dci_id:
+                return []
+
+            start_ts = int(start.timestamp())
+            end_ts = int(end.timestamp())
+            # Point final Legacy Web API
+            data = await self._get(f"/dci/{dci_id}/values", {"start": start_ts, "end": end_ts})
+            values = data.get("values", data) if isinstance(data, dict) else data
+            
+            points: list[MetricPoint] = []
+            for v in values:
+                at = epoch_to_dt(v.get("timestamp"))
+                if at is not None:
+                    try:
+                        points.append(MetricPoint(at=at, value=float(v.get("value", 0))))
+                    except (ValueError, TypeError):
+                        pass
+            return points
+        except Exception as exc:
+            logger.info("NetXMS : échec lecture historique DCI (%s)", exc)
+            return []

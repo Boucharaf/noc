@@ -43,6 +43,12 @@ _METRIC_NAMES = {
     "cpu_used": "cpu_pct",
     "memory_used": "ram_pct",
     "used": "ram_pct",
+    "disk": "disk_pct",
+    "disk_used": "disk_pct",
+    "uptime": "uptime",
+    "load1": "cpu_load",
+    "load5": "cpu_load",
+    "load15": "cpu_load",
 }
 
 # Statuts considérés comme des problèmes. DOWN et UNREACHABLE concernent les
@@ -54,6 +60,7 @@ _PROBLEM_STATUSES = ["DOWN", "UNREACHABLE", "WARNING", "CRITICAL", "UNKNOWN"]
 _SCALE = {
     "bandwidth_in_mbps": 1 / 1e6,
     "bandwidth_out_mbps": 1 / 1e6,
+    "uptime": 1.0 / 86400.0,
 }
 
 
@@ -176,24 +183,33 @@ class CentreonClient(SourceClient):
                 return collected
 
     async def fetch_nodes(self) -> list[Node]:
-        rows = await self._resources(["host"])
+        rows = await self._resources(["host", "service"])
         nodes: list[Node] = []
         for row in rows:
             status = (row.get("status") or {}).get("code")
             in_maintenance = bool(row.get("in_downtime"))
+            resource_type = row.get("type", "host")
+            parent = row.get("parent") or {}
+            
+            name = row.get("name") or "(sans nom)"
+            if resource_type == "service":
+                parent_name = parent.get("name") or ""
+                name = f"{parent_name} - {name}" if parent_name else name
+
             nodes.append(
                 Node(
                     tool=self.name,
-                    ref=str(row.get("id")),
-                    name=row.get("name") or "(sans nom)",
+                    ref=f"{resource_type}-{row.get('id')}",
+                    name=name,
                     hostname=row.get("name") or "",
                     ip=row.get("fqdn") or (row.get("information") or None),
-                    state=_host_state(status, in_maintenance),
+                    state=_host_state(status, in_maintenance, resource_type),
                     enabled=not row.get("is_notification_enabled") is False,
                     groups=tuple(
                         g.get("name", "") for g in (row.get("groups") or []) if g.get("name")
                     ),
                     site=_site_from_groups(row.get("groups") or []),
+                    node_type=resource_type,
                 )
             )
         return nodes
@@ -290,10 +306,17 @@ class CentreonClient(SourceClient):
         return points
 
 
-def _host_state(status_code, in_maintenance: bool) -> str:
-    """État d'un hôte Centreon : 0 UP, 1 DOWN, 2 UNREACHABLE, 4 PENDING."""
+def _host_state(status_code, in_maintenance: bool, resource_type: str = "host") -> str:
     if in_maintenance:
         return "maintenance"
+    if resource_type == "service":
+        return {
+            0: "up",
+            1: "degraded",
+            2: "down",
+            3: "unknown",
+            4: "silent",
+        }.get(status_code, "unknown")
     return {
         0: "up",
         1: "down",

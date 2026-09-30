@@ -14,6 +14,7 @@ import {
   useNetworkKpi,
   useNetworkSeries,
   useNodeStates,
+  useNodes,
   useReference,
   useTopNodes,
 } from "../hooks/queries";
@@ -45,6 +46,13 @@ export default function PerformancePage() {
   const [hours, setHours] = useState(24);
   const [metric, setMetric] = useState("latency_ms");
   const [localityId, setLocalityId] = useState(null);
+  const [organisation, setOrganisation] = useState(null);
+  const [nodeType, setNodeType] = useState(null);
+
+  const allNodesQuery = useNodes({ limit: 2000 });
+  const allNodes = allNodesQuery.data?.items ?? [];
+  const orgOptions = [...new Set(allNodes.map(n => n.organisation).filter(Boolean))].map(o => ({ value: o, label: o }));
+  const typeOptions = [...new Set(allNodes.map(n => n.node_type).filter(Boolean))].map(t => ({ value: t, label: t }));
 
   const { data: reference } = useReference();
   const nodeStates = useNodeStates(localityId ? Number(localityId) : undefined);
@@ -59,6 +67,8 @@ export default function PerformancePage() {
     hours,
     limit: 15,
     localityId: localityId ? Number(localityId) : undefined,
+    organisation,
+    node_type: nodeType,
   });
 
   const meta = metricMeta(metric);
@@ -87,6 +97,26 @@ export default function PerformancePage() {
                 label: locality.name,
               }))}
             />
+            {orgOptions.length > 0 && (
+              <FilterSelect
+                label="Organisation"
+                value={organisation}
+                onChange={setOrganisation}
+                allLabel="Toutes"
+                width={160}
+                options={orgOptions}
+              />
+            )}
+            {typeOptions.length > 0 && (
+              <FilterSelect
+                label="Type"
+                value={nodeType}
+                onChange={setNodeType}
+                allLabel="Tous types"
+                width={140}
+                options={typeOptions}
+              />
+            )}
             <Segmented ariaLabel="Fenêtre" value={hours} onChange={setHours} options={WINDOWS} />
           </Toolbar>
         }
@@ -131,9 +161,8 @@ export default function PerformancePage() {
             title={meta.label}
             subtitle={
               points.length
-                ? `moyenne sur ${points.at(-1)?.nb_nodes ?? 0} équipements · ${
-                    hours <= 48 ? "données brutes" : "agrégat horaire"
-                  }`
+                ? `moyenne sur ${points.at(-1)?.nb_nodes ?? 0} équipements · ${hours <= 48 ? "données brutes" : "agrégat horaire"
+                }`
                 : undefined
             }
           >

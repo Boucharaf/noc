@@ -77,6 +77,20 @@ export default function NetworkVitals({ data, expectedNodes, compact = false }) 
       color: thresholdColor("ram_pct", data?.avg_ram_pct),
       target: "≤ 85 %",
     },
+    {
+      key: "disk_pct",
+      label: "Disque moyen",
+      value: has("disk_pct") ? pct(data?.avg_disk_pct, 0) : null,
+      color: thresholdColor("disk_pct", data?.avg_disk_pct),
+      target: "≤ 90 %",
+    },
+    {
+      key: "uptime",
+      label: "Uptime moyen",
+      value: has("uptime") ? `${decimal(data?.avg_uptime, 1)} j` : null,
+      color: thresholdColor("uptime", data?.avg_uptime),
+      target: null,
+    },
   ];
 
   return (
