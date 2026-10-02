@@ -1,5 +1,5 @@
 import { CircleMarker, GeoJSON, MapContainer, TileLayer, Tooltip, useMap } from "react-leaflet";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { geoJSON } from "leaflet";
 import "leaflet/dist/leaflet.css";
@@ -46,20 +46,27 @@ const TILE_URL = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
 const TILE_ATTRIBUTION =
   '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
 
-function FitBounds({ points, countryGeoJson }) {
+function FitBounds({ pointKey, countryGeoJson }) {
   const map = useMap();
+  const previousPointKey = useRef(null);
   useEffect(() => {
+    const points = JSON.parse(pointKey);
+    if (points.length > 0) {
+      if (previousPointKey.current === pointKey) return;
+      previousPointKey.current = pointKey;
+      if (points.length === 1) {
+        map.setView(points[0], 9);
+      } else {
+        map.fitBounds(points, { padding: [28, 28], maxZoom: 9 });
+      }
+      return;
+    }
+
     const countryBounds = countryGeoJson ? geoJSON(countryGeoJson).getBounds() : null;
     if (countryBounds?.isValid()) {
       map.fitBounds(countryBounds, { padding: [18, 18] });
     }
-    if (points.length === 0) return;
-    if (points.length === 1) {
-      map.setView(points[0], 9);
-      return;
-    }
-    map.fitBounds(points, { padding: [28, 28], maxZoom: 9 });
-  }, [countryGeoJson, map, points]);
+  }, [countryGeoJson, map, pointKey]);
   return null;
 }
 
@@ -96,8 +103,8 @@ export default function SitesMap({ localities, height = 420, onSelect }) {
   );
   const unlocated = (localities?.length ?? 0) - located.length;
 
-  const maxIncidents = Math.max(1, ...located.map((l) => l.total_incidents ?? 0));
-  const points = located.map((l) => [l.latitude, l.longitude]);
+  const maxIncidents = Math.max(1, ...located.map((l) => l.alerts ?? l.total_incidents ?? 0));
+  const pointKey = JSON.stringify(located.map((locality) => [locality.latitude, locality.longitude]));
 
   return (
     <div className="flex flex-col" style={{ height }}>
@@ -131,9 +138,9 @@ export default function SitesMap({ localities, height = 420, onSelect }) {
               }}
             />
           )}
-          <FitBounds points={points} countryGeoJson={countryGeoJson} />
+          <FitBounds pointKey={pointKey} countryGeoJson={countryGeoJson} />
           {located.map((locality) => {
-            const share = (locality.total_incidents ?? 0) / maxIncidents;
+            const share = (locality.alerts ?? locality.total_incidents ?? 0) / maxIncidents;
             const color = availabilityColor(locality.availability_pct);
             return (
               <CircleMarker
@@ -160,10 +167,10 @@ export default function SitesMap({ localities, height = 420, onSelect }) {
                     <br />
                     {locality.region}
                     <br />
-                    Incidents : {num(locality.total_incidents)} · critiques{" "}
-                    {num(locality.critical)}
+                    Alertes actives : {num(locality.alerts ?? locality.total_incidents)} · en panne{" "}
+                    {num(locality.down ?? locality.critical)}
                     <br />
-                    Disponibilité : {pct(locality.availability_pct, 2)}
+                    Santé instantanée : {pct(locality.availability_pct, 2)}
                     <br />
                     Équipements : {num(locality.nb_nodes)}
                   </div>

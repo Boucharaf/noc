@@ -16,6 +16,7 @@ l'instance réelle — les noms de DCI sont libres dans NetXMS.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from .base import SourceClient, ToolUnavailable
 from .models import Alert, MetricPoint, Node, ToolHealth
@@ -105,6 +106,17 @@ class NetXMSClient(SourceClient):
                     node_name=alarm.get("sourceObjectName"),
                     acknowledged=state == 1,
                     acknowledged_at=epoch_to_dt(alarm.get("ackTime")),
+                    acknowledged_by=(
+                        alarm.get("acknowledgedBy")
+                        or alarm.get("acknowledgingUser")
+                    ),
+                    acknowledgement_note=(
+                        alarm.get("acknowledgementComment")
+                        or alarm.get("acknowledgementMessage")
+                    ),
+                    is_maintenance=bool(alarm.get("inMaintenance")),
+                    last_change_at=epoch_to_dt(alarm.get("lastStateChangeTime")),
+                    source_status=str(alarm.get("state")) if alarm.get("state") is not None else None,
                 )
             )
         return [a for a in alerts if a.since is not None]

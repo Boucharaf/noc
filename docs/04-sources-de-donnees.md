@@ -11,8 +11,8 @@ implémente quatre méthodes :
 | Méthode | Appelée par | Rôle |
 |---|---|---|
 | `check()` | collecteur, à chaque cycle | L'outil répond-il ? En combien de temps ? Quelle version ? Ne lève jamais : une panne se raconte par un `ToolHealth(reachable=False, error=…)`. |
-| `fetch_nodes()` | collecteur | L'inventaire des équipements (`list[Node]`) |
-| `fetch_alerts()` | collecteur | Les alertes **actives uniquement** (`list[Alert]`) |
+| `fetch_nodes()` | collecteur | L'inventaire enrichi des équipements (`list[Node]`) : CMDB, interfaces et fraîcheur des contrôles quand la source les expose |
+| `fetch_alerts()` | collecteur | Les alertes **actives uniquement** (`list[Alert]`), avec acquittement, statut source et maintenance quand disponibles |
 | `fetch_history(node, métrique, début, fin)` | backend, à la demande | Une courbe. Vide par défaut (iTop, par exemple, ne mesure rien). |
 
 La classe de base fournit le client HTTP, la mesure de latence et un
@@ -55,6 +55,8 @@ pas su lire la gravité ne doit pas disparaître de l'écran.
   `trend.get` au-delà (moyennes horaires).
 - **Site** : déduit des groupes d'hôtes nommés `Site/<nom>` ou
   `Localité/<nom>` — convention à respecter côté Zabbix.
+- **Interfaces** : identifiant, type, adresse, port et disponibilité Zabbix.
+- **Acquittement** : dernier auteur, commentaire et échéance de suppression en maintenance, si le compte API a les droits correspondants.
 
 ### Centreon 22.10 — `integrations/centreon.py`
 
@@ -62,13 +64,19 @@ pas su lire la gravité ne doit pas disparaître de l'écran.
   `/monitoring/resources` (hôtes et services en un appel).
 - **Authentification** : jeton de session, renouvelé automatiquement dès qu'un
   appel répond 401.
+- **Contrôles** : sortie plugin, dernier/prochain contrôle et statut source quand l'API les fournit.
+- **Relations** : un service est relié à son hôte parent; la fiche hôte montre les services dont il peut affecter le contrôle.
+- **Alertes** : auteur/commentaire d'acquittement et état de période de maintenance quand présents dans la réponse.
 
 ### iTop 3.2 — `integrations/itop.py`
 
 - **API** : REST/JSON sur `/webservices/rest.php`.
-- **Rôle** : CMDB (organisation, responsable, emplacement des équipements) et
-  tickets (`ITOP_TICKET_CLASSES`, par défaut `Incident,UserRequest`). Ne
-  mesure rien.
+- **Rôle** : CMDB (organisation, emplacement et criticité des équipements) et
+  tickets (`ITOP_TICKET_CLASSES`, par défaut `Incident,UserRequest`) avec
+  agent, équipe et service métier quand le modèle les expose. Ne mesure rien.
+- **Contrats** : les SLT iTop sont collectés avec l'instantané et visibles
+  séparément des objectifs SLA de traitement configurés dans le NOC. Les
+  champs de ticket enrichis ont un repli pour les modèles personnalisés.
 - **Priorité dans la fusion** : iTop fait foi pour le **nom**, le **site** et
   l'**organisation** d'un équipement.
 - **Compte de service** : il lui faut plusieurs profils iTop, pas seulement
@@ -84,8 +92,10 @@ l'URL** dans `NETXMS_API_URL` (`integrations/config.py`) :
 | `https://…` | `netxms.py` — API Web (`netxms-websvc`) | L'agence fournit un compte NetXMS |
 | `postgresql://…` | `netxms_db.py` — base PostgreSQL, **lecture seule** | L'agence fournit un compte de lecture sur la base, ou en local avec le dump |
 
-Les deux produisent exactement les mêmes équipements et alertes : passer de
-l'un à l'autre ne change que cette variable.
+Les deux produisent les mêmes équipements et alertes normalisés : passer de
+l'un à l'autre ne change que cette variable. La lecture PostgreSQL complète
+aussi l'inventaire des interfaces à partir de la relation
+`interfaces.node_id`.
 
 Particularités du connecteur base (`netxms_db.py`) :
 
@@ -94,6 +104,9 @@ Particularités du connecteur base (`netxms_db.py`) :
   repli sur la ville de l'objet. La présence du référentiel est détectée : le
   connecteur fonctionne aussi sur une base NetXMS standard.
 - **Alarmes d'interface** : rattachées à leur équipement via `interfaces.node_id`.
+- **Interfaces** : inventaire, nom et état remontés depuis `interfaces` et
+  `object_properties`; le compte de lecture reste limité aux colonnes déjà
+  accordées.
 - **Garanties** : chaque connexion est ouverte en lecture seule, avec un délai
   de garde ; aucune colonne secrète (communautés SNMP, secrets d'agent) n'est
   lue.

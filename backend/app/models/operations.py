@@ -138,6 +138,7 @@ class ManualIncident(Base):
     severity = Column(Text, nullable=False, default="medium")
     title = Column(Text, nullable=False)
     description = Column(Text)
+    cause = Column(Text)
     detected_at = Column(DateTime(timezone=True), server_default=func.now())
     resolved_at = Column(DateTime(timezone=True))
     created_by = Column(Integer, ForeignKey("noc_user.id", ondelete="SET NULL"))

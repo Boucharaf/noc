@@ -65,6 +65,19 @@ def _now() -> datetime:
 
 
 @dataclass(frozen=True, slots=True)
+class NetworkInterface:
+    """Interface réseau déclarée par un outil source."""
+
+    tool: str
+    ref: str
+    name: str
+    description: str | None = None
+    ip: str | None = None
+    state: str = "unknown"
+    speed_mbps: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Node:
     """Un équipement supervisé, vu par UN outil.
 
@@ -100,6 +113,15 @@ class Node:
     # Renseigné par les outils d'ITSM (iTop) uniquement.
     organisation: str | None = None
     node_type: str | None = None
+    owner: str | None = None
+    business_service: str | None = None
+    criticality: str | None = None
+    depends_on: tuple[str, ...] = ()
+    interfaces: tuple[NetworkInterface, ...] = ()
+    source_status: str | None = None
+    last_check_at: datetime | None = None
+    next_check_at: datetime | None = None
+    last_output: str | None = None
 
     def key(self) -> str:
         return f"{self.tool}:{self.ref}"
@@ -121,6 +143,15 @@ class Alert:
     node_name: str | None = None
     acknowledged: bool = False
     acknowledged_at: datetime | None = None
+    acknowledged_by: str | None = None
+    acknowledgement_note: str | None = None
+    is_maintenance: bool = False
+    maintenance_until: datetime | None = None
+    last_change_at: datetime | None = None
+    source_status: str | None = None
+    source_assignee: str | None = None
+    source_team: str | None = None
+    business_service: str | None = None
     # Ticket ITSM rattaché, quand l'outil le connaît (iTop).
     ticket_ref: str | None = None
 
@@ -161,6 +192,7 @@ class ToolSnapshot:
     health: ToolHealth
     nodes: tuple[Node, ...] = ()
     alerts: tuple[Alert, ...] = ()
+    sla_targets: tuple[dict[str, Any], ...] = ()
 
 
 def to_jsonable(value: Any) -> Any:

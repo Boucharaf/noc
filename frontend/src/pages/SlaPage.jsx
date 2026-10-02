@@ -12,7 +12,12 @@ import { decimal, duration, monthLabel, num, pct } from "../lib/format";
 import { severityMeta } from "../lib/vocabulary";
 import { errorMessage } from "../api/client";
 import { PERMISSIONS } from "../lib/permissions";
-import { useSla, useSlaTargets, useUpdateSlaTarget } from "../hooks/queries";
+import {
+  useSla,
+  useSlaSourceTargets,
+  useSlaTargets,
+  useUpdateSlaTarget,
+} from "../hooks/queries";
 import { usePeriodStore } from "../store/ui";
 import { usePermission } from "../hooks/useSession";
 
@@ -36,6 +41,7 @@ export default function SlaPage() {
 
   const sla = useSla();
   const targets = useSlaTargets();
+  const sourceTargets = useSlaSourceTargets();
   const [editing, setEditing] = useState(null);
 
   return (
@@ -61,7 +67,7 @@ export default function SlaPage() {
           <>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
               <Stat
-                label="Conformité globale"
+                label="Conformité TTR"
                 value={pct(data.global_compliance_pct, 1)}
                 color={
                   data.global_compliance_pct >= 95
@@ -78,12 +84,9 @@ export default function SlaPage() {
                 color={data.total_breached ? "var(--sev-critical)" : "var(--state-up)"}
               />
               <Stat
-                label="Incidents évalués"
-                value={num(
-                  data.by_severity.reduce((sum, row) => sum + row.total_incidents, 0),
-                  "0",
-                )}
-                hint="hors maintenance planifiée"
+                label="Résolutions évaluées"
+                value={num(data.resolved_total, "0")}
+                hint="cible TTR connue; alertes non résolues exclues"
               />
               <Stat
                 label="Période"
@@ -92,6 +95,46 @@ export default function SlaPage() {
                 hint={isCurrent ? "mois en cours, non clos" : "mois clos"}
               />
             </div>
+
+            <Panel
+              title="Engagements déclarés dans iTop"
+              subtitle="Référentiel source, distinct des objectifs de traitement configurés dans le NOC"
+              flush
+            >
+              <QueryBoundary
+                query={sourceTargets}
+                compact
+                emptyMessage="Aucun objectif de service fourni par iTop"
+                emptyHint="Vérifier que le module SLA est installé et que le compte de collecte peut lire les SLT."
+              >
+                {(rows) => (
+                  <table className="tbl">
+                    <thead>
+                      <tr>
+                        <th>Engagement</th>
+                        <th>Service / type de demande</th>
+                        <th>Mesure</th>
+                        <th style={{ textAlign: "right" }}>Objectif</th>
+                        <th>Priorité</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.map((row) => (
+                        <tr key={`${row.tool}:${row.ref}`}>
+                          <td>{row.name || row.ref}</td>
+                          <td>{row.request_type || "—"}</td>
+                          <td>{row.metric || "—"}</td>
+                          <td className="num" style={{ textAlign: "right" }}>
+                            {[row.value, row.unit].filter(Boolean).join(" ") || "—"}
+                          </td>
+                          <td>{row.priority || "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </QueryBoundary>
+            </Panel>
 
             {/* --- Tableau des indicateurs, format « comité » --- */}
             <Panel title="Indicateurs de service" flush>
@@ -180,7 +223,9 @@ export default function SlaPage() {
                 <tbody>
                   {data.by_severity.map((row) => {
                     const meta = severityMeta(row.severity);
-                    const compliant = (row.ttr_compliance_pct ?? 0) >= 95;
+                    const compliant = row.ttr_compliance_pct == null
+                      ? null
+                      : row.ttr_compliance_pct >= 95;
                     return (
                       <tr key={row.severity} className={`sev-edge sev-edge-${row.severity}`}>
                         <td>
@@ -226,7 +271,9 @@ export default function SlaPage() {
                           className="num"
                           style={{
                             textAlign: "right",
-                            color: compliant ? "var(--state-up)" : "var(--sev-critical)",
+                            color: compliant == null
+                              ? "var(--ink-3)"
+                              : compliant ? "var(--state-up)" : "var(--sev-critical)",
                           }}
                         >
                           {pct(row.ttr_compliance_pct, 1)}

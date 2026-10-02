@@ -182,7 +182,7 @@ export default function SupervisionView() {
         <div className="col-span-12 xl:col-span-8 min-w-0">
           <Panel
             title="Tendance réseau"
-            subtitle={`moyenne sur ${seriesData.at(-1)?.nb_nodes ?? 0} équipements`}
+            subtitle={`moyenne de ${seriesData.at(-1)?.nb_nodes ?? 0}/${seriesData.at(-1)?.sampled_nodes ?? 0} équipements mesurés, échantillon priorisé par alertes`}
             to="/performance"
             toLabel="Analyser"
             actions={

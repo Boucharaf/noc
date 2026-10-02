@@ -50,7 +50,7 @@ export default function NodesPage() {
       page_size: PAGE_SIZE,
       q: params.get("q") || undefined,
       state: params.get("state") || undefined,
-      locality_id: params.get("locality_id") ? Number(params.get("locality_id")) : undefined,
+      locality_id: params.get("locality_id") || undefined,
       region_id: params.get("region_id") ? Number(params.get("region_id")) : undefined,
       ministry_id: params.get("ministry_id") ? Number(params.get("ministry_id")) : undefined,
       node_type: params.get("node_type") || undefined,

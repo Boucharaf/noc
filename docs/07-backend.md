@@ -68,6 +68,7 @@ elle est fermée par défaut.
 | GET | `/alerts` | Alertes actives (filtres : `severity`, `tool`, `site`, `acknowledged`, `include_maintenance`, `limit`) |
 | GET | `/alerts/{clé}` | Détail d'une alerte et son journal d'actions |
 | GET | `/alerts/by-severity`, `/alerts/by-tool`, `/alerts/hour-distribution` | Répartitions |
+| GET | `/sla/source-targets` | Engagements de service lus dans les outils sources (SLT iTop) |
 | GET | `/nodes` | Équipements (filtres : `state`, `site`, `tool`, `search`, `sort`, `limit`, `offset`) |
 | GET | `/nodes/{id}` | Fiche d'un équipement |
 | GET | `/nodes/{id}/metrics` | Courbe d'un équipement — **interroge l'outil source** |

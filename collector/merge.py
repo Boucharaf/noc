@@ -29,8 +29,9 @@ import logging
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime
 
-from integrations.models import Alert, Node
+from integrations.models import Alert, NetworkInterface, Node
 from integrations.normalize import worst
 
 logger = logging.getLogger(__name__)
@@ -65,7 +66,17 @@ class MergedNode:
     longitude: float | None
     organisation: str | None
     node_type: str | None
+    owner: str | None
+    business_service: str | None
+    criticality: str | None
     groups: list[str] = field(default_factory=list)
+    interfaces: list[NetworkInterface] = field(default_factory=list)
+    depends_on: list[str] = field(default_factory=list)
+    impacted_by: list[str] = field(default_factory=list)
+    source_status: str | None = None
+    last_check_at: datetime | None = None
+    next_check_at: datetime | None = None
+    last_output: str | None = None
     # Traçabilité : quels outils voient cet équipement, et sous quelle
     # référence. Affiché sur la fiche d'équipement — un exploitant qui doute
     # doit pouvoir remonter à la source en un clic.
@@ -176,6 +187,27 @@ def merge_nodes(nodes: list[Node]) -> tuple[list[MergedNode], MergeReport]:
             by_name.setdefault(name_key, target)
 
     merged = [_fold(group_id, members) for group_id, members in groups.items()]
+    source_to_node = {
+        f"{tool}:{ref}": node.id
+        for node in merged
+        for tool, ref in node.sources.items()
+    }
+    for node in merged:
+        dependencies = {
+            source_to_node[source_key]
+            for member in groups[node.id]
+            for source_key in member.depends_on
+            if source_key in source_to_node and source_to_node[source_key] != node.id
+        }
+        node.depends_on = sorted(dependencies)
+    merged_by_id = {node.id: node for node in merged}
+    for node in merged:
+        for dependency_id in node.depends_on:
+            dependency = merged_by_id.get(dependency_id)
+            if dependency is not None:
+                dependency.impacted_by.append(node.id)
+    for node in merged:
+        node.impacted_by = sorted(set(node.impacted_by))
     merged.sort(key=lambda n: (_STATE_RANK.get(n.state, 9), n.name.lower()))
 
     report.total_merged = len(merged)
@@ -207,6 +239,9 @@ def _fold(group_id: str, members: list[Node]) -> MergedNode:
     site = None
     organisation = None
     node_type = None
+    owner = None
+    business_service = None
+    criticality = None
     latitude = None
     longitude = None
     for tool in REFERENCE_PRIORITY:
@@ -219,9 +254,27 @@ def _fold(group_id: str, members: list[Node]) -> MergedNode:
         longitude = longitude if longitude is not None else node.longitude
         organisation = organisation or node.organisation
         node_type = node_type or node.node_type
+        owner = owner or node.owner
+        business_service = business_service or node.business_service
+        criticality = criticality or node.criticality
 
     ip = next((_valid_ip(n.ip) for n in members if _valid_ip(n.ip)), None)
     groups = sorted({g for node in members for g in node.groups if g})
+    interfaces = {
+        f"{interface.tool}:{interface.ref}": interface
+        for node in members
+        for interface in node.interfaces
+    }
+    last_check_at = max(
+        (node.last_check_at for node in members if node.last_check_at is not None),
+        default=None,
+    )
+    next_check_at = min(
+        (node.next_check_at for node in members if node.next_check_at is not None),
+        default=None,
+    )
+    last_output = next((node.last_output for node in members if node.last_output), None)
+    source_status = next((node.source_status for node in members if node.source_status), None)
     hostname = next(
         (n.hostname for n in members if n.hostname), members[0].name
     )
@@ -237,7 +290,15 @@ def _fold(group_id: str, members: list[Node]) -> MergedNode:
         longitude=longitude,
         organisation=organisation,
         node_type=node_type,
+        owner=owner,
+        business_service=business_service,
+        criticality=criticality,
         groups=groups,
+        interfaces=sorted(interfaces.values(), key=lambda interface: interface.name.lower()),
+        source_status=source_status,
+        last_check_at=last_check_at,
+        next_check_at=next_check_at,
+        last_output=last_output,
         sources={node.tool: node.ref for node in members},
     )
 

@@ -18,15 +18,18 @@ import { usePeriodStore } from "../store/ui";
 import { usePermission } from "../hooks/useSession";
 import { PERMISSIONS } from "../lib/permissions";
 import {
+  useAlertSummary,
   useCoverage,
   useKpiCauses,
   useKpiHourDistribution,
   useKpiLocalities,
   useKpiLocalitiesMap,
-  useKpiMinistries,
-  useKpiRecurrent,
   useKpiSummary,
   useKpiTrend,
+  useOrganisations,
+  useResolutionTimes,
+  useSites,
+  useTopNodes,
   useSla,
 } from "../hooks/queries";
 
@@ -51,20 +54,23 @@ export default function DirectionView() {
   const canDownload = usePermission(PERMISSIONS.DOWNLOAD_REPORT);
 
   const summary = useKpiSummary();
+  const activeAlerts = useAlertSummary();
+  const resolution = useResolutionTimes({ days: 30 });
   const sla = useSla();
-  const trend = useKpiTrend(6);
+  const trend = useKpiTrend({ days: 183 });
   const localities = useKpiLocalities(10);
   const localitiesMap = useKpiLocalitiesMap();
-  const ministries = useKpiMinistries();
+  const organisations = useOrganisations();
+  const sites = useSites();
+  const topNodes = useTopNodes(10);
   const causes = useKpiCauses();
   const hours = useKpiHourDistribution();
-  const recurrent = useKpiRecurrent(3);
   const coverage = useCoverage();
 
   const [downloadError, setDownloadError] = useState(null);
   const [downloading, setDownloading] = useState(null);
 
-  const kpi = summary.data?.kpi;
+  const kpi = summary.data?.reliable === false ? undefined : summary.data?.kpi;
   const deltas = summary.data?.vs_previous_month;
 
   const download = async (format) => {
@@ -81,6 +87,12 @@ export default function DirectionView() {
   };
 
   const trendData = trend.data ?? [];
+  const unavailableSites = (sites.data ?? []).filter(
+    (site) => site.site !== "Localité non renseignée" && site.down > 0,
+  ).length;
+  const offHoursAlerts = (hours.data ?? [])
+    .filter((bucket) => bucket.off_hours)
+    .reduce((total, bucket) => total + bucket.count, 0);
 
   return (
     <div className="space-y-2.5">
@@ -138,6 +150,12 @@ export default function DirectionView() {
           rapportée au temps réellement écoulé, pas au mois entier.
         </p>
       )}
+      {summary.data && !summary.data.reliable && (
+        <Notice tone="warning">
+          Seulement {summary.data.current?.days_with_data ?? 0} jour(s) avec données sur cette
+          période. Les indicateurs mensuels sont masqués tant que 15 jours ne sont pas disponibles.
+        </Notice>
+      )}
 
       {/* --- Indicateurs de direction --- */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
@@ -150,50 +168,43 @@ export default function DirectionView() {
           deltaLabel="points vs mois précédent"
         />
         <Stat
-          label="Incidents"
-          value={num(kpi?.total_incidents)}
-          delta={deltas?.incidents_delta}
-          invertDelta
-          deltaLabel="vs mois précédent"
+          label="Alertes actives"
+          value={num(activeAlerts.data?.total_open, "0")}
           to="/incidents"
         />
         <Stat
-          label="Incidents critiques"
-          value={num(kpi?.critical)}
-          color={kpi?.critical > 5 ? "var(--sev-critical)" : "var(--ink)"}
-          target="≤ 5"
+          label="Alertes critiques actives"
+          value={num(activeAlerts.data?.critical, "0")}
+          color={activeAlerts.data?.critical ? "var(--sev-critical)" : "var(--state-up)"}
           to="/incidents?severity=critical"
         />
         <Stat
-          label="Taux de résolution"
-          value={pct(kpi?.resolution_rate_pct, 1)}
-          color={
-            kpi?.resolution_rate_pct >= 95 ? "var(--state-up)" : "var(--sev-medium)"
-          }
-          target="≥ 95 %"
+          label="Résolus par le NOC (30 j)"
+          value={num(resolution.data?.handled_alerts, "0")}
         />
         <Stat
-          label="MTTR moyen"
-          value={duration(kpi?.avg_mttr_minutes)}
-          color={kpi?.avg_mttr_minutes > 240 ? "var(--sev-high)" : "var(--state-up)"}
+          label="MTTR moyen (30 j)"
+          value={duration(resolution.data?.mttr_minutes)}
+          color={resolution.data?.mttr_minutes > 240 ? "var(--sev-high)" : "var(--state-up)"}
           target="≤ 4 h"
         />
         <Stat
-          label="MTTA moyen"
-          value={duration(kpi?.avg_mtta_minutes)}
-          color={kpi?.avg_mtta_minutes > 15 ? "var(--sev-medium)" : "var(--state-up)"}
+          label="MTTA moyen (30 j)"
+          value={duration(resolution.data?.mtta_minutes)}
+          color={resolution.data?.mtta_minutes > 15 ? "var(--sev-medium)" : "var(--state-up)"}
           target="≤ 15 min"
         />
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
         <Stat
-          label="Respect des SLA"
+          label="Conformité TTR"
           value={pct(sla.data?.global_compliance_pct, 1)}
           color={
             sla.data?.global_compliance_pct >= 95 ? "var(--state-up)" : "var(--sev-high)"
           }
           target="≥ 95 %"
+          hint="résolutions clôturées avec une cible connue"
           to="/sla"
         />
         <Stat
@@ -203,25 +214,20 @@ export default function DirectionView() {
           to="/sla"
         />
         <Stat
-          label="Incidents ouverts"
-          value={num(kpi?.open)}
-          color={kpi?.open ? "var(--sev-medium)" : "var(--state-up)"}
+          label="Alertes non acquittées"
+          value={num(activeAlerts.data?.unacknowledged, "0")}
+          color={activeAlerts.data?.unacknowledged ? "var(--sev-medium)" : "var(--state-up)"}
         />
         <Stat
-          label="Sites critiques"
-          value={num(kpi?.critical_localities)}
-          hint="≥ 1 incident critique"
+          label="Sites avec équipement HS"
+          value={num(unavailableSites, "0")}
+          color={unavailableSites ? "var(--sev-critical)" : "var(--state-up)"}
+          hint="au moins un équipement en panne, état courant"
         />
         <Stat
-          label="Équip. récurrents"
-          value={num(kpi?.recurrent_nodes)}
-          color={kpi?.recurrent_nodes > 10 ? "var(--sev-high)" : "var(--ink)"}
-          target="≤ 10 / mois"
-        />
-        <Stat
-          label="Hors heures ouvrées"
-          value={num(kpi?.off_hours_detected)}
-          hint="détectés hors 6 h – 21 h"
+          label="Alertes actives hors horaires"
+          value={num(offHoursAlerts, "0")}
+          hint="détectées hors 6 h – 21 h"
         />
       </div>
 
@@ -230,7 +236,7 @@ export default function DirectionView() {
         <div className="col-span-12 xl:col-span-8 min-w-0">
           <Panel
             title="Tendance sur 6 mois"
-            subtitle="volume d'incidents et disponibilité"
+            subtitle="moyenne quotidienne des alertes actives et disponibilité"
           >
             <QueryBoundary query={trend} compact emptyMessage="Pas d'historique disponible">
               <LineChart
@@ -239,15 +245,10 @@ export default function DirectionView() {
                 legend
                 series={[
                   {
-                    label: "Incidents",
+                    label: "Alertes actives (moy./jour)",
                     data: trendData.map((point) => point.total_incidents),
                     color: "var(--sev-high)",
                     fill: true,
-                  },
-                  {
-                    label: "Résolus",
-                    data: trendData.map((point) => point.resolved),
-                    color: "var(--state-up)",
                   },
                 ]}
               />
@@ -379,47 +380,41 @@ export default function DirectionView() {
 
         {/* --- Ministères --- */}
         <div className="col-span-12 lg:col-span-5 min-w-0">
-          <Panel title="Par ministère / structure" flush>
+          <Panel title="Disponibilité par ministère / structure" subtitle="état courant, calculé sur les équipements UP" flush>
             <QueryBoundary
-              query={ministries}
+              query={organisations}
               compact
-              emptyMessage="Aucun ministère rattaché"
-              emptyHint="dim_ministry n'est peuplée que par etl/scripts/discover_geography.py — tant qu'il n'a pas tourné, ce classement reste vide."
+              emptyMessage="Aucune structure renseignée"
+              emptyHint="Le regroupement dépend du champ organisation fourni par iTop."
             >
               {(items) => (
                 <table className="tbl">
                   <thead>
                     <tr>
-                      <th>Ministère</th>
+                      <th>Ministère / structure</th>
                       <th style={{ textAlign: "right" }}>Équip.</th>
-                      <th style={{ textAlign: "right" }}>Incidents</th>
-                      <th style={{ textAlign: "right" }}>Critiques</th>
-                      <th style={{ textAlign: "right" }}>MTTR</th>
+                      <th style={{ textAlign: "right" }}>UP</th>
+                      <th style={{ textAlign: "right" }}>HS</th>
+                      <th style={{ textAlign: "right" }}>Disponibilité</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {items.slice(0, 12).map((ministry) => (
-                      <tr key={ministry.ministry_id}>
-                        <td className="truncate-cell" title={ministry.ministry}>
-                          {ministry.ministry}
+                    {items.slice(0, 12).map((organisation) => (
+                      <tr key={organisation.organisation}>
+                        <td className="truncate-cell" title={organisation.organisation}>
+                          {organisation.organisation}
                         </td>
                         <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>
-                          {num(ministry.nb_nodes)}
+                          {num(organisation.nodes_total)}
                         </td>
                         <td className="num" style={{ textAlign: "right" }}>
-                          {num(ministry.total_incidents)}
+                          {num(organisation.nodes_up, "0")}
                         </td>
-                        <td
-                          className="num"
-                          style={{
-                            textAlign: "right",
-                            color: ministry.critical ? "var(--sev-critical)" : "var(--ink-3)",
-                          }}
-                        >
-                          {num(ministry.critical, "0")}
+                        <td className="num" style={{ textAlign: "right", color: organisation.nodes_down ? "var(--sev-critical)" : "var(--ink-3)" }}>
+                          {num(organisation.nodes_down, "0")}
                         </td>
-                        <td className="num" style={{ textAlign: "right", color: "var(--ink-2)" }}>
-                          {duration(ministry.avg_mttr)}
+                        <td className="num" style={{ textAlign: "right", color: availabilityColor(organisation.availability_pct) }}>
+                          {pct(organisation.availability_pct, 1)}
                         </td>
                       </tr>
                     ))}
@@ -515,12 +510,11 @@ export default function DirectionView() {
           </Panel>
 
           {/* --- Équipements récurrents --- */}
-          <Panel title="Équipements récurrents" flush>
+          <Panel title="Top 10 des équipements avec alertes actives" flush>
             <QueryBoundary
-              query={recurrent}
+              query={topNodes}
               compact
-              emptyMessage="Aucun équipement en panne répétée"
-              emptyHint="Seuil : au moins 3 incidents sur le mois."
+              emptyMessage="Aucune alerte active sur les équipements"
             >
               {(items) => (
                 <table className="tbl">
@@ -528,17 +522,17 @@ export default function DirectionView() {
                     <tr>
                       <th>Équipement</th>
                       <th>Site</th>
-                      <th style={{ textAlign: "right" }}>Incidents</th>
-                      <th>Cause principale</th>
+                      <th style={{ textAlign: "right" }}>Alertes actives</th>
+                      <th>État</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {items.slice(0, 8).map((node) => (
-                      <tr key={node.node_id ?? node.code}>
+                    {items.slice(0, 10).map((node) => (
+                      <tr key={node.id}>
                         <td>
-                          {node.node_id ? (
+                          {node.id ? (
                             <Link
-                              to={`/equipements/${node.node_id}`}
+                              to={`/equipements/${node.id}`}
                               style={{ color: "var(--ink)", textDecoration: "none" }}
                               className="hover:underline"
                             >
@@ -548,11 +542,11 @@ export default function DirectionView() {
                             node.name
                           )}
                         </td>
-                        <td style={{ color: "var(--ink-3)" }}>{node.locality}</td>
+                        <td style={{ color: "var(--ink-3)" }}>{node.site || "—"}</td>
                         <td className="num" style={{ textAlign: "right", color: "var(--sev-high)" }}>
-                          {num(node.total_incidents)}
+                          {num(node.alerts, "0")}
                         </td>
-                        <td style={{ color: "var(--ink-2)" }}>{node.main_cause || "—"}</td>
+                        <td style={{ color: "var(--ink-2)" }}>{node.state || "—"}</td>
                       </tr>
                     ))}
                   </tbody>

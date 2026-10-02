@@ -202,8 +202,12 @@ def monthly_summary(db: Session, year: int, month: int, site: str | None = None)
 
     current = aggregate(year, month)
     previous = aggregate(*previous_month(year, month))
+    current_reliable = current["days_with_data"] >= 15
+    previous_reliable = previous["days_with_data"] >= 15
 
     def delta(field: str) -> float | None:
+        if not current_reliable or not previous_reliable:
+            return None
         a, b = current.get(field), previous.get(field)
         if a is None or b is None:
             return None
@@ -222,7 +226,8 @@ def monthly_summary(db: Session, year: int, month: int, site: str | None = None)
         },
         # Un mois dont moins de la moitié des jours ont des données ne doit
         # pas être présenté comme comparable. L'écran l'affiche en grisé.
-        "reliable": current["days_with_data"] >= 15,
+        "reliable": current_reliable,
+        "previous_reliable": previous_reliable,
     }
 
 

@@ -31,7 +31,7 @@ import ipaddress
 import logging
 
 from .base import SourceClient, ToolUnavailable
-from .models import Alert, Node, ToolHealth
+from .models import Alert, NetworkInterface, Node, ToolHealth
 from .netxms import _OBJECT_STATE
 from .normalize import epoch_to_dt, severity
 
@@ -55,23 +55,47 @@ WHERE (
 """
 
 _NODES_SQL = """
+WITH active_nodes AS (
+    SELECT n.id, n.primary_name, n.primary_ip,
+           p.name, p.status, p.city, p.siteadmin_id
+    FROM nodes n
+    JOIN object_properties p ON p.object_id = n.id
+    WHERE p.is_deleted = 0
+),
+container_groups AS (
+    SELECT cm.object_id, array_agg(cp.name ORDER BY cp.name) AS containers
+    FROM container_members cm
+    JOIN active_nodes n ON n.id = cm.object_id
+    JOIN object_properties cp ON cp.object_id = cm.container_id
+                            AND cp.is_deleted = 0
+    GROUP BY cm.object_id
+),
+node_interfaces AS (
+    SELECT i.node_id,
+           json_agg(json_build_object(
+               'id', i.id, 'name', ip.name, 'status', ip.status
+           ) ORDER BY ip.name) AS interfaces
+    FROM interfaces i
+    JOIN active_nodes n ON n.id = i.node_id
+    JOIN object_properties ip ON ip.object_id = i.id
+                             AND ip.is_deleted = 0
+    GROUP BY i.node_id
+)
 SELECT n.id,
-       p.name,
+       n.name,
        n.primary_name,
        n.primary_ip,
-       p.status,
-       p.city,
+       n.status,
+       n.city,
        {site_column} AS site,
     {latitude_column} AS latitude,
     {longitude_column} AS longitude,
-       (SELECT array_agg(cp.name ORDER BY cp.name)
-          FROM container_members cm
-          JOIN object_properties cp ON cp.object_id = cm.container_id
-         WHERE cm.object_id = n.id AND cp.is_deleted = 0) AS containers
-FROM nodes n
-JOIN object_properties p ON p.object_id = n.id
+       cg.containers,
+       COALESCE(ni.interfaces, '[]'::json) AS interfaces
+FROM active_nodes n
+LEFT JOIN container_groups cg ON cg.object_id = n.id
+LEFT JOIN node_interfaces ni ON ni.node_id = n.id
 {site_join}
-WHERE p.is_deleted = 0
 """
 
 # Une alarme d'interface (« GigabitEthernet2 down ») a pour source l'objet
@@ -213,7 +237,7 @@ class NetXMSDatabaseClient(SourceClient):
                 longitude_column="s.longitude",
                 site_join=(
                     "LEFT JOIN donnebase.siteadministratif s "
-                    "ON s.id_siteadministratif = p.siteadmin_id"
+                    "ON s.id_siteadministratif = n.siteadmin_id"
                 ),
             )
         else:
@@ -226,7 +250,10 @@ class NetXMSDatabaseClient(SourceClient):
 
         nodes: list[Node] = []
         rows = await self._query(sql)
-        for node_id, name, primary_name, ip, status, city, site, latitude, longitude, containers in rows:
+        for (
+            node_id, name, primary_name, ip, status, city, site, latitude,
+            longitude, containers, raw_interfaces,
+        ) in rows:
             # Site : le référentiel de l'agence d'abord, sinon la ville saisie
             # dans NetXMS. Rien d'autre — un site deviné serait pire qu'absent.
             if not site and city and city.strip():
@@ -236,6 +263,13 @@ class NetXMSDatabaseClient(SourceClient):
             # n'identifie pas un nom : le nom technique retombe alors sur le
             # nom de l'objet (OUAG-MDENP_ANPTIC-RT01).
             technical = primary_name if primary_name and not _is_ip(primary_name) else name
+            if isinstance(raw_interfaces, str):
+                try:
+                    import json
+
+                    raw_interfaces = json.loads(raw_interfaces)
+                except ValueError:
+                    raw_interfaces = []
             nodes.append(
                 Node(
                     tool=self.name,
@@ -252,6 +286,16 @@ class NetXMSDatabaseClient(SourceClient):
                     site=site or None,
                     latitude=float(latitude) if latitude is not None else None,
                     longitude=float(longitude) if longitude is not None else None,
+                    interfaces=tuple(
+                        NetworkInterface(
+                            tool=self.name,
+                            ref=str(interface["id"]),
+                            name=interface.get("name") or f"Interface {interface['id']}",
+                            state=_OBJECT_STATE.get(interface.get("status"), "unknown"),
+                        )
+                        for interface in (raw_interfaces or [])
+                        if interface.get("id") is not None
+                    ),
                 )
             )
         return nodes

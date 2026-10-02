@@ -103,6 +103,10 @@ export const sites = {
   list: () => get("/sites"),
 };
 
+export const organisations = {
+  list: () => get("/organisations"),
+};
+
 /* ------------------------------------------------------------------ */
 /* Alertes                                                              */
 /* ------------------------------------------------------------------ */
@@ -210,8 +214,8 @@ export const metrics = {
    */
   nodeSeries: (nodeId, { metric, period } = {}) =>
     get(`/nodes/${key(nodeId)}/metrics`, { metric, period }),
-  networkSeries: ({ metric, period, sample } = {}) =>
-    get("/network/series", { metric, period, sample }),
+  networkSeries: ({ metric, period, sample, site, organisation, node_type } = {}) =>
+    get("/network/series", { metric, period, sample, site, organisation, node_type }),
 };
 
 /* ------------------------------------------------------------------ */
@@ -232,6 +236,7 @@ export const kpi = {
 /* Engagements de service                                               */
 /* ------------------------------------------------------------------ */
 export const sla = {
+  sourceTargets: () => get("/sla/source-targets"),
   targets: () => get("/sla/targets"),
   updateTarget: (severity, payload) => put(`/sla/targets/${severity}`, payload),
   compliance: (params) => get("/sla/compliance", params),

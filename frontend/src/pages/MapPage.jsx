@@ -4,9 +4,10 @@ import { Link } from "react-router-dom";
 import Panel from "../components/ui/Panel";
 import SitesMap from "../components/domain/SitesMap";
 import Stat from "../components/ui/Stat";
+import { NodeStateBadge } from "../components/ui/Badge";
 import { PageHeader, PeriodPicker } from "../components/layout/TopBar";
 import { QueryBoundary } from "../components/ui/States";
-import { availabilityColor } from "../lib/vocabulary";
+import { availabilityColor, toolLabel } from "../lib/vocabulary";
 import { duration, monthLabel, num, pct } from "../lib/format";
 import { useKpiLocalities, useKpiLocalitiesMap, useLocalityNodes } from "../hooks/queries";
 import { usePeriodStore } from "../store/ui";
@@ -31,18 +32,18 @@ export default function MapPage() {
   const items = mapQuery.data ?? [];
   const totals = items.reduce(
     (accumulator, locality) => ({
-      incidents: accumulator.incidents + (locality.total_incidents ?? 0),
-      critical: accumulator.critical + (locality.critical ?? 0),
+      alerts: accumulator.alerts + (locality.alerts ?? 0),
+      down: accumulator.down + (locality.down ?? 0),
       nodes: accumulator.nodes + (locality.nb_nodes ?? 0),
     }),
-    { incidents: 0, critical: 0, nodes: 0 },
+    { alerts: 0, down: 0, nodes: 0 },
   );
 
   return (
     <div className="space-y-2.5">
       <PageHeader
         title="Carte des sites"
-        subtitle="Répartition géographique des incidents et de la disponibilité"
+        subtitle="État courant des équipements et des alertes par site"
         actions={
           <PeriodPicker
             month={month}
@@ -57,13 +58,16 @@ export default function MapPage() {
       />
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        <Stat label="Sites suivis" value={num(items.length, "0")} />
-        <Stat label="Équipements" value={num(totals.nodes, "0")} />
-        <Stat label="Incidents du mois" value={num(totals.incidents, "0")} />
         <Stat
-          label="Dont critiques"
-          value={num(totals.critical, "0")}
-          color={totals.critical ? "var(--sev-critical)" : "var(--state-up)"}
+          label="Sites géolocalisés"
+          value={num(items.filter((item) => item.latitude != null && item.longitude != null).length, "0")}
+        />
+        <Stat label="Équipements" value={num(totals.nodes, "0")} />
+        <Stat label="Alertes actives" value={num(totals.alerts, "0")} />
+        <Stat
+          label="Équipements en panne"
+          value={num(totals.down, "0")}
+          color={totals.down ? "var(--sev-critical)" : "var(--state-up)"}
         />
       </div>
 
@@ -73,7 +77,7 @@ export default function MapPage() {
             <QueryBoundary
               query={mapQuery}
               emptyMessage="Aucun site géolocalisé"
-              emptyHint="Les coordonnées proviennent de dim_locality, peuplée par etl/scripts/discover_geography.py."
+              emptyHint="Seuls les sites pour lesquels une source fournit des coordonnées apparaissent sur la carte."
             >
               {(localities) => (
                 <SitesMap localities={localities} height={480} onSelect={setSelected} />
@@ -86,8 +90,8 @@ export default function MapPage() {
           {selected ? (
             <Panel
               title={selected.locality}
-              subtitle={selected.region}
-              to={`/equipements?locality_id=${selected.locality_id}`}
+              subtitle={selected.region || "État courant du snapshot"}
+              to={`/equipements?locality_id=${encodeURIComponent(selected.locality_id)}`}
               toLabel="Équipements"
               actions={
                 <button type="button" className="btn btn-ghost btn-sm" onClick={() => setSelected(null)}>
@@ -99,18 +103,17 @@ export default function MapPage() {
               <div className="grid grid-cols-2 gap-2 p-2.5">
                 <Stat
                   compact
-                  label="Disponibilité"
-                  value={pct(selected.availability_pct, 2)}
-                  color={availabilityColor(selected.availability_pct)}
+                  label="Équipements"
+                  value={num(selected.nodes, "0")}
                 />
-                <Stat compact label="Incidents" value={num(selected.total_incidents, "0")} />
+                <Stat compact label="Alertes actives" value={num(selected.alerts, "0")} />
                 <Stat
                   compact
-                  label="Critiques"
-                  value={num(selected.critical, "0")}
-                  color={selected.critical ? "var(--sev-critical)" : "var(--state-up)"}
+                  label="En panne"
+                  value={num(selected.down, "0")}
+                  color={selected.down ? "var(--sev-critical)" : "var(--state-up)"}
                 />
-                <Stat compact label="MTTR moyen" value={duration(selected.avg_mttr)} />
+                <Stat compact label="Dégradés" value={num(selected.degraded, "0")} />
               </div>
 
               <QueryBoundary
@@ -124,43 +127,31 @@ export default function MapPage() {
                     <thead>
                       <tr>
                         <th>Équipement</th>
-                        <th style={{ textAlign: "right" }}>Inc.</th>
-                        <th style={{ textAlign: "right" }}>Ouv.</th>
-                        <th style={{ textAlign: "right" }}>Dispo.</th>
+                        <th>État</th>
+                        <th style={{ textAlign: "right" }}>Alertes</th>
+                        <th>Sources</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {data.nodes.map((node) => (
-                        <tr key={node.node_id}>
+                        {data.nodes.map((node) => (
+                        <tr key={node.id}>
                           <td>
                             <Link
-                              to={`/equipements/${node.node_id}`}
+                              to={`/equipements/${encodeURIComponent(node.id)}`}
                               style={{ color: "var(--ink)", textDecoration: "none" }}
                               className="hover:underline"
                             >
                               {node.name}
                             </Link>
                           </td>
+                          <td>
+                            <NodeStateBadge state={node.state} />
+                          </td>
                           <td className="num" style={{ textAlign: "right" }}>
-                            {num(node.total_incidents, "0")}
+                            {num(node.alerts, "0")}
                           </td>
-                          <td
-                            className="num"
-                            style={{
-                              textAlign: "right",
-                              color: node.open ? "var(--sev-medium)" : "var(--ink-3)",
-                            }}
-                          >
-                            {num(node.open, "0")}
-                          </td>
-                          <td
-                            className="num"
-                            style={{
-                              textAlign: "right",
-                              color: availabilityColor(node.availability_pct),
-                            }}
-                          >
-                            {pct(node.availability_pct, 1)}
+                          <td>
+                            {Object.keys(node.sources ?? {}).map(toolLabel).join(", ") || "—"}
                           </td>
                         </tr>
                       ))}

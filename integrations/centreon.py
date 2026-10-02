@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 
 from .base import SourceClient, ToolUnavailable
 from .models import Alert, MetricPoint, Node, ToolHealth
-from .normalize import iso_to_dt, severity
+from .normalize import epoch_to_dt, iso_to_dt, severity
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +62,12 @@ _SCALE = {
     "bandwidth_out_mbps": 1 / 1e6,
     "uptime": 1.0 / 86400.0,
 }
+
+
+def _source_datetime(value):
+    if isinstance(value, (int, float)) or str(value or "").isdigit():
+        return epoch_to_dt(value)
+    return iso_to_dt(value)
 
 
 class CentreonClient(SourceClient):
@@ -210,6 +216,13 @@ class CentreonClient(SourceClient):
                     ),
                     site=_site_from_groups(row.get("groups") or []),
                     node_type=resource_type,
+                    depends_on=(f"centreon:host-{parent['id']}",)
+                    if resource_type == "service" and parent.get("id")
+                    else (),
+                    source_status=(row.get("status") or {}).get("name"),
+                    last_check_at=_source_datetime(row.get("last_check")),
+                    next_check_at=_source_datetime(row.get("next_check")),
+                    last_output=row.get("information"),
                 )
             )
         return nodes
@@ -238,6 +251,16 @@ class CentreonClient(SourceClient):
             scale = "centreon_host" if resource_type == "host" else "centreon_service"
             parent = row.get("parent") or {}
             acknowledged = bool(row.get("acknowledged"))
+            acknowledgement = row.get("acknowledgement") or {}
+            parent_id = parent.get("id")
+            parent_ref = f"host-{parent_id}" if parent_id else f"host-{row.get('id')}"
+            ack_author = (
+                acknowledgement.get("author_name")
+                or acknowledgement.get("author")
+                or row.get("acknowledged_by")
+            )
+            if isinstance(ack_author, dict):
+                ack_author = ack_author.get("name") or ack_author.get("username")
             alerts.append(
                 Alert(
                     tool=self.name,
@@ -250,12 +273,15 @@ class CentreonClient(SourceClient):
                     ),
                     # Pour un service, l'équipement est l'hôte parent ; pour un
                     # hôte, c'est lui-même.
-                    node_ref=str(parent.get("id") or row.get("id")),
+                    node_ref=parent_ref,
                     node_name=parent.get("name") or row.get("name"),
                     acknowledged=acknowledged,
-                    acknowledged_at=iso_to_dt(
-                        (row.get("acknowledgement") or {}).get("entry_time")
-                    ),
+                    acknowledged_at=_source_datetime(acknowledgement.get("entry_time")),
+                    acknowledged_by=ack_author,
+                    acknowledgement_note=acknowledgement.get("comment"),
+                    is_maintenance=bool(row.get("in_downtime")),
+                    last_change_at=_source_datetime(row.get("last_status_change")),
+                    source_status=status.get("name"),
                 )
             )
         return alerts
@@ -269,9 +295,20 @@ class CentreonClient(SourceClient):
         de performance de chacun sur la fenêtre, et on ne garde que les
         métriques dont le nom correspond au type demandé.
         """
+        resource_type, separator, resource_id = str(node_ref).partition("-")
+        if not separator and resource_id.isdigit():
+            resource_type, resource_id = "host", resource_id
+        if not resource_id.isdigit() or resource_type not in ("host", "service"):
+            return []
+
+        search = (
+            {"parent.id": {"$eq": int(resource_id)}}
+            if resource_type == "host"
+            else {"id": {"$eq": int(resource_id)}}
+        )
         services = await self._resources(
-            ["service"], {"search": json.dumps({"parent.id": {"$eq": int(node_ref)}})}
-        ) if str(node_ref).isdigit() else []
+            ["service"], {"search": json.dumps(search)}
+        )
 
         window = {
             "start": start.astimezone(timezone.utc).isoformat(),

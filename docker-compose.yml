@@ -106,7 +106,6 @@ services:
       - COLLECT_INTERVAL_S=${COLLECT_INTERVAL_S:-300}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - SECRET_KEY=${SECRET_KEY:?SECRET_KEY manquant dans .env}
-      - INTERNAL_API_KEY=${INTERNAL_API_KEY:-}
       - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
       - REFRESH_TOKEN_EXPIRATION_DAYS=${REFRESH_TOKEN_EXPIRATION_DAYS:-7}
       # `true` par défaut : un oubli dans .env doit laisser le cookie de

@@ -105,6 +105,30 @@ def compliance(db: Session, days: int = 30) -> dict:
     """
     since = datetime.now(timezone.utc) - timedelta(days=days)
     goals = targets(db)
+    ttr_seconds = func.extract(
+        "epoch", AlertState.resolved_at - AlertState.detected_at
+    )
+    target_seconds = case(
+        *[
+            (AlertState.severity_at_pickup == severity, goal.ttr_target_minutes * 60)
+            for severity, goal in goals.items()
+        ],
+        else_=None,
+    )
+    resolved_with_target = case(
+        (
+            AlertState.resolved_at.isnot(None) & target_seconds.isnot(None),
+            1,
+        ),
+        else_=0,
+    )
+    breached = case(
+        (
+            AlertState.resolved_at.isnot(None) & (ttr_seconds > target_seconds),
+            1,
+        ),
+        else_=0,
+    )
 
     rows = db.execute(
         select(
@@ -118,6 +142,8 @@ def compliance(db: Session, days: int = 30) -> dict:
             func.avg(
                 func.extract("epoch", AlertState.resolved_at - AlertState.detected_at)
             ).label("ttr_s"),
+            func.sum(resolved_with_target).label("resolved_with_target"),
+            func.sum(breached).label("breached"),
         )
         .where(AlertState.detected_at >= since)
         .group_by(AlertState.severity_at_pickup)
@@ -136,6 +162,8 @@ def compliance(db: Session, days: int = 30) -> dict:
                 "alerts": row.total,
                 "acknowledged": row.acknowledged,
                 "resolved": row.resolved,
+                "resolved_with_target": int(row.resolved_with_target or 0),
+                "breached": int(row.breached or 0),
                 "mtta_minutes": tta_minutes,
                 "mttr_minutes": ttr_minutes,
                 "tta_target_minutes": goal.tta_target_minutes if goal else None,
@@ -158,6 +186,8 @@ def compliance(db: Session, days: int = 30) -> dict:
         "period_days": days,
         "by_severity": results,
         "handled_total": sum(r["alerts"] for r in results),
+        "resolved_total": sum(r["resolved_with_target"] for r in results),
+        "breached_total": sum(r["breached"] for r in results),
     }
 
 

@@ -142,6 +142,7 @@ lui seul.
 |---|---|---|---|
 | `noc:live:nodes` | string (JSON) | tous les équipements normalisés, fusionnés entre outils | `3 × COLLECT_INTERVAL_S` |
 | `noc:live:alerts` | string (JSON) | alertes actives, tous outils confondus | `3 × COLLECT_INTERVAL_S` |
+| `noc:live:sla-targets` | string (JSON) | objectifs SLT lus chez les outils sources, notamment iTop | `3 × COLLECT_INTERVAL_S` |
 | `noc:live:meta` | string (JSON) | horodatage du cycle, durée, compteurs | `3 × COLLECT_INTERVAL_S` |
 | `noc:tool:<outil>` | string (JSON) | joignabilité, latence, dernier succès, dernière erreur | `3 × COLLECT_INTERVAL_S` |
 | `noc:hist:<outil>:<empreinte>` | string (JSON) | réponse d'historique mise en cache | selon la fenêtre demandée |

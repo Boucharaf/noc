@@ -124,6 +124,7 @@ def _manual_alerts(db: Session) -> list[dict]:
             "severity": row.severity,
             "message": row.title,
             "description": row.description,
+            "cause": row.cause,
             "since": row.detected_at.isoformat() if row.detected_at else None,
             "node_ref": row.node_key,
             "node_name": row.node_name,
@@ -214,6 +215,9 @@ async def list_alerts(
                 # a fait le travail, même s'il n'est pas passé par le NOC.
                 "acknowledged": bool(alert.get("acknowledged")) or bool(state and state.acknowledged_at),
                 "acknowledged_by": names.get(state.acknowledged_by) if state else None,
+                "source_acknowledged_by": alert.get("acknowledged_by"),
+                "source_acknowledged_at": alert.get("acknowledged_at"),
+                "source_acknowledgement_note": alert.get("acknowledgement_note"),
                 "acknowledged_at": (
                     state.acknowledged_at.isoformat()
                     if state and state.acknowledged_at
@@ -222,8 +226,22 @@ async def list_alerts(
                 "assigned_to": names.get(state.assigned_to) if state else None,
                 "cause": state.cause if state else None,
                 "escalation_level": state.escalation_level if state else 0,
-                "is_maintenance": window is not None,
+                "is_maintenance": window is not None or bool(alert.get("is_maintenance")),
                 "maintenance_reason": window.reason if window else None,
+                "maintenance_until": (
+                    window.ends_at.isoformat()
+                    if window
+                    else (
+                        alert["maintenance_until"].isoformat()
+                        if hasattr(alert.get("maintenance_until"), "isoformat")
+                        else alert.get("maintenance_until")
+                    )
+                ),
+                "source_status": alert.get("source_status"),
+                "last_change_at": alert.get("last_change_at"),
+                "source_assignee": alert.get("source_assignee"),
+                "source_team": alert.get("source_team"),
+                "business_service": alert.get("business_service"),
             }
         )
 

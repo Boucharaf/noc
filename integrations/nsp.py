@@ -153,6 +153,19 @@ class NSPClient(SourceClient):
                     node_name=alarm.get("ne-name"),
                     acknowledged=bool(alarm.get("acknowledged")),
                     acknowledged_at=iso_to_dt(alarm.get("acknowledged-time")),
+                    acknowledged_by=(
+                        alarm.get("acknowledged-user")
+                        or alarm.get("acknowledged-by")
+                    ),
+                    acknowledgement_note=(
+                        alarm.get("acknowledgement-comment")
+                        or alarm.get("acknowledgement-text")
+                    ),
+                    is_maintenance=bool(alarm.get("in-maintenance")),
+                    last_change_at=iso_to_dt(
+                        alarm.get("last-state-change-time") or alarm.get("last-change-time")
+                    ),
+                    source_status=str(alarm.get("state")) if alarm.get("state") is not None else None,
                 )
             )
         return [a for a in alerts if a.since is not None]

@@ -108,7 +108,7 @@ export default function IncidentTable({
     header: "Description",
     wrap: false,
     render: (row) => (
-      <span className="flex items-center gap-1.5" title={row.description ?? ""}>
+      <span className="flex w-full min-w-0 items-center gap-1.5" title={row.description ?? ""}>
         {row.is_maintenance && (
           <Wrench
             size={11}
@@ -116,7 +116,10 @@ export default function IncidentTable({
             aria-label="Pendant une fenêtre de maintenance planifiée"
           />
         )}
-        <span className="truncate-cell" style={{ color: "var(--ink-2)" }}>
+        <span
+          className="block min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap"
+          style={{ color: "var(--ink-2)" }}
+        >
           {ellipsis(row.description, compact ? 60 : 110)}
         </span>
       </span>

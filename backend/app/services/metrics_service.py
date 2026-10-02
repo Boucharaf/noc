@@ -165,7 +165,12 @@ async def node_all_series(
 
 
 async def network_series(
-    metric_type: str, period: str | None = None, sample: int = 12
+    metric_type: str,
+    period: str | None = None,
+    sample: int = 12,
+    site: str | None = None,
+    organisation: str | None = None,
+    node_type: str | None = None,
 ) -> dict:
     """Courbe agrégée du réseau, sur un ÉCHANTILLON d'équipements.
 
@@ -177,6 +182,12 @@ async def network_series(
     qu'une moyenne sur tout le parc qui met une minute à s'afficher.
     """
     nodes = await live_service.get_nodes()
+    if site:
+        nodes = [node for node in nodes if node.get("site") == site]
+    if organisation:
+        nodes = [node for node in nodes if node.get("organisation") == organisation]
+    if node_type:
+        nodes = [node for node in nodes if node.get("node_type") == node_type]
     ranked = sorted(nodes, key=lambda n: -n.get("alerts", 0))[:sample]
     window_start, window_end = history_service.resolve_window(period, None, None)
 
@@ -193,10 +204,22 @@ async def network_series(
     # est plus fin que le pas de collecte de n'importe quelle sonde.
     buckets: dict[str, list[float]] = {}
     contributing = 0
-    for result in results:
+    node_ranking = []
+    for node, result in zip(ranked, results):
         if isinstance(result, BaseException) or not result.get("points"):
             continue
         contributing += 1
+        values = [float(point["value"]) for point in result["points"]]
+        node_ranking.append(
+            {
+                "node_id": node["id"],
+                "node_name": node.get("name"),
+                "site": node.get("site"),
+                "avg_value": round(sum(values) / len(values), 3),
+                "max_value": round(max(values), 3),
+                "nb_points": len(values),
+            }
+        )
         for point in result["points"]:
             minute = str(point["at"])[:16]
             buckets.setdefault(minute, []).append(float(point["value"]))
@@ -211,6 +234,7 @@ async def network_series(
         "points": points,
         "sampled_nodes": len(ranked),
         "contributing_nodes": contributing,
+        "node_ranking": node_ranking,
         "start": window_start.isoformat(),
         "end": window_end.isoformat(),
     }

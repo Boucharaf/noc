@@ -83,6 +83,14 @@ export function useSites() {
   });
 }
 
+export function useOrganisations() {
+  return useQuery({
+    queryKey: ["organisations"],
+    queryFn: api.organisations.list,
+    refetchInterval: useInterval(REFRESH.OPERATIONAL),
+  });
+}
+
 export function useAlertsBySeverity() {
   return useQuery({
     queryKey: ["alerts", "by-severity"],
@@ -181,8 +189,11 @@ export function useAlertActions() {
  * champs (`node_id`, `locality`) — à côté de `nodes`, la forme native.
  */
 export function useNodes(params = {}) {
-  const { q, page, page_size: pageSize, ...rest } = params;
+  const { q, page, page_size: pageSize, locality_id: localityId, ...rest } = params;
   const query = { ...rest };
+  if (query.site === undefined && localityId !== undefined) {
+    query.site = String(localityId);
+  }
   if (q !== undefined && query.search === undefined) query.search = q;
   if (pageSize !== undefined && query.limit === undefined) query.limit = pageSize;
   if (page !== undefined && query.offset === undefined) {
@@ -321,6 +332,13 @@ export function useNodeSeries(nodeId, { metric, period = "24h" } = {}) {
   return useQuery({
     queryKey: ["metrics", "node", nodeId, metric, period],
     queryFn: () => api.metrics.nodeSeries(nodeId, { metric, period }),
+    select: (data) =>
+      metric
+        ? (data?.points ?? []).map((point) => ({
+            ...point,
+            time: point.time ?? point.at,
+          }))
+        : data,
     enabled: Boolean(nodeId),
     refetchInterval: false,
     staleTime: 60_000,
@@ -339,7 +357,7 @@ const SERIES_PERIODS = [
   [2160, "90d"],
 ];
 
-function periodFromHours(hours) {
+export function periodFromHours(hours) {
   const match = SERIES_PERIODS.find(([limit]) => hours <= limit);
   return match ? match[1] : "1y";
 }
@@ -355,12 +373,21 @@ function periodFromHours(hours) {
  * d'équipements et le backend ne publie pas le pire d'entre eux. Recopier la
  * moyenne dans « pire équipement » serait un mensonge graphique.
  */
-export function useNetworkSeries({ metric, metricType, period, hours, sample } = {}) {
+export function useNetworkSeries({ metric, metricType, period, hours, sample, site, organisation, nodeType } = {}) {
   const metricKey = metric ?? metricType ?? "latency_ms";
   const periodKey = period ?? (hours ? periodFromHours(hours) : "24h");
+  const sampleSize = sample ?? 12;
+  const queryKey = ["metrics", "network", metricKey, periodKey, sampleSize, site, organisation, nodeType];
   return useQuery({
-    queryKey: ["metrics", "network", metricKey, periodKey, sample],
-    queryFn: () => api.metrics.networkSeries({ metric: metricKey, period: periodKey, sample }),
+    queryKey,
+    queryFn: () => api.metrics.networkSeries({
+      metric: metricKey,
+      period: periodKey,
+      sample: sampleSize,
+      site,
+      organisation,
+      node_type: nodeType,
+    }),
     select: (data) =>
       (data?.points ?? []).map((point) => ({
         time: point.at,
@@ -368,7 +395,39 @@ export function useNetworkSeries({ metric, metricType, period, hours, sample } =
         min: null,
         max: null,
         nb_nodes: data.contributing_nodes,
+        sampled_nodes: data.sampled_nodes,
       })),
+    refetchInterval: false,
+    staleTime: 60_000,
+    retry: 1,
+  });
+}
+
+export function useNetworkRanking(options = {}) {
+  const {
+    metric,
+    metricType,
+    period,
+    hours,
+    sample,
+    site,
+    organisation,
+    nodeType,
+  } = options;
+  const metricKey = metric ?? metricType ?? "latency_ms";
+  const periodKey = period ?? (hours ? periodFromHours(hours) : "24h");
+  const sampleSize = sample ?? 12;
+  return useQuery({
+    queryKey: ["metrics", "network", metricKey, periodKey, sampleSize, site, organisation, nodeType],
+    queryFn: () => api.metrics.networkSeries({
+      metric: metricKey,
+      period: periodKey,
+      sample: sampleSize,
+      site,
+      organisation,
+      node_type: nodeType,
+    }),
+    select: (data) => data?.node_ranking ?? [],
     refetchInterval: false,
     staleTime: 60_000,
     retry: 1,
@@ -503,6 +562,14 @@ export function useSlaTargets() {
     queryKey: ["sla", "targets"],
     queryFn: api.sla.targets,
     staleTime: 10 * 60_000,
+  });
+}
+
+export function useSlaSourceTargets() {
+  return useQuery({
+    queryKey: ["sla", "source-targets"],
+    queryFn: api.sla.sourceTargets,
+    refetchInterval: useInterval(REFRESH.ANALYTIC),
   });
 }
 
@@ -824,6 +891,9 @@ export function useIncidents(params = {}) {
     select: (data) => {
       let rows = (data?.alerts ?? []).map(toIncident);
       if (filters.status) rows = rows.filter((row) => row.status === filters.status);
+      if (filters.node_key) {
+        rows = rows.filter((row) => row.node_key === filters.node_key);
+      }
       if (filters.node_code) {
         const needle = filters.node_code.toLowerCase();
         rows = rows.filter((row) =>
@@ -1052,8 +1122,8 @@ export function useLocalityNodes(site) {
 
 /** Alertes actives d'un équipement — déjà portées par sa fiche. */
 export function useNodeIncidents(nodeId) {
-  const query = useNode(nodeId);
-  return { ...query, data: query.data?.active_alerts ?? [] };
+  const query = useIncidents({ node_key: nodeId, page_size: 50 });
+  return { ...query, data: query.data?.items ?? [] };
 }
 
 /**
@@ -1072,7 +1142,14 @@ export function useNodeLatest(nodeId) {
       ? Object.fromEntries(
           Object.entries(series).map(([metric, value]) => [
             metric,
-            value.points?.length ? value.points[value.points.length - 1] : null,
+                value.points?.length
+                  ? {
+                      ...value.points[value.points.length - 1],
+                      time:
+                        value.points[value.points.length - 1].time ??
+                        value.points[value.points.length - 1].at,
+                    }
+                  : null,
           ]),
         )
       : undefined,
@@ -1090,37 +1167,30 @@ export function useNodeLatest(nodeId) {
  */
 export function useSla(params = {}) {
   const compliance = useSlaCompliance(params);
-  const breaches = useSlaBreaches(params);
   const data = compliance.data;
-  const breachList = Array.isArray(breaches.data) ? breaches.data : [];
-
-  const breachedBySeverity = {};
-  for (const breach of breachList) {
-    breachedBySeverity[breach.severity] = (breachedBySeverity[breach.severity] ?? 0) + 1;
-  }
-  const handled = data?.handled_total ?? 0;
-  const totalBreached = breachList.length;
+  const resolved = data?.resolved_total ?? 0;
+  const totalBreached = data?.breached_total ?? 0;
 
   return {
     ...compliance,
     data: data
       ? {
           ...data,
-          global_compliance_pct: handled
-            ? Math.max(0, ((handled - totalBreached) / handled) * 100)
+          global_compliance_pct: resolved
+            ? Math.max(0, ((resolved - totalBreached) / resolved) * 100)
             : null,
           total_breached: totalBreached,
           indicators: [],
           by_severity: (data.by_severity ?? []).map((row) => {
-            const breached = breachedBySeverity[row.severity] ?? 0;
+            const breached = row.breached ?? 0;
             return {
               ...row,
               total_incidents: row.alerts,
               avg_mtta_minutes: row.mtta_minutes,
               avg_mttr_minutes: row.mttr_minutes,
               breached,
-              ttr_compliance_pct: row.alerts
-                ? Math.max(0, ((row.alerts - breached) / row.alerts) * 100)
+              ttr_compliance_pct: row.resolved_with_target
+                ? Math.max(0, ((row.resolved_with_target - breached) / row.resolved_with_target) * 100)
                 : null,
             };
           }),

@@ -151,6 +151,8 @@ CREATE TABLE IF NOT EXISTS ops_manual_incident (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+ALTER TABLE ops_manual_incident ADD COLUMN IF NOT EXISTS cause TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_ops_manual_open
     ON ops_manual_incident(detected_at DESC) WHERE resolved_at IS NULL;
 

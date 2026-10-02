@@ -31,7 +31,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from .base import SourceClient, ToolUnavailable
-from .models import Alert, MetricPoint, Node
+from .models import Alert, MetricPoint, NetworkInterface, Node
 from .normalize import epoch_to_dt, severity
 
 logger = logging.getLogger(__name__)
@@ -72,6 +72,8 @@ _SCALE = {
     "availability_pct": 100.0,     # 0|1  -> %
     "uptime": 1.0 / 86400.0,       # s    -> jours
 }
+
+_INTERFACE_TYPES = {1: "Agent", 2: "SNMP", 3: "IPMI", 4: "JMX"}
 
 
 class ZabbixClient(SourceClient):
@@ -169,7 +171,9 @@ class ZabbixClient(SourceClient):
             "host.get",
             {
                 "output": ["hostid", "host", "name", "status", "maintenance_status"],
-                "selectInterfaces": ["ip", "available"],
+                "selectInterfaces": [
+                    "interfaceid", "type", "main", "useip", "ip", "dns", "port", "available"
+                ],
                 "selectHostGroups": ["name"],
             },
         )
@@ -189,6 +193,26 @@ class ZabbixClient(SourceClient):
                     enabled=str(host.get("status")) == "0",
                     groups=groups,
                     site=_site_from_groups(groups),
+                    interfaces=tuple(
+                        NetworkInterface(
+                            tool=self.name,
+                            ref=str(interface.get("interfaceid") or f"{host['hostid']}:{index}"),
+                            name=(
+                                f"{_INTERFACE_TYPES.get(int(interface.get('type', 0)), 'Interface')} "
+                                f"{interface.get('ip') if interface.get('useip') == '1' else interface.get('dns') or interface.get('ip') or ''}"
+                            ).strip(),
+                            description=(
+                                f"Port {interface['port']}"
+                                if interface.get("port")
+                                else ("Interface principale" if interface.get("main") == "1" else None)
+                            ),
+                            ip=interface.get("ip") if interface.get("useip") == "1" else None,
+                            state={"1": "up", "2": "down"}.get(
+                                str(interface.get("available", "0")), "unknown"
+                            ),
+                        )
+                        for index, interface in enumerate(interfaces)
+                    ),
                 )
             )
         return nodes
@@ -198,7 +222,8 @@ class ZabbixClient(SourceClient):
             "problem.get",
             {
                 "output": "extend",
-                "selectAcknowledges": ["clock", "action"],
+                "selectAcknowledges": ["clock", "action", "userid", "message"],
+                "selectSuppressionData": ["maintenanceid", "suppress_until"],
                 "recent": False,        # uniquement ce qui est encore en cours
                 "sortfield": ["eventid"],
                 "sortorder": "DESC",
@@ -212,10 +237,45 @@ class ZabbixClient(SourceClient):
         trigger_ids = sorted({p["objectid"] for p in problems if p.get("objectid")})
         hosts_by_trigger = await self._hosts_by_trigger(trigger_ids)
 
+        user_ids = sorted(
+            {
+                str(ack.get("userid"))
+                for problem in problems
+                for ack in (problem.get("acknowledges") or [])
+                if ack.get("userid")
+            }
+        )
+        users_by_id = {}
+        if user_ids:
+            try:
+                users = await self._call(
+                    "user.get",
+                    {"output": ["userid", "username"], "userids": user_ids},
+                )
+                users_by_id = {str(user["userid"]): user.get("username") for user in users}
+            except ToolUnavailable:
+                logger.debug("Zabbix : noms des acquitteurs non accessibles")
+
         alerts: list[Alert] = []
         for problem in problems:
             host = hosts_by_trigger.get(str(problem.get("objectid")), {})
             acknowledges = problem.get("acknowledges") or []
+            latest_ack = max(acknowledges, key=lambda ack: int(ack.get("clock", 0)), default=None)
+            suppressions = problem.get("suppression_data") or []
+            maintenance_until = max(
+                (
+                    dt
+                    for item in suppressions
+                    if item.get("maintenanceid")
+                    if (dt := epoch_to_dt(item.get("suppress_until"))) is not None
+                ),
+                default=None,
+            )
+            acknowledged_by = (
+                users_by_id.get(str(latest_ack.get("userid")))
+                if latest_ack and latest_ack.get("userid")
+                else None
+            )
             alerts.append(
                 Alert(
                     tool=self.name,
@@ -226,9 +286,12 @@ class ZabbixClient(SourceClient):
                     node_ref=host.get("hostid"),
                     node_name=host.get("name"),
                     acknowledged=str(problem.get("acknowledged")) == "1",
-                    acknowledged_at=(
-                        epoch_to_dt(acknowledges[0].get("clock")) if acknowledges else None
-                    ),
+                    acknowledged_at=epoch_to_dt(latest_ack.get("clock")) if latest_ack else None,
+                    acknowledged_by=acknowledged_by,
+                    acknowledgement_note=latest_ack.get("message") if latest_ack else None,
+                    is_maintenance=str(problem.get("suppressed", "0")) == "1",
+                    maintenance_until=maintenance_until,
+                    source_status=("acquittée" if problem.get("acknowledged") == "1" else "ouverte"),
                 )
             )
         return alerts

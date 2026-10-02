@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 PREFIX = "noc:"
 KEY_NODES = f"{PREFIX}live:nodes"
 KEY_ALERTS = f"{PREFIX}live:alerts"
+KEY_SLA_TARGETS = f"{PREFIX}live:sla-targets"
 KEY_META = f"{PREFIX}live:meta"
 KEY_TOOL = f"{PREFIX}tool:"          # + nom de l'outil
 KEY_HISTORY = f"{PREFIX}hist:"       # + outil:empreinte
@@ -76,6 +77,7 @@ class SnapshotStore:
         nodes: list,
         alerts: list,
         meta: dict[str, Any],
+        sla_targets: list[dict[str, Any]] | None = None,
     ) -> None:
         """Publie l'instantané complet, de façon atomique.
 
@@ -87,11 +89,13 @@ class SnapshotStore:
         payload_nodes = json.dumps(to_jsonable(nodes), ensure_ascii=False)
         payload_alerts = json.dumps(to_jsonable(alerts), ensure_ascii=False)
         payload_meta = json.dumps(to_jsonable(meta), ensure_ascii=False)
+        payload_sla_targets = json.dumps(to_jsonable(sla_targets or []), ensure_ascii=False)
 
         pipe = self.redis.pipeline(transaction=True)
         pipe.set(KEY_NODES, payload_nodes, ex=self.ttl)
         pipe.set(KEY_ALERTS, payload_alerts, ex=self.ttl)
         pipe.set(KEY_META, payload_meta, ex=self.ttl)
+        pipe.set(KEY_SLA_TARGETS, payload_sla_targets, ex=self.ttl)
         await pipe.execute()
 
     async def write_tool_health(self, health) -> None:
@@ -148,6 +152,9 @@ class SnapshotStore:
 
     async def read_alerts(self) -> list[dict] | None:
         return await self._read_json(KEY_ALERTS)
+
+    async def read_sla_targets(self) -> list[dict] | None:
+        return await self._read_json(KEY_SLA_TARGETS)
 
     async def read_meta(self) -> dict | None:
         return await self._read_json(KEY_META)

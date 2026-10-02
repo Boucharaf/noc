@@ -50,11 +50,31 @@ _CLASS_FIELDS = {
     "Server": "id,name,status,org_id_friendlyname,location_id_friendlyname,managementip",
     "VirtualMachine": "id,name,status,org_id_friendlyname",
 }
+_CLASS_OPTIONAL_FIELDS = {
+    "NetworkDevice": (
+        "business_criticity", "support_team_id_friendlyname", "contact_id_friendlyname",
+        "service_id_friendlyname",
+    ),
+    "Server": (
+        "business_criticity", "support_team_id_friendlyname", "contact_id_friendlyname",
+        "service_id_friendlyname",
+    ),
+    "VirtualMachine": (
+        "business_criticity", "support_team_id_friendlyname", "contact_id_friendlyname",
+        "service_id_friendlyname",
+    ),
+}
 
 # Attributs présents sur toute classe dérivée de FunctionalCI. Sert de repli
 # quand une instance a été personnalisée et refuse un attribut ci-dessus :
 # mieux vaut un inventaire sans localité qu'une classe absente du parc.
 _MINIMAL_FIELDS = "id,name,status,org_id_friendlyname"
+_TICKET_FIELDS = (
+    "id,ref,title,status,start_date,last_update,priority,"
+    "org_id_friendlyname,functionalcis_list,agent_id_friendlyname,"
+    "team_id_friendlyname,service_id_friendlyname"
+)
+_TICKET_BASE_FIELDS = "id,ref,title,status,start_date,last_update,priority,org_id_friendlyname,functionalcis_list"
 
 # Statuts iTop considérés comme CLOS. Un ticket clos n'entre pas dans
 # l'instantané : il appartient à l'historique, qui reste chez iTop.
@@ -79,6 +99,7 @@ class ITopClient(SourceClient):
         self.endpoint = f"{root}/webservices/rest.php"
         self.ticket_classes = ticket_classes
         self.zbx_event_field = zbx_event_field.strip()
+        self._unsupported_ci_fields: dict[str, set[str]] = {}
         # 1.3 : version du protocole REST introduite en iTop 2.5 et toujours
         # servie en 3.2. Elle apporte `core/check_credentials`, utilisé par
         # le contrôle de santé.
@@ -123,7 +144,9 @@ class ITopClient(SourceClient):
 
         return await self._health(probe)
 
-    async def _get_class(self, cls: str, fields: str) -> dict | None:
+    async def _get_class(
+        self, cls: str, fields: str, optional_fields: tuple[str, ...] = ()
+    ) -> dict | None:
         """`core/get` sur une classe, avec repli sur les attributs minimaux.
 
         Deux échecs sont possibles et se traitent différemment :
@@ -141,6 +164,11 @@ class ITopClient(SourceClient):
             if "invalid attribute" not in str(exc).lower() or fields == _MINIMAL_FIELDS:
                 logger.info("iTop : classe %s ignorée (%s)", cls, exc)
                 return None
+            if optional_fields:
+                self._unsupported_ci_fields.setdefault(cls, set()).add(optional_fields[-1])
+                return await self._get_class(
+                    cls, fields.rsplit(",", 1)[0], optional_fields[:-1]
+                )
             logger.info(
                 "iTop : classe %s — attribut refusé, repli sur les champs "
                 "minimaux (%s)",
@@ -152,7 +180,13 @@ class ITopClient(SourceClient):
     async def fetch_nodes(self) -> list[Node]:
         nodes: list[Node] = []
         for cls, fields in _CLASS_FIELDS.items():
-            result = await self._get_class(cls, fields)
+            unsupported = self._unsupported_ci_fields.get(cls, set())
+            optional_fields = tuple(
+                field for field in _CLASS_OPTIONAL_FIELDS.get(cls, ())
+                if field not in unsupported
+            )
+            query_fields = ",".join((fields, *optional_fields))
+            result = await self._get_class(cls, query_fields, optional_fields)
             if result is None:
                 continue
 
@@ -174,6 +208,13 @@ class ITopClient(SourceClient):
                         organisation=fields.get("org_id_friendlyname") or None,
                         site=fields.get("location_id_friendlyname") or None,
                         node_type=cls,
+                        criticality=fields.get("business_criticity") or None,
+                        owner=(
+                            fields.get("support_team_id_friendlyname")
+                            or fields.get("contact_id_friendlyname")
+                            or None
+                        ),
+                        business_service=fields.get("service_id_friendlyname") or None,
                     )
                 )
         return nodes
@@ -182,10 +223,7 @@ class ITopClient(SourceClient):
         """Tickets OUVERTS. Les tickets clos restent chez iTop."""
         closed = "','".join(sorted(CLOSED_STATES))
         alerts: list[Alert] = []
-        fields = (
-            "id,ref,title,status,start_date,last_update,priority,"
-            "org_id_friendlyname,functionalcis_list"
-        )
+        fields = _TICKET_FIELDS
         if self.zbx_event_field:
             fields += f",{self.zbx_event_field}"
 
@@ -200,8 +238,22 @@ class ITopClient(SourceClient):
                     },
                 )
             except ToolUnavailable as exc:
-                logger.info("iTop : classe de ticket %s ignorée (%s)", cls, exc)
-                continue
+                if "invalid attribute" not in str(exc).lower():
+                    logger.info("iTop : classe de ticket %s ignorée (%s)", cls, exc)
+                    continue
+                try:
+                    result = await self._call(
+                        "core/get",
+                        {
+                            "class": cls,
+                            "key": f"SELECT {cls} WHERE status NOT IN ('{closed}')",
+                            "output_fields": _TICKET_BASE_FIELDS
+                            + (f",{self.zbx_event_field}" if self.zbx_event_field else ""),
+                        },
+                    )
+                except ToolUnavailable as fallback_exc:
+                    logger.info("iTop : classe de ticket %s ignorée (%s)", cls, fallback_exc)
+                    continue
 
             for obj in (result.get("objects") or {}).values():
                 f = obj.get("fields") or {}
@@ -222,6 +274,11 @@ class ITopClient(SourceClient):
                         # un ticket pris en charge a changé de statut.
                         acknowledged=str(f.get("status", "")).lower()
                         not in ("new", "nouveau"),
+                        last_change_at=sql_to_dt(f.get("last_update")),
+                        source_status=str(f.get("status") or "") or None,
+                        source_assignee=f.get("agent_id_friendlyname") or None,
+                        source_team=f.get("team_id_friendlyname") or None,
+                        business_service=f.get("service_id_friendlyname") or None,
                         ticket_ref=f.get("ref") or None,
                     )
                 )

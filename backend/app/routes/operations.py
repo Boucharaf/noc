@@ -74,6 +74,7 @@ class ManualIncidentIn(BaseModel):
     title: str = Field(..., min_length=3, max_length=200)
     severity: str = Field("medium", pattern=_SEVERITY_PATTERN)
     description: str | None = Field(None, max_length=4000)
+    cause: str | None = Field(None, max_length=200)
     node_key: str | None = Field(None, max_length=300)
     node_name: str | None = Field(None, max_length=300)
     site: str | None = Field(None, max_length=150)
@@ -178,6 +179,7 @@ def create_manual_incident(
         title=body.title,
         severity=body.severity,
         description=body.description,
+        cause=body.cause,
         node_key=body.node_key,
         node_name=body.node_name,
         site=body.site,

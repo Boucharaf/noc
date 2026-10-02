@@ -12,11 +12,10 @@ import { METRIC_TYPES, metricMeta, thresholdColor } from "../lib/vocabulary";
 import { bandwidth, decimal, num, smartTime } from "../lib/format";
 import {
   useNetworkKpi,
+  useNetworkRanking,
   useNetworkSeries,
   useNodeStates,
   useNodes,
-  useReference,
-  useTopNodes,
 } from "../hooks/queries";
 
 /**
@@ -45,30 +44,39 @@ const WINDOWS = [
 export default function PerformancePage() {
   const [hours, setHours] = useState(24);
   const [metric, setMetric] = useState("latency_ms");
-  const [localityId, setLocalityId] = useState(null);
+  const [site, setSite] = useState(null);
   const [organisation, setOrganisation] = useState(null);
   const [nodeType, setNodeType] = useState(null);
 
   const allNodesQuery = useNodes({ limit: 2000 });
   const allNodes = allNodesQuery.data?.items ?? [];
-  const orgOptions = [...new Set(allNodes.map(n => n.organisation).filter(Boolean))].map(o => ({ value: o, label: o }));
-  const typeOptions = [...new Set(allNodes.map(n => n.node_type).filter(Boolean))].map(t => ({ value: t, label: t }));
+  const siteOptions = [
+    ...new Set(allNodes.map((n) => n.locality).filter(Boolean)),
+  ].map((s) => ({ value: s, label: s }));
+  const orgOptions = [
+    ...new Set(allNodes.map((n) => n.organisation).filter(Boolean)),
+  ].map((o) => ({ value: o, label: o }));
+  const typeOptions = [
+    ...new Set(allNodes.map((n) => n.node_type).filter(Boolean)),
+  ].map((t) => ({ value: t, label: t }));
 
-  const { data: reference } = useReference();
-  const nodeStates = useNodeStates(localityId ? Number(localityId) : undefined);
-  const network = useNetworkKpi({ hours, localityId: localityId ? Number(localityId) : undefined });
+  const nodeStates = useNodeStates();
+  const network = useNetworkKpi();
   const series = useNetworkSeries({
     metricType: metric,
     hours,
-    localityId: localityId ? Number(localityId) : undefined,
+    sample: 15,
+    site,
+    organisation,
+    nodeType,
   });
-  const top = useTopNodes({
+  const top = useNetworkRanking({
     metricType: metric,
     hours,
-    limit: 15,
-    localityId: localityId ? Number(localityId) : undefined,
+    sample: 15,
+    site,
     organisation,
-    node_type: nodeType,
+    nodeType,
   });
 
   const meta = metricMeta(metric);
@@ -83,19 +91,16 @@ export default function PerformancePage() {
     <div className="space-y-2.5">
       <PageHeader
         title="Performance réseau"
-        subtitle="Métriques TimescaleDB agrégées sur le parc supervisé"
+        subtitle="Courbes historiques lues auprès des outils sources · disponibilité instantanée du parc"
         actions={
           <Toolbar>
             <FilterSelect
               label="Périmètre"
-              value={localityId}
-              onChange={setLocalityId}
-              allLabel="Tout le réseau"
+              value={site}
+              onChange={setSite}
+              allLabel="Tous les sites"
               width={170}
-              options={(reference?.localities ?? []).map((locality) => ({
-                value: locality.id,
-                label: locality.name,
-              }))}
+              options={siteOptions}
             />
             {orgOptions.length > 0 && (
               <FilterSelect
@@ -117,31 +122,33 @@ export default function PerformancePage() {
                 options={typeOptions}
               />
             )}
-            <Segmented ariaLabel="Fenêtre" value={hours} onChange={setHours} options={WINDOWS} />
+            <Segmented
+              ariaLabel="Fenêtre"
+              value={hours}
+              onChange={setHours}
+              options={WINDOWS}
+            />
           </Toolbar>
         }
       />
 
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
-        <NetworkVitals data={network.data} expectedNodes={nodeStates.data?.total} compact />
+        <NetworkVitals
+          data={network.data}
+          expectedNodes={nodeStates.data?.total}
+          compact
+        />
       </div>
 
       <div className="flex flex-wrap gap-1">
         {METRIC_TYPES.map((type) => {
           const info = metricMeta(type);
           const active = type === metric;
-          const collected = network.data?.metric_types_available?.includes(type);
           return (
             <button
               key={type}
               type="button"
               className="btn btn-sm"
-              disabled={!collected}
-              title={
-                collected
-                  ? undefined
-                  : "Métrique non publiée par les connecteurs actifs sur cette fenêtre"
-              }
               style={{
                 background: active ? "var(--accent-soft)" : undefined,
                 borderColor: active ? "var(--accent)" : undefined,
@@ -161,8 +168,9 @@ export default function PerformancePage() {
             title={meta.label}
             subtitle={
               points.length
-                ? `moyenne sur ${points.at(-1)?.nb_nodes ?? 0} équipements · ${hours <= 48 ? "données brutes" : "agrégat horaire"
-                }`
+                ? `moyenne de ${points.at(-1)?.nb_nodes ?? 0}/${points.at(-1)?.sampled_nodes ?? 0} équipements mesurés, échantillon priorisé par alertes · ${
+                    hours <= 48 ? "données brutes" : "agrégat horaire"
+                  }`
                 : undefined
             }
           >
@@ -170,14 +178,16 @@ export default function PerformancePage() {
               query={series}
               compact
               emptyMessage="Aucune mesure sur cette fenêtre"
-              emptyHint="Le connecteur ne publie pas cette métrique, ou la collecte est arrêtée — voir l'écran Collecte ETL."
+              emptyHint="Zabbix, Centreon et NetXMS peuvent publier ces séries; iTop fournit la CMDB, pas les métriques."
             >
               <LineChart
                 height={280}
                 labels={points.map((point) => smartTime(point.time))}
                 yMax={meta.unit === "%" ? 100 : undefined}
                 targetLine={meta.target}
-                valueFormatter={(value) => `${decimal(value, meta.digits)} ${meta.unit}`}
+                valueFormatter={(value) =>
+                  `${decimal(value, meta.digits)} ${meta.unit}`
+                }
                 legend
                 series={[
                   {
@@ -218,42 +228,74 @@ export default function PerformancePage() {
             subtitle={`sur ${hours} h`}
             flush
           >
-            <QueryBoundary query={top} compact emptyMessage="Aucun classement disponible">
+            <QueryBoundary
+              query={top}
+              compact
+              emptyMessage="Aucun classement disponible"
+            >
               {(items) => {
-                const max = Math.max(...items.map((item) => item.avg_value), 1);
+                const ranked = [...items].sort((left, right) =>
+                  meta.higherIsBetter === true
+                    ? left.avg_value - right.avg_value
+                    : right.avg_value - left.avg_value,
+                );
+                const max = Math.max(
+                  ...ranked.map((item) => item.avg_value),
+                  1,
+                );
                 return (
-                  <ul className="divide-y" style={{ borderColor: "var(--border)" }}>
-                    {items.map((item, index) => (
+                  <ul
+                    className="divide-y"
+                    style={{ borderColor: "var(--border)" }}
+                  >
+                    {ranked.map((item, index) => (
                       <li key={item.node_id} className="px-2.5 py-1.5">
                         <div className="flex items-baseline gap-2">
-                          <span className="num text-[10.5px]" style={{ color: "var(--ink-3)", width: 16 }}>
+                          <span
+                            className="num text-[10.5px]"
+                            style={{ color: "var(--ink-3)", width: 16 }}
+                          >
                             {index + 1}
                           </span>
                           <Link
                             to={`/equipements/${item.node_id}`}
                             className="text-[12px] font-medium truncate flex-1"
-                            style={{ color: "var(--ink)", textDecoration: "none" }}
+                            style={{
+                              color: "var(--ink)",
+                              textDecoration: "none",
+                            }}
                           >
                             {item.node_name}
                           </Link>
                           <span
                             className="num text-[12px]"
-                            style={{ color: thresholdColor(metric, item.avg_value) ?? "var(--ink)" }}
+                            style={{
+                              color:
+                                thresholdColor(metric, item.avg_value) ??
+                                "var(--ink)",
+                            }}
                           >
                             {formatValue(item.avg_value)}
                           </span>
                         </div>
-                        <div className="flex items-center gap-2 mt-0.5 pl-[24px]">
-                          <span className="text-[10.5px] flex-1 truncate" style={{ color: "var(--ink-3)" }}>
-                            {item.locality} · max {formatValue(item.max_value)} ·{" "}
-                            <span className="num">{num(item.nb_points)}</span> pts
+                        <div className="flex items-center gap-2 mt-0.5 pl-6">
+                          <span
+                            className="text-[10.5px] flex-1 truncate"
+                            style={{ color: "var(--ink-3)" }}
+                          >
+                            {item.locality} · max {formatValue(item.max_value)}{" "}
+                            · <span className="num">{num(item.nb_points)}</span>{" "}
+                            pts
                           </span>
                           <div style={{ width: 52 }}>
                             <Meter
                               value={item.avg_value}
                               max={max}
                               height={3}
-                              color={thresholdColor(metric, item.avg_value) ?? "var(--accent)"}
+                              color={
+                                thresholdColor(metric, item.avg_value) ??
+                                "var(--accent)"
+                              }
                             />
                           </div>
                         </div>

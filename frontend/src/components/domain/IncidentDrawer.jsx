@@ -43,6 +43,7 @@ export default function IncidentDrawer({ incidentId, open, onClose }) {
 
   const [panel, setPanel] = useState(null); // resolve | assign | escalate | comment
   const [text, setText] = useState("");
+  const [cause, setCause] = useState("");
   const [targetUserId, setTargetUserId] = useState("");
   const [feedback, setFeedback] = useState(null);
 
@@ -63,6 +64,7 @@ export default function IncidentDrawer({ incidentId, open, onClose }) {
   const reset = () => {
     setPanel(null);
     setText("");
+    setCause("");
     setTargetUserId("");
   };
 
@@ -187,6 +189,15 @@ export default function IncidentDrawer({ incidentId, open, onClose }) {
             >
               {panel === "resolve" && (
                 <>
+                  <Field label="Cause confirmée" hint="Facultatif. Renseignez la cause après diagnostic.">
+                    <input
+                      className="input"
+                      maxLength={200}
+                      value={cause}
+                      onChange={(event) => setCause(event.target.value)}
+                      placeholder="Ex. coupure de fibre, panne d'alimentation"
+                    />
+                  </Field>
                   <Field
                     label="Compte rendu de résolution"
                     required
@@ -206,7 +217,11 @@ export default function IncidentDrawer({ incidentId, open, onClose }) {
                     disabled={busy || text.trim().length < RESOLVE_MIN_LENGTH}
                     onClick={() =>
                       run(
-                        actions.resolve.mutateAsync({ id: incident.id, notes: text.trim() }),
+                        actions.resolve.mutateAsync({
+                          id: incident.id,
+                          cause: cause.trim() || null,
+                          notes: text.trim(),
+                        }),
                         "Incident résolu.",
                       )
                     }
@@ -353,6 +368,24 @@ export default function IncidentDrawer({ incidentId, open, onClose }) {
               <DefRow label="Acquitté" mono>
                 {incident.acknowledged_at ? dateTime(incident.acknowledged_at) : "—"}
               </DefRow>
+              <DefRow label="Acquitté dans la source">
+                {incident.source_acknowledged_by || "—"}
+              </DefRow>
+              {incident.source_acknowledged_at && (
+                <DefRow label="Date d'acquittement source" mono>
+                  {dateTime(incident.source_acknowledged_at)}
+                </DefRow>
+              )}
+              {incident.source_acknowledgement_note && (
+                <DefRow label="Commentaire source">
+                  {incident.source_acknowledgement_note}
+                </DefRow>
+              )}
+              {incident.last_change_at && (
+                <DefRow label="Dernier changement" mono>
+                  {dateTime(incident.last_change_at)}
+                </DefRow>
+              )}
               <DefRow label="Résolu" mono>
                 {incident.resolved_at ? dateTime(incident.resolved_at) : "—"}
               </DefRow>
@@ -389,6 +422,25 @@ export default function IncidentDrawer({ incidentId, open, onClose }) {
               <DefRow label="Affecté à">
                 {incident.assigned_to_full_name || "Personne"}
               </DefRow>
+              {incident.source_status && (
+                <DefRow label="Statut source">{incident.source_status}</DefRow>
+              )}
+              {incident.source_assignee && (
+                <DefRow label="Agent source">{incident.source_assignee}</DefRow>
+              )}
+              {incident.source_team && (
+                <DefRow label="Équipe source">{incident.source_team}</DefRow>
+              )}
+              {incident.business_service && (
+                <DefRow label="Service métier">{incident.business_service}</DefRow>
+              )}
+              {incident.is_maintenance && (
+                <DefRow label="Maintenance source">
+                  {incident.maintenance_until
+                    ? `Jusqu'au ${dateTime(incident.maintenance_until)}`
+                    : incident.maintenance_reason || "Oui"}
+                </DefRow>
+              )}
               {incident.itop_ticket_ref && (
                 <DefRow label="Ticket iTop" mono>
                   {incident.itop_ticket_ref}

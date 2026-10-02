@@ -84,6 +84,15 @@ async def sites(current_user: User = Depends(get_current_user)):
         raise _unavailable(exc) from exc
 
 
+@router.get("/organisations")
+async def organisations(_current_user: User = Depends(get_current_user)):
+    """État courant du parc, regroupé par ministère/structure iTop."""
+    try:
+        return await live_service.organisations_summary()
+    except live_service.SnapshotUnavailable as exc:
+        raise _unavailable(exc) from exc
+
+
 @router.get("/alerts/by-severity")
 async def alerts_by_severity(current_user: User = Depends(get_current_user)):
     try:
@@ -104,6 +113,15 @@ async def alerts_by_tool(current_user: User = Depends(get_current_user)):
 async def hour_distribution(current_user: User = Depends(get_current_user)):
     try:
         return await kpi_service.hour_distribution()
+    except live_service.SnapshotUnavailable as exc:
+        raise _unavailable(exc) from exc
+
+
+@router.get("/sla/source-targets")
+async def source_sla_targets(current_user: User = Depends(get_current_user)):
+    """Engagements publiés par les outils sources (notamment les SLT iTop)."""
+    try:
+        return await live_service.get_source_sla_targets()
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
 
@@ -295,6 +313,9 @@ async def network_series(
     metric: str = Query("latency_ms", pattern=_one_of(METRIC_TYPES)),
     period: str = Query("24h", pattern=_PERIOD_PATTERN),
     sample: int = Query(12, ge=1, le=50),
+    site: str | None = Query(None, max_length=150),
+    organisation: str | None = Query(None, max_length=200),
+    node_type: str | None = Query(None, max_length=100),
     current_user: User = Depends(get_current_user),
 ):
     """Courbe agrégée du réseau, sur un ÉCHANTILLON d'équipements.
@@ -305,7 +326,9 @@ async def network_series(
     La réponse indique sur combien d'équipements la courbe porte.
     """
     try:
-        return await metrics_service.network_series(metric, period, sample)
+        return await metrics_service.network_series(
+            metric, period, sample, site, organisation, node_type
+        )
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
 

@@ -34,14 +34,19 @@ logger = logging.getLogger(__name__)
 
 
 def _observe_rollup(
-    merged: list[MergedNode], alerts: list[Alert], at: datetime
+    merged: list[MergedNode], alerts: list[Alert], at: datetime, *, complete: bool
 ) -> None:
     """Ventile l'observation du cycle par site, pour le bilan journalier.
 
     Une entrée « tous sites confondus » (site None) est tenue en plus des
     entrées par site : sans elle, le total du parc ne serait pas la somme des
     sites, puisque les équipements sans localité connue en sont absents.
+    Un cycle incomplet est exclu : les sources manquantes feraient baisser
+    artificiellement les alertes et pourraient gonfler la disponibilité.
     """
+    if not complete:
+        return
+
     day = at.date()
     observe(day, None, merged, alerts)
 
@@ -81,22 +86,31 @@ async def poll_tool(name: str, client) -> ToolSnapshot:
         logger.warning("%s injoignable : %s", name, health.error)
         return ToolSnapshot(health=health)
 
-    nodes_task = asyncio.create_task(client.fetch_nodes())
-    alerts_task = asyncio.create_task(client.fetch_alerts())
-    results = await asyncio.gather(nodes_task, alerts_task, return_exceptions=True)
+    tasks = [
+        asyncio.create_task(client.fetch_nodes()),
+        asyncio.create_task(client.fetch_alerts()),
+    ]
+    fetch_sla_targets = getattr(client, "fetch_sla_targets", None)
+    if callable(fetch_sla_targets):
+        tasks.append(asyncio.create_task(fetch_sla_targets()))
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
     nodes: list[Node] = []
     alerts: list[Alert] = []
+    service_levels = ()
     errors: list[str] = []
 
-    for label, result in zip(("inventaire", "alertes"), results):
+    for label, result in zip(("inventaire", "alertes", "objectifs SLA"), results):
         if isinstance(result, BaseException):
             logger.warning("%s : échec de la collecte des %s — %s", name, label, result)
-            errors.append(f"{label} : {result}")
+            if label != "objectifs SLA":
+                errors.append(f"{label} : {result}")
         elif label == "inventaire":
             nodes = list(result)
-        else:
+        elif label == "alertes":
             alerts = list(result)
+        else:
+            service_levels = tuple(result)
 
     if errors:
         # L'outil a répondu au contrôle de santé mais pas à la donnée : c'est
@@ -113,7 +127,12 @@ async def poll_tool(name: str, client) -> ToolSnapshot:
     logger.info(
         "%s : %d équipement(s), %d alerte(s) active(s)", name, len(nodes), len(alerts)
     )
-    return ToolSnapshot(health=health, nodes=tuple(nodes), alerts=tuple(alerts))
+    return ToolSnapshot(
+        health=health,
+        nodes=tuple(nodes),
+        alerts=tuple(alerts),
+        sla_targets=service_levels,
+    )
 
 
 async def run_cycle(
@@ -142,6 +161,7 @@ async def run_cycle(
 
     all_nodes: list[Node] = []
     all_alerts: list[Alert] = []
+    all_sla_targets: list[dict] = []
     tools_ok: list[str] = []
     tools_failed: list[str] = []
 
@@ -170,6 +190,9 @@ async def run_cycle(
         await store.write_tool_health(snapshot.health)
         all_nodes.extend(snapshot.nodes)
         all_alerts.extend(snapshot.alerts)
+        all_sla_targets.extend(
+            {"tool": name, **target} for target in snapshot.sla_targets
+        )
         (tools_ok if snapshot.health.reachable else tools_failed).append(name)
 
     merged, report = merge_nodes(all_nodes)
@@ -192,13 +215,25 @@ async def run_cycle(
     }
     meta["orphan_alerts"] = len(orphans)
 
-    await store.write_snapshot(merged, all_alerts, meta)
+    if not tools_ok:
+        logger.error(
+            "Aucune source n'a répondu; instantané précédent conservé (échecs : %s)",
+            ", ".join(tools_failed) or "aucune source configurée",
+        )
+        return meta
 
-    # Alimente les compteurs du bilan journalier (collector/rollup.py). Fait
-    # ici, dans le cycle, et non par une requête séparée : l'agrégat doit
-    # porter sur ce qui a RÉELLEMENT été observé, cycle par cycle, y compris
-    # les cycles où un outil manquait à l'appel.
-    _observe_rollup(merged, all_alerts, started_at)
+    await store.write_snapshot(merged, all_alerts, meta, all_sla_targets)
+
+    # Les instantanés partiels restent utiles à l'exploitation, mais ne
+    # constituent pas une mesure comparable pour les KPI historiques.
+    complete = bool(tools_ok) and not tools_failed
+    _observe_rollup(merged, all_alerts, started_at, complete=complete)
+    if not complete:
+        logger.warning(
+            "Agrégat journalier ignoré : collecte incomplète (%d outil(s) OK, %d en échec)",
+            len(tools_ok),
+            len(tools_failed),
+        )
 
     # La diffusion se fait APRÈS l'écriture de l'instantané : un navigateur
     # réveillé par une nouvelle alerte va immédiatement relire le parc, et il

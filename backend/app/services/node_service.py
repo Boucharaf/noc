@@ -64,6 +64,8 @@ async def list_nodes(
     site: str | None = None,
     tool: str | None = None,
     search: str | None = None,
+    organisation: str | None = None,
+    node_type: str | None = None,
     sort: str = "state",
     limit: int = 200,
     offset: int = 0,
@@ -95,6 +97,10 @@ async def list_nodes(
         if site and node.get("site") != site:
             return False
         if tool and tool not in (node.get("sources") or {}):
+            return False
+        if organisation and node.get("organisation") != organisation:
+            return False
+        if node_type and node.get("node_type") != node_type:
             return False
         if search:
             needle = search.strip().lower()

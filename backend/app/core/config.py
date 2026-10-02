@@ -19,6 +19,8 @@ base ne contient plus ni métriques ni faits. Voir ARCHITECTURE.md.
 """
 import os
 
+from integrations.models import METRIC_TYPES
+
 
 def _bool(name: str, default: bool = False) -> bool:
     return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
@@ -206,15 +208,6 @@ VALID_ROLES = ("directeur", "chef_noc", "technicien", "agent_terrain")
 # divergence entre les deux ferait disparaître des alertes des décomptes.
 SEVERITIES = ("critical", "high", "medium", "low", "info", "unknown")
 NODE_STATES = ("down", "degraded", "silent", "maintenance", "up", "unknown")
-METRIC_TYPES = (
-    "latency_ms",
-    "packet_loss_pct",
-    "bandwidth_in_mbps",
-    "bandwidth_out_mbps",
-    "cpu_pct",
-    "ram_pct",
-    "availability_pct",
-)
 
 # Heures ouvrées du NOC : sert au KPI « alertes détectées hors heures ».
 NOC_BUSINESS_HOURS = (

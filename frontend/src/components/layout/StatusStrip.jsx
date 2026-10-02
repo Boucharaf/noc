@@ -26,7 +26,7 @@ function Counter({ label, value, color, to, title, alert = false }) {
         className={`num font-semibold ${alert ? "blink-critical" : ""}`}
         style={{ fontSize: 14, color }}
       >
-        {num(value, "0")}
+        {value == null ? "—" : num(value)}
       </span>
       <span className="text-[10px] uppercase tracking-[0.06em]" style={{ color: "var(--ink-3)" }}>
         {label}

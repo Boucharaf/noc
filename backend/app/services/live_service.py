@@ -59,6 +59,13 @@ async def get_alerts() -> list[dict]:
     return alerts
 
 
+async def get_source_sla_targets() -> list[dict]:
+    targets = await get_store().read_sla_targets()
+    if targets is None:
+        raise SnapshotUnavailable()
+    return targets
+
+
 async def get_node(node_id: str) -> dict | None:
     """Un équipement par son identifiant de fusion.
 
@@ -205,3 +212,37 @@ async def sites_summary() -> list[dict]:
     rows = list(sites.values())
     rows.sort(key=lambda r: (-r["down"], -r["degraded"], -r["alerts"], r["site"]))
     return rows
+
+
+def summarise_organisations(nodes: list[dict]) -> list[dict]:
+    """État instantané du parc regroupé par structure déclarée dans la CMDB."""
+    organisations: dict[str, dict] = {}
+    for node in nodes:
+        name = str(node.get("organisation") or "").strip() or "Structure non renseignée"
+        row = organisations.setdefault(
+            name,
+            {
+                "organisation": name,
+                "nodes_total": 0,
+                "nodes_up": 0,
+                "nodes_down": 0,
+                "nodes_degraded": 0,
+                "nodes_silent": 0,
+                "nodes_maintenance": 0,
+            },
+        )
+        row["nodes_total"] += 1
+        state = node.get("state", "unknown")
+        if state in {"up", "down", "degraded", "silent", "maintenance"}:
+            row[f"nodes_{state}"] += 1
+
+    rows = list(organisations.values())
+    for row in rows:
+        row["availability_pct"] = round(100 * row["nodes_up"] / row["nodes_total"], 2)
+    rows.sort(key=lambda row: (row["availability_pct"], row["organisation"].casefold()))
+    return rows
+
+
+async def organisations_summary() -> list[dict]:
+    """État du parc par ministère/structure, depuis l'instantané courant."""
+    return summarise_organisations(await get_nodes())
