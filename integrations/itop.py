@@ -75,6 +75,8 @@ _TICKET_FIELDS = (
     "team_id_friendlyname,service_id_friendlyname"
 )
 _TICKET_BASE_FIELDS = "id,ref,title,status,start_date,last_update,priority,org_id_friendlyname,functionalcis_list"
+_PAGE_SIZE = 500
+_MAX_PAGES = 200
 
 # Statuts iTop considérés comme CLOS. Un ticket clos n'entre pas dans
 # l'instantané : il appartient à l'historique, qui reste chez iTop.
@@ -145,7 +147,7 @@ class ITopClient(SourceClient):
         return await self._health(probe)
 
     async def _get_class(
-        self, cls: str, fields: str, optional_fields: tuple[str, ...] = ()
+        self, cls: str, fields: str, optional_fields: tuple[str, ...] = (), page: int = 1
     ) -> dict | None:
         """`core/get` sur une classe, avec repli sur les attributs minimaux.
 
@@ -158,7 +160,13 @@ class ITopClient(SourceClient):
         try:
             return await self._call(
                 "core/get",
-                {"class": cls, "key": f"SELECT {cls}", "output_fields": fields},
+                {
+                    "class": cls,
+                    "key": f"SELECT {cls}",
+                    "output_fields": fields,
+                    "limit": _PAGE_SIZE,
+                    "page": page,
+                },
             )
         except ToolUnavailable as exc:
             if "invalid attribute" not in str(exc).lower() or fields == _MINIMAL_FIELDS:
@@ -167,7 +175,7 @@ class ITopClient(SourceClient):
             if optional_fields:
                 self._unsupported_ci_fields.setdefault(cls, set()).add(optional_fields[-1])
                 return await self._get_class(
-                    cls, fields.rsplit(",", 1)[0], optional_fields[:-1]
+                    cls, fields.rsplit(",", 1)[0], optional_fields[:-1], page
                 )
             logger.info(
                 "iTop : classe %s — attribut refusé, repli sur les champs "
@@ -175,7 +183,7 @@ class ITopClient(SourceClient):
                 cls,
                 exc,
             )
-            return await self._get_class(cls, _MINIMAL_FIELDS)
+            return await self._get_class(cls, _MINIMAL_FIELDS, page=page)
 
     async def fetch_nodes(self) -> list[Node]:
         nodes: list[Node] = []
@@ -186,37 +194,45 @@ class ITopClient(SourceClient):
                 if field not in unsupported
             )
             query_fields = ",".join((fields, *optional_fields))
-            result = await self._get_class(cls, query_fields, optional_fields)
-            if result is None:
-                continue
+            for page in range(1, _MAX_PAGES + 1):
+                result = await self._get_class(cls, query_fields, optional_fields, page)
+                if result is None:
+                    if page > 1:
+                        logger.warning("iTop : pagination interrompue pour %s à la page %d", cls, page)
+                    break
 
-            for obj in (result.get("objects") or {}).values():
-                fields = obj.get("fields") or {}
-                status = str(fields.get("status", "")).lower()
-                nodes.append(
-                    Node(
-                        tool=self.name,
-                        ref=str(obj.get("key")),
-                        name=fields.get("name") or "(sans nom)",
-                        hostname=fields.get("name") or "",
-                        ip=fields.get("managementip") or None,
-                        # iTop est un référentiel : il déclare ce qui DEVRAIT
-                        # exister, pas ce qui répond. L'état vient de la
-                        # supervision, jamais d'ici.
-                        state="unknown",
-                        enabled=status not in RETIRED_STATES,
-                        organisation=fields.get("org_id_friendlyname") or None,
-                        site=fields.get("location_id_friendlyname") or None,
-                        node_type=cls,
-                        criticality=fields.get("business_criticity") or None,
-                        owner=(
-                            fields.get("support_team_id_friendlyname")
-                            or fields.get("contact_id_friendlyname")
-                            or None
-                        ),
-                        business_service=fields.get("service_id_friendlyname") or None,
+                objects = result.get("objects") or {}
+                for obj in objects.values():
+                    obj_fields = obj.get("fields") or {}
+                    status = str(obj_fields.get("status", "")).lower()
+                    nodes.append(
+                        Node(
+                            tool=self.name,
+                            ref=str(obj.get("key")),
+                            name=obj_fields.get("name") or "(sans nom)",
+                            hostname=obj_fields.get("name") or "",
+                            ip=obj_fields.get("managementip") or None,
+                            # iTop est un référentiel : il déclare ce qui DEVRAIT
+                            # exister, pas ce qui répond. L'état vient de la
+                            # supervision, jamais d'ici.
+                            state="unknown",
+                            enabled=status not in RETIRED_STATES,
+                            organisation=obj_fields.get("org_id_friendlyname") or None,
+                            site=obj_fields.get("location_id_friendlyname") or None,
+                            node_type=cls,
+                            criticality=obj_fields.get("business_criticity") or None,
+                            owner=(
+                                obj_fields.get("support_team_id_friendlyname")
+                                or obj_fields.get("contact_id_friendlyname")
+                                or None
+                            ),
+                            business_service=obj_fields.get("service_id_friendlyname") or None,
+                        )
                     )
-                )
+                if len(objects) < _PAGE_SIZE:
+                    break
+            else:
+                logger.warning("iTop : pagination interrompue après %d pages pour %s", _MAX_PAGES, cls)
         return nodes
 
     async def fetch_alerts(self) -> list[Alert]:

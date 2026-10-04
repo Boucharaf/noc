@@ -7,12 +7,17 @@ faibles privilèges pourrait appeler ces routes directement en HTTP.
 """
 import hmac
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.core import session_store
-from app.core.config import INTERNAL_API_KEY
+from app.core.config import (
+    INTERNAL_API_KEY,
+    RATE_LIMIT_USER_READ_PER_MIN,
+    RATE_LIMIT_USER_WRITE_PER_MIN,
+)
+from app.core.rate_limit import enforce_rate_limit, request_scope
 from app.db.session import get_db
 from app.models import User
 from app.services.auth_service import decode_access_token
@@ -21,6 +26,7 @@ bearer_scheme = HTTPBearer(auto_error=True)
 
 
 def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> User:
@@ -44,6 +50,10 @@ def get_current_user(
     # doivent plus rien ouvrir, même s'ils n'ont pas encore expiré.
     if session_store.is_access_token_revoked(user.id, payload.get("iat")):
         raise HTTPException(status_code=401, detail="Session révoquée, reconnexion nécessaire.")
+
+    scope = request_scope(request)
+    limit = RATE_LIMIT_USER_READ_PER_MIN if scope == "read" else RATE_LIMIT_USER_WRITE_PER_MIN
+    enforce_rate_limit(scope, limit, "user", str(user.id))
 
     return user
 

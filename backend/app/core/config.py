@@ -100,14 +100,16 @@ REFRESH_COOKIE_SECURE = _bool("REFRESH_COOKIE_SECURE", True)
 CORS_ORIGINS = _csv("CORS_ORIGINS", "http://localhost,http://localhost:5173")
 
 RATE_LIMIT_ENABLED = _bool("RATE_LIMIT_ENABLED", True)
-RATE_LIMIT_READ_PER_MIN = int(os.getenv("RATE_LIMIT_READ_PER_MIN", "100"))
-RATE_LIMIT_WRITE_PER_MIN = int(os.getenv("RATE_LIMIT_WRITE_PER_MIN", "30"))
+RATE_LIMIT_READ_PER_MIN = int(os.getenv("RATE_LIMIT_READ_PER_MIN", "1200"))
+RATE_LIMIT_WRITE_PER_MIN = int(os.getenv("RATE_LIMIT_WRITE_PER_MIN", "120"))
+RATE_LIMIT_USER_READ_PER_MIN = int(os.getenv("RATE_LIMIT_USER_READ_PER_MIN", "1200"))
+RATE_LIMIT_USER_WRITE_PER_MIN = int(os.getenv("RATE_LIMIT_USER_WRITE_PER_MIN", "120"))
 
 # Verrouillage de la connexion par mot de passe après échecs répétés, sur une
 # fenêtre glissante. Voir routes/auth.py::_login_scopes pour les trois
 # compteurs et ce que chacun arrête.
 LOGIN_MAX_FAILURES_PER_USER = int(os.getenv("LOGIN_MAX_FAILURES_PER_USER", "10"))
-LOGIN_MAX_FAILURES_PER_IP = int(os.getenv("LOGIN_MAX_FAILURES_PER_IP", "30"))
+LOGIN_MAX_FAILURES_PER_IP = int(os.getenv("LOGIN_MAX_FAILURES_PER_IP", "60"))
 LOGIN_LOCK_WINDOW_SECONDS = int(os.getenv("LOGIN_LOCK_WINDOW_SECONDS", "900"))
 
 # Politique des secrets saisis par les utilisateurs. 12 caractères : en deçà,

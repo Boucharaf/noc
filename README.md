@@ -122,6 +122,26 @@ Chaque utilisateur modifie ensuite ses propres identifiants dans *Mon compte*.
 À ce stade, **le tableau de bord est vide** : aucune source de données n'est
 branchée. C'est normal — voir la section suivante.
 
+### Faire évoluer le schéma de la base
+
+Un volume PostgreSQL neuf reçoit le schéma initial depuis
+`backend/sql/schema.sql`. Au démarrage, le backend exécute ensuite
+`alembic upgrade head` avant de lancer l'API. La révision de baseline marque
+ce schéma existant sans tenter de recréer ses tables; les changements futurs
+doivent être ajoutés comme révisions dans `backend/migrations/versions/`.
+
+Depuis un environnement de développement configuré vers une base de test :
+
+```bash
+cd backend
+alembic revision --autogenerate -m "describe schema change"
+```
+
+Relire et corriger la migration générée avant de la versionner. Lors du
+déploiement, `docker compose up -d --build backend` applique les révisions
+avant que les workers API démarrent. Garder `schema.sql` à jour pour que les
+installations neuves partent du même schéma courant.
+
 ---
 
 ## 3. Choisir ses sources de données

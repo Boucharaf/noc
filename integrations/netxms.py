@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 # conteneurs, les sous-réseaux et les grappes : les remonter comme des
 # équipements gonflerait le parc d'objets qui ne sont pas des machines.
 _NODE_CLASSES = frozenset({"Node", "AccessPoint"})
+_PAGE_SIZE = 500
+_MAX_PAGES = 200
 
 # État d'un objet NetXMS : 0 Normal, 1 Warning, 2 Minor, 3 Major,
 # 4 Critical, 5 Unknown, 6 Unmanaged, 7 Disabled, 8 Testing.
@@ -66,10 +68,41 @@ class NetXMSClient(SourceClient):
 
         return await self._health(probe)
 
+    async def _get_all(self, path: str, params: dict, collection: str) -> list[dict]:
+        objects: list[dict] = []
+        seen_ids: set[str] = set()
+
+        for page in range(_MAX_PAGES):
+            body = await self._get(
+                path,
+                {**params, "offset": page * _PAGE_SIZE, "limit": _PAGE_SIZE},
+            )
+            rows = body if isinstance(body, list) else (body.get(collection) or [])
+            if not rows:
+                return objects
+
+            added = 0
+            for item in rows:
+                object_id = str(item.get("objectId") or item.get("id") or "")
+                if object_id and object_id in seen_ids:
+                    continue
+                if object_id:
+                    seen_ids.add(object_id)
+                objects.append(item)
+                added += 1
+
+            if len(rows) < _PAGE_SIZE:
+                return objects
+            if not added:
+                logger.warning("NetXMS : pagination arrêtée, page répétée à l'offset %d", page * _PAGE_SIZE)
+                return objects
+
+        logger.warning("NetXMS : pagination interrompue après %d pages", _MAX_PAGES)
+        return objects
+
     async def fetch_nodes(self) -> list[Node]:
-        body = await self._get("/objects", {"class": "Node"})
         nodes: list[Node] = []
-        for obj in body.get("objects", body if isinstance(body, list) else []):
+        for obj in await self._get_all("/objects", {"class": "Node"}, "objects"):
             if obj.get("objectClass") and obj["objectClass"] not in _NODE_CLASSES:
                 continue
             nodes.append(

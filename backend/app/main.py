@@ -39,6 +39,7 @@ from app.core.config import (
     LOG_LEVEL,
     REALTIME_ENABLED,
 )
+from app.core.rate_limit import rate_limit_middleware
 from app.db.session import SessionLocal
 from app.routes import all_routers
 from app.services.realtime_service import subscribe_loop
@@ -177,6 +178,8 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Request-Id"],
 )
+
+app.middleware("http")(rate_limit_middleware)
 
 
 @app.middleware("http")

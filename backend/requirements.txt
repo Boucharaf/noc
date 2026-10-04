@@ -10,6 +10,7 @@ pydantic==2.13.5
 # Plus aucune métrique ni fait : voir backend/sql/schema.sql.
 sqlalchemy==2.0.36
 psycopg2-binary==2.9.10
+alembic==1.16.5
 
 # Redis : instantané du parc, cache d'historique, sessions, temps réel.
 # C'est la dépendance du chemin chaud — tous les écrans « maintenant » en

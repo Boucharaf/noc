@@ -66,10 +66,12 @@ CREATE TABLE IF NOT EXISTS noc_user (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Colonnes apparues après la première mise en service. CREATE TABLE IF NOT
--- EXISTS ne modifie pas une table existante : sans ces ALTER, une base créée
--- avant leur ajout resterait sans elles. Ce fichier se rejoue donc sans
--- danger sur une base en service, et c'est ainsi qu'on la met à jour :
+-- Colonnes présentes dans le bootstrap courant. CREATE TABLE IF NOT EXISTS
+-- ne modifie pas une table existante : les ALTER idempotents conservent la
+-- compatibilité avec les volumes créés avant ces colonnes. Le schéma complet
+-- est le bootstrap initial; les évolutions ultérieures sont versionnées avec
+-- Alembic (backend/migrations) et appliquées avant le démarrage de l'API.
+-- Pour une réparation/bootstrap manuel d'une base existante :
 --   docker compose exec -T postgres psql -U noc -d noc < backend/sql/schema.sql
 ALTER TABLE noc_user ADD COLUMN IF NOT EXISTS email TEXT;
 ALTER TABLE noc_user ADD COLUMN IF NOT EXISTS notify_email BOOLEAN NOT NULL DEFAULT FALSE;

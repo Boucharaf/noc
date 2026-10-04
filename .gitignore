@@ -27,3 +27,17 @@ netxmsbd07082026.sql
 database/*dump*.sql
 
 informations essentielles par profil.docx
+
+
+
+# Python
+*.py[cod]
+
+# Node
+dist-ssr/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+

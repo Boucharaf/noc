@@ -39,6 +39,8 @@ logger = logging.getLogger(__name__)
 # Au-delà de cette ancienneté, les valeurs brutes ont été purgées par le
 # housekeeper de Zabbix : on bascule sur les tendances horaires.
 _TREND_THRESHOLD = timedelta(days=7)
+_PROBLEM_PAGE_SIZE = 5000
+_PROBLEM_MAX_PAGES = 200
 
 # Correspondance clé d'item Zabbix -> type de métrique du NOC. La clé est
 # comparée sur sa RACINE (avant le premier crochet) : `net.if.in[eth0]` et
@@ -218,18 +220,7 @@ class ZabbixClient(SourceClient):
         return nodes
 
     async def fetch_alerts(self) -> list[Alert]:
-        problems = await self._call(
-            "problem.get",
-            {
-                "output": "extend",
-                "selectAcknowledges": ["clock", "action", "userid", "message"],
-                "selectSuppressionData": ["maintenanceid", "suppress_until"],
-                "recent": False,        # uniquement ce qui est encore en cours
-                "sortfield": ["eventid"],
-                "sortorder": "DESC",
-                "limit": 5000,
-            },
-        )
+        problems = await self._fetch_all_problems()
         # problem.get ne renvoie pas l'hôte : il faut le résoudre par les
         # déclencheurs. Un seul appel groupé plutôt qu'un par alerte — sur un
         # parc en crise, la différence est entre une requête et plusieurs
@@ -295,6 +286,43 @@ class ZabbixClient(SourceClient):
                 )
             )
         return alerts
+
+    async def _fetch_all_problems(self) -> list[dict]:
+        """Récupère les problèmes actifs par curseur d'eventid.
+
+        L'API Zabbix n'expose pas d'offset pour `problem.get`; `eventid_from`
+        permet de parcourir des pages triées sans redemander les mêmes lignes.
+        """
+        problems: list[dict] = []
+        cursor = 0
+        for _ in range(_PROBLEM_MAX_PAGES):
+            params = {
+                "output": "extend",
+                "selectAcknowledges": ["clock", "action", "userid", "message"],
+                "selectSuppressionData": ["maintenanceid", "suppress_until"],
+                "recent": False,
+                "sortfield": ["eventid"],
+                "sortorder": "ASC",
+                "limit": _PROBLEM_PAGE_SIZE,
+            }
+            if cursor:
+                params["eventid_from"] = str(cursor + 1)
+
+            page = await self._call("problem.get", params)
+            if not page:
+                return problems
+            problems.extend(page)
+            if len(page) < _PROBLEM_PAGE_SIZE:
+                return problems
+
+            last_event_id = int(page[-1]["eventid"])
+            if last_event_id <= cursor:
+                logger.warning("Zabbix : pagination arrêtée, curseur eventid sans progression")
+                return problems
+            cursor = last_event_id
+
+        logger.warning("Zabbix : pagination interrompue après %d pages", _PROBLEM_MAX_PAGES)
+        return problems
 
     async def _hosts_by_trigger(self, trigger_ids: list[str]) -> dict[str, dict]:
         if not trigger_ids:
