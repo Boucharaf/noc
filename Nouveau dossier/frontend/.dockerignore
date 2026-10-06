@@ -1,8 +1,0 @@
-node_modules
-dist
-dev-dist
-.env
-.env.*
-*.log
-.vscode
-.idea
