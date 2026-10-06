@@ -90,7 +90,12 @@ def update_target(
     }
 
 
-def compliance(db: Session, days: int = 30) -> dict:
+def compliance(
+    db: Session,
+    days: int = 30,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+) -> dict:
     """Taux de respect, par gravité, sur la période.
 
     Le calcul est fait EN SQL et non en Python : compter des alertes tenues
@@ -103,7 +108,11 @@ def compliance(db: Session, days: int = 30) -> dict:
     dégraderait le taux à cause d'alertes qu'on est peut-être en train de
     traiter dans les délais.
     """
-    since = datetime.now(timezone.utc) - timedelta(days=days)
+    if (start_at is None) != (end_at is None):
+        raise ValueError("start_at et end_at doivent être fournis ensemble.")
+    if start_at is None:
+        end_at = datetime.now(timezone.utc)
+        start_at = end_at - timedelta(days=days)
     goals = targets(db)
     ttr_seconds = func.extract(
         "epoch", AlertState.resolved_at - AlertState.detected_at
@@ -145,7 +154,7 @@ def compliance(db: Session, days: int = 30) -> dict:
             func.sum(resolved_with_target).label("resolved_with_target"),
             func.sum(breached).label("breached"),
         )
-        .where(AlertState.detected_at >= since)
+        .where(AlertState.detected_at >= start_at, AlertState.detected_at < end_at)
         .group_by(AlertState.severity_at_pickup)
     ).all()
 
@@ -191,14 +200,24 @@ def compliance(db: Session, days: int = 30) -> dict:
     }
 
 
-def breaches(db: Session, days: int = 30, limit: int = 50) -> list[dict]:
+def breaches(
+    db: Session,
+    days: int = 30,
+    limit: int = 50,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+) -> list[dict]:
     """Alertes ayant dépassé leur objectif de résolution.
 
     C'est la liste que le chef du NOC regarde en revue de service : pas un
     pourcentage, mais les cas précis, avec leur cause quand elle a été
     renseignée.
     """
-    since = datetime.now(timezone.utc) - timedelta(days=days)
+    if (start_at is None) != (end_at is None):
+        raise ValueError("start_at et end_at doivent être fournis ensemble.")
+    if start_at is None:
+        end_at = datetime.now(timezone.utc)
+        start_at = end_at - timedelta(days=days)
     goals = targets(db)
     if not goals:
         return []
@@ -228,7 +247,8 @@ def breaches(db: Session, days: int = 30, limit: int = 50) -> list[dict]:
         )
         .where(
             AlertState.resolved_at.isnot(None),
-            AlertState.detected_at >= since,
+            AlertState.detected_at >= start_at,
+            AlertState.detected_at < end_at,
             elapsed > target_case,
         )
         .order_by((elapsed - target_case).desc())

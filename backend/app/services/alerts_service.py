@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 from app.core.config import SEVERITIES
 from app.models import AlertState, ManualIncident, MaintenanceWindow, User
 from app.services import live_service
+from app.services.maintenance_service import covers as maintenance_covers
 
 logger = logging.getLogger(__name__)
 
@@ -70,12 +71,7 @@ def _covered_by_maintenance(
     pour entretien, ce sont tous les équipements du site qui tombent, pas un
     seul — et personne n'a le temps de déclarer trente fenêtres.
     """
-    for window in windows:
-        if window.node_key and window.node_key == node_key:
-            return window
-        if window.site and site and window.site == site:
-            return window
-    return None
+    return maintenance_covers(windows, node_key, site)
 
 
 # ---------------------------------------------------------------------------

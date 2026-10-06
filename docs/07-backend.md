@@ -90,9 +90,22 @@ deux-points : elles doivent être encodées dans les URL.
 | GET / POST / DELETE | `/maintenance` | lecture : tous ; écriture : directeur, chef NOC |
 | GET / PUT | `/sla/targets` | lecture : tous ; écriture : directeur, chef NOC |
 | GET | `/sla/compliance`, `/sla/breaches`, `/sla/at-risk` | tous |
-| GET | `/kpi/trend`, `/kpi/monthly`, `/kpi/sites`, `/kpi/causes`, `/kpi/resolution-times` | tous |
+| GET | `/kpi/trend`, `/kpi/monthly`, `/kpi/monthly-trend`, `/kpi/sites`, `/kpi/causes`, `/kpi/resolution-times` | tous |
 | GET / POST / PATCH | `/field/interventions` | création : directeur, chef NOC, technicien ; mise à jour : tous |
 | GET | `/report/monthly?month=&year=&format=pdf\|docx` | directeur, chef NOC |
+
+Les endpoints `/sla/compliance`, `/sla/breaches` et `/kpi/resolution-times`
+acceptent `month` et `year` ensemble pour calculer sur un mois civil ; sans
+ces deux paramètres, ils conservent leur fenêtre glissante `days`.
+`/kpi/monthly-trend?month=&year=&months=12` renvoie une série mensuelle qui
+se termine au mois demandé. Les compteurs « prises en charge » et « résolues »
+portent sur les alertes enregistrées dans le suivi opérationnel du NOC, tandis
+que les moyennes de disponibilité et d'alertes actives viennent de `kpi_daily`.
+Le rapport mensuel utilise des bornes de mois exactes pour ses tableaux,
+causes, délais et dépassements.
+La disponibilité actuellement agrégée est une mesure globale du parc, pas
+une mesure ventilée par gravité : la page SLA l'affiche donc face à chaque
+seuil configuré, et l'aperçu du rapport retient le seuil le plus exigeant.
 
 ### Notifications, santé, temps réel
 
@@ -124,7 +137,7 @@ c'est voulu.
 | `ops_alert_state` | Le travail du NOC sur une alerte : acquittement, affectation, escalade, cause, résolution. Une ligne seulement pour les alertes touchées. |
 | `ops_alert_timeline` | Journal des actions sur les alertes (jamais écrasé) |
 | `ops_manual_incident` | Incidents signalés à la main |
-| `ops_maintenance_window` | Fenêtres de maintenance (sur un équipement ou un site) |
+| `ops_maintenance_window` | Fenêtres de maintenance limitées à un site entier ou à plusieurs équipements du site |
 | `ops_sla_target` | Délais cibles et disponibilité par gravité |
 | `ops_field_intervention` | Interventions terrain : statut, position, compte rendu |
 | `ops_push_subscription` | Abonnements aux notifications navigateur |

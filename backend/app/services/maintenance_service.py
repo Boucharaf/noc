@@ -8,11 +8,9 @@ rien. En revanche, une alerte marquée est exclue des indicateurs, parce
 qu'une coupure voulue n'est pas une panne et que la compter fausserait à la
 fois le volume d'incidents et le respect du SLA.
 
-PORTÉE : un équipement OU un site. Le second cas est celui qui sert en
-pratique — quand un groupe électrogène est coupé pour entretien, tous les
-équipements du site tombent, et personne n'a le temps de déclarer trente
-fenêtres à la main. La contrainte de schéma interdit une fenêtre sans
-portée : elle s'appliquerait à tout le parc et éteindrait la supervision.
+PORTÉE : un site est toujours requis. La fenêtre peut viser tous ses
+équipements ou une sélection de plusieurs équipements de ce site. Un
+équipement ne peut pas être sélectionné sans site.
 """
 from __future__ import annotations
 
@@ -20,7 +18,7 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import MaintenanceWindow, User
@@ -34,6 +32,7 @@ def _serialise(window: MaintenanceWindow, author: str | None = None) -> dict:
     return {
         "id": window.id,
         "node_key": window.node_key,
+        "node_keys": window.node_keys or [],
         "site": window.site,
         "reason": window.reason,
         "starts_at": window.starts_at.isoformat(),
@@ -96,34 +95,57 @@ async def create_window(
     starts_at: datetime,
     ends_at: datetime,
     node_key: str | None = None,
+    node_keys: list[str] | None = None,
     site: str | None = None,
     suppress_alerts: bool = True,
 ) -> dict:
     if ends_at <= starts_at:
         raise HTTPException(400, "La fin de la fenêtre doit suivre son début.")
-    if not node_key and not site:
+    if not site:
         raise HTTPException(
-            400,
-            "Une fenêtre doit viser un équipement ou un site. Sans portée, "
-            "elle couvrirait tout le parc et éteindrait la supervision.",
+            400, "Sélectionnez un site avant de planifier la maintenance."
         )
 
-    # L'équipement est vérifié contre l'instantané : déclarer une maintenance
-    # sur un identifiant qui n'existe pas produirait une fenêtre qui ne
-    # s'appliquerait jamais, sans que personne ne s'en aperçoive avant la
-    # coupure.
+    selected_node_keys = list(dict.fromkeys(node_keys or []))
     if node_key:
-        node = await live_service.get_node(node_key)
-        if node is None:
-            raise HTTPException(
-                404,
-                f"Aucun équipement « {node_key} » dans l'instantané courant. "
-                "Vérifier l'identifiant, ou viser le site plutôt que "
-                "l'équipement.",
-            )
+        selected_node_keys.append(node_key)
+        selected_node_keys = list(dict.fromkeys(selected_node_keys))
+
+    if selected_node_keys:
+        # Un équipement est validé dans le snapshot et doit appartenir au
+        # site choisi. Une sélection vide avec un site signifie site entier.
+        snapshot_nodes = await live_service.get_nodes()
+        nodes_by_id = {node.get("id"): node for node in snapshot_nodes}
+        for selected_key in selected_node_keys:
+            node = nodes_by_id.get(selected_key)
+            if node is None:
+                raise HTTPException(
+                    404,
+                    f"Aucun équipement « {selected_key} » dans l'instantané courant.",
+                )
+            if node.get("site") != site:
+                raise HTTPException(
+                    400,
+                    f"L'équipement « {node.get('name') or selected_key} » "
+                    f"n'appartient pas au site « {site} ».",
+                )
+    elif not any(node.get("site") == site for node in await live_service.get_nodes()):
+        raise HTTPException(404, f"Le site « {site} » est absent de l'inventaire courant.")
+
+    if node_key and len(selected_node_keys) == 1:
+        # Keep the legacy single-target column populated for existing readers.
+        stored_node_key = node_key
+        stored_node_keys = None
+    elif selected_node_keys:
+        stored_node_key = None
+        stored_node_keys = selected_node_keys
+    else:
+        stored_node_key = None
+        stored_node_keys = None
 
     window = MaintenanceWindow(
-        node_key=node_key,
+        node_key=stored_node_key,
+        node_keys=stored_node_keys,
         site=site,
         reason=reason,
         starts_at=starts_at,
@@ -136,10 +158,10 @@ async def create_window(
     db.refresh(window)
 
     logger.info(
-        "Fenêtre de maintenance créée : %s du %s au %s",
-        node_key or f"site {site}",
-        starts_at.isoformat(),
-        ends_at.isoformat(),
+        "Fenêtre de maintenance créée : %s",
+        f"{len(selected_node_keys)} équipement(s) du site {site}"
+        if selected_node_keys
+        else f"site {site}",
     )
     return _serialise(window)
 
@@ -168,16 +190,16 @@ def active_at(db: Session, at: datetime | None = None) -> list[MaintenanceWindow
 def covers(
     windows: list[MaintenanceWindow], node_key: str | None, site: str | None
 ) -> MaintenanceWindow | None:
-    """Fenêtre couvrant un équipement, s'il y en a une.
-
-    Fonction partagée par alerts_service et node_service : la règle « une
-    fenêtre couvre par équipement OU par site » ne doit exister qu'à un seul
-    endroit, sinon les deux écrans finiront par ne plus s'accorder sur ce
-    qui est en maintenance.
-    """
+    """Fenêtre couvrant un équipement, s'il y en a une."""
     for window in windows:
-        if window.node_key and window.node_key == node_key:
-            return window
+        if window.node_keys:
+            if node_key and node_key in window.node_keys:
+                return window
+            continue
+        if window.node_key:
+            if window.node_key == node_key:
+                return window
+            continue
         if window.site and site and window.site == site:
             return window
     return None

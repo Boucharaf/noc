@@ -137,7 +137,11 @@ export default function SlaPage() {
             </Panel>
 
             {/* --- Tableau des indicateurs, format « comité » --- */}
-            <Panel title="Indicateurs de service" flush>
+            <Panel
+              title="Indicateurs de service"
+              subtitle="Disponibilité du parc comparée aux seuils configurés pour chaque gravité"
+              flush
+            >
               <table className="tbl">
                 <thead>
                   <tr>
@@ -149,22 +153,36 @@ export default function SlaPage() {
                   </tr>
                 </thead>
                 <tbody>
+                  {data.indicators.length === 0 && (
+                    <tr>
+                      <td colSpan={5} style={{ color: "var(--ink-3)" }}>
+                        Aucun seuil de disponibilité n'est configuré.
+                      </td>
+                    </tr>
+                  )}
                   {data.indicators.map((indicator) => {
                     const met = indicator.status === "met";
                     // L'écart est ramené à la cible pour que la barre
                     // compare des choses comparables : 2 ms d'écart sur
                     // 100 ms et 2 points sur 95 % ne pèsent pas pareil.
-                    const ratio = indicator.target
+                    const ratio = indicator.target && indicator.value != null
                       ? Math.min(1, Math.abs(indicator.value / indicator.target))
                       : 0;
+                    const color = indicator.status == null || indicator.status === "unavailable"
+                      ? "var(--ink-3)"
+                      : met
+                        ? "var(--state-up)"
+                        : "var(--sev-critical)";
                     return (
-                      <tr key={indicator.metric}>
-                        <td>{indicator.metric}</td>
+                      <tr key={`${indicator.metric}:${indicator.severity}`}>
+                        <td>
+                          {indicator.metric} — {severityMeta(indicator.severity).label}
+                        </td>
                         <td
                           className="num"
                           style={{
                             textAlign: "right",
-                            color: met ? "var(--state-up)" : "var(--sev-critical)",
+                            color,
                           }}
                         >
                           {decimal(indicator.value, 2)} {indicator.unit}
@@ -175,7 +193,7 @@ export default function SlaPage() {
                         <td>
                           <Meter
                             value={ratio * 100}
-                            color={met ? "var(--state-up)" : "var(--sev-critical)"}
+                            color={color}
                             height={5}
                           />
                         </td>
@@ -183,13 +201,17 @@ export default function SlaPage() {
                           <span
                             className="badge"
                             style={{
-                              color: met ? "var(--state-up)" : "var(--sev-critical)",
+                              color,
                               background: `color-mix(in srgb, ${
-                                met ? "var(--state-up)" : "var(--sev-critical)"
+                                color
                               } 14%, transparent)`,
                             }}
                           >
-                            {met ? "Conforme" : "Non conforme"}
+                            {indicator.status === "unavailable"
+                              ? "Donnée indisponible"
+                              : met
+                                ? "Conforme"
+                                : "Non conforme"}
                           </span>
                         </td>
                       </tr>

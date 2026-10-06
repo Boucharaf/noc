@@ -11,7 +11,12 @@ import { MONTHS_FR_SHORT, duration, monthLabel, num, pct } from "../lib/format";
 import { errorMessage } from "../api/client";
 import { report } from "../api/noc";
 import { saveBlob } from "../lib/download";
-import { useKpiSummary, useKpiTrend, useSla } from "../hooks/queries";
+import {
+  useKpiMonthlyTrend,
+  useKpiSummary,
+  useResolutionTimes,
+  useSla,
+} from "../hooks/queries";
 import { usePeriodStore } from "../store/ui";
 
 /**
@@ -32,7 +37,8 @@ export default function ReportsPage() {
 
   const summary = useKpiSummary();
   const sla = useSla();
-  const trend = useKpiTrend(12);
+  const resolution = useResolutionTimes({ month, year });
+  const trend = useKpiMonthlyTrend({ months: 12, month, year });
 
   const [error, setError] = useState(null);
   const [downloading, setDownloading] = useState(null);
@@ -82,7 +88,7 @@ export default function ReportsPage() {
           <FileText size={34} strokeWidth={1.3} style={{ color: "var(--ink-3)" }} />
           <div className="min-w-0 flex-1">
             <p className="text-[12.5px]" style={{ color: "var(--ink-2)" }}>
-              Synthèse de la disponibilité, des incidents, des causes, du respect des
+              Synthèse de la disponibilité, des alertes, des causes, du respect des
               engagements de service et des sites les plus affectés. Les fenêtres de
               maintenance planifiée sont exclues de tous les calculs.
             </p>
@@ -116,11 +122,16 @@ export default function ReportsPage() {
       </Panel>
 
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-        <Stat label="Disponibilité" value={pct(kpi?.network_availability_pct, 2)} target="≥ 99 %" />
-        <Stat label="Incidents" value={num(kpi?.total_incidents)} />
-        <Stat label="Résolus" value={num(kpi?.resolved)} />
-        <Stat label="Critiques" value={num(kpi?.critical)} target="≤ 5" />
-        <Stat label="MTTR" value={duration(kpi?.avg_mttr_minutes)} target="≤ 4 h" />
+        <Stat
+          label="Disponibilité"
+          value={pct(kpi?.network_availability_pct, 2)}
+          target={`≥ ${pct(sla.data?.availability_target_pct, 1)}`}
+          hint="seuil le plus exigeant parmi les gravités"
+        />
+        <Stat label="Alertes actives (moy.)" value={num(kpi?.total_incidents)} />
+        <Stat label="Résolues par le NOC" value={num(resolution.data?.handled_alerts)} />
+        <Stat label="Alertes critiques (moy.)" value={num(kpi?.critical)} target="≤ 5" />
+        <Stat label="MTTR" value={duration(resolution.data?.mttr_minutes)} target="≤ 4 h" />
         <Stat
           label="Conformité SLA"
           value={pct(sla.data?.global_compliance_pct, 1)}
@@ -128,7 +139,10 @@ export default function ReportsPage() {
         />
       </div>
 
-      <Panel title="Historique sur 12 mois" subtitle="ce que couvrent les rapports disponibles">
+      <Panel
+        title="Historique sur 12 mois"
+        subtitle={`jusqu'à ${monthLabel(month, year)} · alertes suivies et résolues par le NOC`}
+      >
         <QueryBoundary query={trend} compact emptyMessage="Aucun historique">
           <BarChart
             height={210}
@@ -136,8 +150,8 @@ export default function ReportsPage() {
             legend
             series={[
               {
-                label: "Incidents",
-                data: trendData.map((point) => point.total_incidents),
+                label: "Alertes prises en charge",
+                data: trendData.map((point) => point.handled),
                 color: "var(--sev-high)",
               },
               {

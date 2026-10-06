@@ -23,12 +23,14 @@ from sqlalchemy.orm import Session
 from app.core.config import NODE_STATES
 from app.models import FieldIntervention, MaintenanceWindow
 from app.services import live_service
+from app.services.maintenance_service import covers as maintenance_covers
 
 logger = logging.getLogger(__name__)
 
 # Ordre d'affichage : le plus dégradé d'abord. C'est l'ordre dans lequel un
 # exploitant veut voir son parc — pas l'ordre alphabétique.
-_STATE_RANK = {state: index for index, state in enumerate(NODE_STATES)}
+_DISPLAY_STATES = (*NODE_STATES, "inactive")
+_STATE_RANK = {state: index for index, state in enumerate(_DISPLAY_STATES)}
 
 _SORTS = {
     "state": lambda n: (_STATE_RANK.get(n.get("state"), 9), -n.get("alerts", 0), n.get("name", "").lower()),
@@ -50,12 +52,15 @@ def _active_windows(db: Session, at: datetime) -> list[MaintenanceWindow]:
 
 
 def _maintenance_for(windows, node: dict) -> MaintenanceWindow | None:
-    for window in windows:
-        if window.node_key and window.node_key == node.get("id"):
-            return window
-        if window.site and node.get("site") and window.site == node["site"]:
-            return window
-    return None
+    return maintenance_covers(windows, node.get("id"), node.get("site"))
+
+
+def _display_state(node: dict, window: MaintenanceWindow | None = None) -> str:
+    if node.get("enabled") is False:
+        return "inactive"
+    if window:
+        return "maintenance"
+    return node.get("state", "unknown")
 
 
 async def list_nodes(
@@ -79,11 +84,9 @@ async def list_nodes(
         enriched.append(
             {
                 **node,
-                # La maintenance PRIME sur l'état mesuré : un équipement
-                # éteint pour entretien est « en maintenance », pas « en
-                # panne ». Le distinguer évite qu'un exploitant parte en
-                # intervention sur une coupure programmée.
-                "state": "maintenance" if window else node.get("state", "unknown"),
+                # Un équipement désactivé dans ses sources est distinct d'un
+                # équipement en panne ou en maintenance planifiée.
+                "state": _display_state(node, window),
                 "measured_state": node.get("state", "unknown"),
                 "maintenance_reason": window.reason if window else None,
                 "maintenance_until": window.ends_at.isoformat() if window else None,
@@ -184,9 +187,10 @@ async def state_counts() -> dict[str, int]:
     en page et laisse croire à une panne d'affichage.
     """
     nodes = await live_service.get_nodes()
-    counts = {state: 0 for state in NODE_STATES}
+    counts = {state: 0 for state in _DISPLAY_STATES}
     for node in nodes:
-        counts[node.get("state", "unknown")] = counts.get(node.get("state", "unknown"), 0) + 1
+        state = _display_state(node)
+        counts[state] = counts.get(state, 0) + 1
     return counts
 
 

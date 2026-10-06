@@ -45,7 +45,7 @@ export const statusMeta = (value) => STATUS[value] ?? { label: value ?? "—", c
 /* ------------------------------------------------------------------ */
 /* État d'un équipement — dérivé par backend/app/services/node_service  */
 /* ------------------------------------------------------------------ */
-export const NODE_STATES = ["down", "degraded", "silent", "maintenance", "up", "inactive"];
+export const NODE_STATES = ["down", "degraded", "silent", "maintenance", "up", "unknown", "inactive"];
 
 export const NODE_STATE = {
   down: {
@@ -69,6 +69,11 @@ export const NODE_STATE = {
     hint: "Couvert par une fenêtre de maintenance planifiée : alertes neutralisées.",
   },
   up: { label: "Nominal", color: "var(--state-up)", hint: "Aucun incident, seuils respectés." },
+  unknown: {
+    label: "Inconnu",
+    color: "var(--ink-3)",
+    hint: "Aucun état exploitable n'est fourni par les outils sources.",
+  },
   inactive: {
     label: "Désactivé",
     color: "var(--state-inactive)",

@@ -74,8 +74,6 @@ export default function SupervisionView() {
 
   const summary = useAlertSummary();
   const nodeStates = useNodeStates();
-  const network = useNetworkKpi({ hours });
-  const series = useNetworkSeries({ metricType: metric, hours });
   const alertsQuery = useOpenAlerts({ limit: 40, organisation, node_type: nodeType });
   const workload = useWorkload({ organisation, node_type: nodeType });
   // Même clé de cache que useWorkload : une seule requête sert les deux.
@@ -88,6 +86,13 @@ export default function SupervisionView() {
 
   const allNodesQuery = useNodes({ limit: 2000 });
   const allNodes = allNodesQuery.data?.items ?? [];
+  const scopedNodes = allNodes.filter(
+    (node) =>
+      (!organisation || node.organisation === organisation) &&
+      (!nodeType || node.node_type === nodeType),
+  );
+  const network = useNetworkKpi({ organisation, nodeType });
+  const series = useNetworkSeries({ metricType: metric, hours, organisation, nodeType });
   const orgOptions = [...new Set(allNodes.map(n => n.organisation).filter(Boolean))].map(o => ({ value: o, label: o }));
   const typeOptions = [...new Set(allNodes.map(n => n.node_type).filter(Boolean))].map(t => ({ value: t, label: t }));
 
@@ -135,7 +140,7 @@ export default function SupervisionView() {
     <div className="space-y-2.5">
       <PageHeader
         title="Salle de supervision"
-        subtitle="État du réseau, charge de l'équipe et santé de la collecte"
+        subtitle="État instantané du réseau · la tendance suit la fenêtre et les filtres choisis"
         actions={
           <Toolbar>
             {orgOptions.length > 0 && (
@@ -174,7 +179,11 @@ export default function SupervisionView() {
       />
 
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
-        <NetworkVitals data={network.data} expectedNodes={states?.total} compact />
+        <NetworkVitals
+          data={network.data}
+          expectedNodes={organisation || nodeType ? scopedNodes.length : states?.total}
+          compact
+        />
       </div>
 
       <div className="grid grid-cols-12 gap-2.5">
@@ -182,7 +191,7 @@ export default function SupervisionView() {
         <div className="col-span-12 xl:col-span-8 min-w-0">
           <Panel
             title="Tendance réseau"
-            subtitle={`moyenne de ${seriesData.at(-1)?.nb_nodes ?? 0}/${seriesData.at(-1)?.sampled_nodes ?? 0} équipements mesurés, échantillon priorisé par alertes`}
+            subtitle={`${hours} h · moyenne de ${seriesData.at(-1)?.nb_nodes ?? 0}/${seriesData.at(-1)?.sampled_nodes ?? 0} équipements mesurés, selon les filtres sélectionnés`}
             to="/performance"
             toLabel="Analyser"
             actions={

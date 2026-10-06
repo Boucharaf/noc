@@ -1,0 +1,694 @@
+services:
+  # ══════════════════════════════════════════════════════════════════════
+  #  Cœur de la plateforme
+  # ══════════════════════════════════════════════════════════════════════
+  #
+  # Chaîne de données, dans l'ordre où elle circule :
+  #
+  #   collector  interroge les outils sources toutes les COLLECT_INTERVAL_S
+  #              secondes, normalise en mémoire, écrit l'instantané dans Redis.
+  #   redis      porte l'instantané et le cache d'historique. C'est la seule
+  #              dépendance du chemin chaud du tableau de bord.
+  #   postgres   ne porte QUE ce que le NOC produit : comptes, acquittements,
+  #              maintenances, agrégats journaliers. Ni métriques ni faits.
+  #   backend    lit Redis pour tout ce qui est « maintenant », interroge les
+  #              outils sources à la demande pour les courbes.
+  #
+  # Voir ARCHITECTURE.md pour le raisonnement complet.
+
+  # Le collecteur — remplace l'ancien couple etl-worker / etl-beat (Celery).
+  #
+  # UN SEUL EXEMPLAIRE. En lancer deux ne répartirait rien : les deux
+  # interrogeraient les mêmes outils au même rythme, doublant la charge
+  # imposée à la production, et se disputeraient l'écriture de l'instantané.
+  # La montée en charge, ici, se fait en allongeant l'intervalle, pas en
+  # ajoutant des collecteurs.
+  collector:
+    build:
+      context: .
+      dockerfile: collector/Dockerfile
+    environment:
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD manquant dans .env}@redis:6379/0
+      - NOC_DATABASE_URL=postgresql://${POSTGRES_USER:-noc}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD manquant dans .env}@postgres:5432/${POSTGRES_DB:-noc}
+      - COLLECT_INTERVAL_S=${COLLECT_INTERVAL_S:-300}
+      - ROLLUP_ENABLED=${ROLLUP_ENABLED:-true}
+      - ROLLUP_HOUR=${ROLLUP_HOUR:-1}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - TZ=${TZ:-Africa/Ouagadougou}
+      # Outils sources. Un connecteur ne s'active que si son URL est
+      # renseignée — c'est le seul interrupteur, voir .env.example §4.
+      - ZABBIX_API_URL=${ZABBIX_API_URL:-}
+      - ZABBIX_API_USER=${ZABBIX_API_USER:-}
+      - ZABBIX_API_PASSWORD=${ZABBIX_API_PASSWORD:-}
+      - ZABBIX_API_TOKEN=${ZABBIX_API_TOKEN:-}
+      - ZABBIX_VERIFY_SSL=${ZABBIX_VERIFY_SSL:-true}
+      - CENTREON_API_URL=${CENTREON_API_URL:-}
+      - CENTREON_API_USER=${CENTREON_API_USER:-}
+      - CENTREON_API_PASSWORD=${CENTREON_API_PASSWORD:-}
+      - CENTREON_VERIFY_SSL=${CENTREON_VERIFY_SSL:-true}
+      - ITOP_API_URL=${ITOP_API_URL:-}
+      - ITOP_API_USER=${ITOP_API_USER:-}
+      - ITOP_API_PASSWORD=${ITOP_API_PASSWORD:-}
+      - ITOP_VERIFY_SSL=${ITOP_VERIFY_SSL:-true}
+      - ITOP_TICKET_CLASSES=${ITOP_TICKET_CLASSES:-Incident,UserRequest}
+      - ITOP_ZBX_EVENT_FIELD=${ITOP_ZBX_EVENT_FIELD:-}
+      - NETXMS_API_URL=${NETXMS_API_URL:-}
+      - NETXMS_API_USER=${NETXMS_API_USER:-}
+      - NETXMS_API_PASSWORD=${NETXMS_API_PASSWORD:-}
+      - NETXMS_VERIFY_SSL=${NETXMS_VERIFY_SSL:-true}
+      - NAGIOS_API_URL=${NAGIOS_API_URL:-}
+      - NAGIOS_API_USER=${NAGIOS_API_USER:-}
+      - NAGIOS_API_PASSWORD=${NAGIOS_API_PASSWORD:-}
+      - NAGIOS_MODE=${NAGIOS_MODE:-unknown}
+      - NSP_API_URL=${NSP_API_URL:-}
+      - NSP_API_USER=${NSP_API_USER:-}
+      - NSP_API_PASSWORD=${NSP_API_PASSWORD:-}
+      - NSP_FM_MODE=${NSP_FM_MODE:-unknown}
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      # Contrôler que le processus vit ne suffirait pas : une boucle asyncio
+      # peut rester en vie sans plus rien publier, et c'est précisément la
+      # panne qu'on veut voir. On vérifie donc la présence de l'instantané.
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import os,sys,redis; sys.exit(0 if redis.from_url(os.environ['REDIS_URL']).get('noc:live:meta') else 1)\"",
+        ]
+      interval: 60s
+      timeout: 10s
+      start_period: 90s
+      retries: 3
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    # AUCUN port publié : seul nginx joint l'API. Publier 8000 contournerait
+    # TLS, les en-têtes de sécurité et la limitation de débit de la
+    # passerelle, et rendrait X-Real-IP falsifiable — donc le verrouillage
+    # des connexions contournable (app/core/rate_limit.py).
+    # Déboguer : docker compose exec backend curl -s localhost:8000/api/health
+    expose:
+      - "8000"
+    environment:
+      - NOC_DATABASE_URL=postgresql://${POSTGRES_USER:-noc}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD manquant dans .env}@postgres:5432/${POSTGRES_DB:-noc}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD manquant dans .env}@redis:6379/0
+      # DOIT valoir la même chose que pour le collecteur : cette valeur fixe
+      # la durée de vie des clés d'instantané. Si le backend la croit plus
+      # courte, il déclarera la collecte interrompue alors qu'elle tourne.
+      - COLLECT_INTERVAL_S=${COLLECT_INTERVAL_S:-300}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY manquant dans .env}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      - REFRESH_TOKEN_EXPIRATION_DAYS=${REFRESH_TOKEN_EXPIRATION_DAYS:-7}
+      # `true` par défaut : un oubli dans .env doit laisser le cookie de
+      # session protégé, pas l'exposer en clair.
+      - REFRESH_COOKIE_SECURE=${REFRESH_COOKIE_SECURE:-true}
+      - CORS_ORIGINS=${CORS_ORIGINS}
+      - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
+      - RATE_LIMIT_READ_PER_MIN=${RATE_LIMIT_READ_PER_MIN:-1200}
+      - RATE_LIMIT_WRITE_PER_MIN=${RATE_LIMIT_WRITE_PER_MIN:-120}
+      - RATE_LIMIT_USER_READ_PER_MIN=${RATE_LIMIT_USER_READ_PER_MIN:-1200}
+      - RATE_LIMIT_USER_WRITE_PER_MIN=${RATE_LIMIT_USER_WRITE_PER_MIN:-120}
+      - LOGIN_MAX_FAILURES_PER_USER=${LOGIN_MAX_FAILURES_PER_USER:-10}
+      - LOGIN_MAX_FAILURES_PER_IP=${LOGIN_MAX_FAILURES_PER_IP:-60}
+      - LOGIN_LOCK_WINDOW_SECONDS=${LOGIN_LOCK_WINDOW_SECONDS:-900}
+      - API_DOCS_ENABLED=${API_DOCS_ENABLED:-false}
+      - REALTIME_ENABLED=${REALTIME_ENABLED:-true}
+      - NOTIFY_SEVERITIES=${NOTIFY_SEVERITIES:-critical,high}
+      - SUPERVISION_TOOLS=${SUPERVISION_TOOLS:-zabbix,centreon,itop,netxms,nagios,nsp}
+      # Les mêmes accès que le collecteur : le backend interroge les outils
+      # sources pour l'historique, à la demande.
+      - ZABBIX_API_URL=${ZABBIX_API_URL:-}
+      - ZABBIX_API_USER=${ZABBIX_API_USER:-}
+      - ZABBIX_API_PASSWORD=${ZABBIX_API_PASSWORD:-}
+      - ZABBIX_API_TOKEN=${ZABBIX_API_TOKEN:-}
+      - ZABBIX_VERIFY_SSL=${ZABBIX_VERIFY_SSL:-true}
+      - CENTREON_API_URL=${CENTREON_API_URL:-}
+      - CENTREON_API_USER=${CENTREON_API_USER:-}
+      - CENTREON_API_PASSWORD=${CENTREON_API_PASSWORD:-}
+      - CENTREON_VERIFY_SSL=${CENTREON_VERIFY_SSL:-true}
+      - ITOP_API_URL=${ITOP_API_URL:-}
+      - ITOP_API_USER=${ITOP_API_USER:-}
+      - ITOP_API_PASSWORD=${ITOP_API_PASSWORD:-}
+      - ITOP_VERIFY_SSL=${ITOP_VERIFY_SSL:-true}
+      - NETXMS_API_URL=${NETXMS_API_URL:-}
+      - NETXMS_API_USER=${NETXMS_API_USER:-}
+      - NETXMS_API_PASSWORD=${NETXMS_API_PASSWORD:-}
+      - NAGIOS_API_URL=${NAGIOS_API_URL:-}
+      - NAGIOS_MODE=${NAGIOS_MODE:-unknown}
+      - NSP_API_URL=${NSP_API_URL:-}
+      - NSP_FM_MODE=${NSP_FM_MODE:-unknown}
+      # Notifications
+      - NOTIFICATIONS_ENABLED=${NOTIFICATIONS_ENABLED:-false}
+      - VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
+      - VAPID_PRIVATE_KEY=${VAPID_PRIVATE_KEY:-}
+      - VAPID_CLAIMS_EMAIL=${VAPID_CLAIMS_EMAIL:-noc@anptic.bf}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID:-}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN:-}
+      - TWILIO_API_KEY_SID=${TWILIO_API_KEY_SID:-}
+      - TWILIO_API_KEY_SECRET=${TWILIO_API_KEY_SECRET:-}
+      - TWILIO_CONTENT_SID=${TWILIO_CONTENT_SID:-}
+      - TWILIO_FROM_NUMBER=${TWILIO_FROM_NUMBER:-}
+      - NOC_SMS_RECIPIENTS=${NOC_SMS_RECIPIENTS:-}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM=${SMTP_FROM:-noc@anptic.bf}
+      # Sans ces trois-là, un relais sans chiffrement (port 25 interne, ou
+      # Mailpit en local) était inutilisable : STARTTLS était tenté d'office.
+      - SMTP_USE_TLS=${SMTP_USE_TLS:-true}
+      - SMTP_USE_SSL=${SMTP_USE_SSL:-}
+      - SMTP_VERIFY_SSL=${SMTP_VERIFY_SSL:-true}
+      - NOC_EMAIL_RECIPIENTS=${NOC_EMAIL_RECIPIENTS:-}
+      - DASHBOARD_URL=${DASHBOARD_URL:-}
+      - REPORT_OUTPUT_DIR=/reports
+      - REPORT_ORGANISATION=${REPORT_ORGANISATION:-ANPTIC — RESINA}
+      - TZ=${TZ:-Africa/Ouagadougou}
+    volumes:
+      - reports:/reports
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      # /api/health/live et non /api/health : la seconde répond 503 dès que
+      # le collecteur est arrêté, ce qui ferait redémarrer le backend en
+      # boucle pour une panne qui ne le concerne pas.
+      test:
+        [
+          "CMD",
+          "curl",
+          "-fsS",
+          "http://localhost:8000/api/health/live",
+        ]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
+  frontend:
+    build: ./frontend
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis porte l'instantané et le cache d'historique.
+  #
+  # PERSISTANCE ACTIVÉE (appendonly). L'instantané est reconstruit au cycle
+  # suivant et pourrait être perdu sans dommage ; ce qui compte est le
+  # magasin de SESSIONS, qui vit aussi ici. Sans persistance, un
+  # redémarrage de Redis déconnecterait tous les opérateurs en séance.
+  #
+  # MOT DE PASSE OBLIGATOIRE. Redis porte les sessions et le canal temps
+  # réel : ouvert, il laisserait n'importe quel conteneur du réseau compose
+  # (dont les outils du laboratoire) révoquer des sessions, fausser
+  # l'instantané ou publier de fausses alertes — qui partiraient en SMS.
+  # `sh -c` pour que la variable soit lue au démarrage du conteneur.
+  redis:
+    image: redis:7-alpine
+    command:
+      - sh
+      - -c
+      - exec redis-server --appendonly yes --save "" --requirepass "$$REDIS_PASSWORD"
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD manquant dans .env}
+      # Lu par redis-cli : le healthcheck s'authentifie sans argument.
+      - REDISCLI_AUTH=${REDIS_PASSWORD:?REDIS_PASSWORD manquant dans .env}
+    volumes:
+      - redisdata:/data
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Base du NOC — PostgreSQL SIMPLE.
+  #
+  # Plus de TimescaleDB : l'hypertable `metric_value` a disparu avec la
+  # recopie des métriques, et plus rien n'utilise l'extension. Cette base ne
+  # contient que des comptes, du travail d'exploitation et un agrégat par
+  # jour ; elle pèse quelques mégaoctets.
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-noc}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD manquant dans .env}
+      - POSTGRES_DB=${POSTGRES_DB:-noc}
+      - TZ=${TZ:-Africa/Ouagadougou}
+    # 127.0.0.1 UNIQUEMENT : la base des comptes n'a pas à répondre au
+    # réseau. Sous Linux, Docker contourne ufw — la restriction doit vivre
+    # ici. En production, retirer carrément la publication.
+    ports:
+      - "127.0.0.1:5436:5432"
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Appliqué au PREMIER démarrage seulement (base vide). Un seul fichier
+      # désormais : l'ancien schéma en comptait quatre, dont l'ordre
+      # d'exécution devait être respecté à la main.
+      - ./backend/sql/schema.sql:/docker-entrypoint-initdb.d/10_schema.sql:ro
+    restart: unless-stopped
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-noc} -d ${POSTGRES_DB:-noc}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  nginx:
+    build: ./nginx
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "8888:80"
+      - "8443:443"
+    volumes:
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "--spider",
+          "--no-check-certificate",
+          "https://127.0.0.1/",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ══════════════════════════════════════════════════════════════════════
+  #  Instances locales des outils sources
+  # ══════════════════════════════════════════════════════════════════════
+  #
+  # Versions IDENTIQUES à celles de la production de l'agence :
+  #   Zabbix   7.0.23     images officielles Zabbix SIA
+  #   Centreon 22.10.7    image construite depuis les paquets de l'éditeur
+  #   iTop     3.2.3-2    image construite depuis l'archive Combodo
+  #
+  # Pourquoi à l'identique : une intégration validée contre Zabbix 7.2 ne
+  # prouve rien sur du 7.0 — le paramètre `auth` du JSON-RPC, la présence de
+  # `selectHostGroups`, la forme des réponses d'API changent d'une version
+  # mineure à l'autre. Ces conteneurs sont là pour que « ça marche en local »
+  # soit une garantie et non une impression.
+  #
+  # PROFILS. Ces services ne démarrent pas avec `docker compose up` : ils
+  # pèsent plusieurs gigaoctets et le poste de développement ne les tiendrait
+  # pas tous en même temps. Ils se lancent par outil :
+  #
+  #     docker compose --profile zabbix   up -d     (~1,0 Go)
+  #     docker compose --profile itop     up -d     (~0,8 Go)
+  #     docker compose --profile centreon up -d     (~2,0 Go)
+  #     docker compose --profile tools    up -d     (les trois)
+  #
+  # Sur une machine de 8 Go, monter Zabbix et iTop ensemble puis Centreon
+  # séparément est le mode d'emploi réaliste. Voir tools/README.md.
+  #
+  # Leurs interfaces sont publiées sur 127.0.0.1 SEULEMENT : elles tournent
+  # avec des mots de passe d'administration par défaut.
+
+  # ─────────────────────────── Zabbix 7.0.23 ───────────────────────────
+  # Base dédiée : le schéma Zabbix ne doit jamais cohabiter avec celui du NOC.
+  zabbix-db:
+    profiles: ["tools", "zabbix"]
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=${ZABBIX_DB_USER:-zabbix}
+      - POSTGRES_PASSWORD=${ZABBIX_DB_PASSWORD:-zabbix}
+      - POSTGRES_DB=${ZABBIX_DB_NAME:-zabbix}
+    volumes:
+      - zabbix_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U ${ZABBIX_DB_USER:-zabbix} -d ${ZABBIX_DB_NAME:-zabbix}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  zabbix-server:
+    profiles: ["tools", "zabbix"]
+    image: zabbix/zabbix-server-pgsql:alpine-7.0.23
+    environment:
+      - DB_SERVER_HOST=zabbix-db
+      - POSTGRES_USER=${ZABBIX_DB_USER:-zabbix}
+      - POSTGRES_PASSWORD=${ZABBIX_DB_PASSWORD:-zabbix}
+      - POSTGRES_DB=${ZABBIX_DB_NAME:-zabbix}
+      # Sans ces deux réglages, l'historique reste 31 jours et les tendances
+      # 365 jours. C'est justement cet historique que le NOC interroge à la
+      # demande au lieu de le recopier : il doit exister.
+      - ZBX_HOUSEKEEPINGFREQUENCY=1
+      - ZBX_STARTPINGERS=3
+      - TZ=${TZ:-Africa/Ouagadougou}
+    depends_on:
+      zabbix-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q . /dev/null; pidof zabbix_server > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  # Interface web + API JSON-RPC — http://localhost:8081
+  # Le collecteur interroge http://zabbix-web:8080/api_jsonrpc.php sur le
+  # réseau compose ; le port publié n'est là que pour l'exploitant.
+  zabbix-web:
+    profiles: ["tools", "zabbix"]
+    image: zabbix/zabbix-web-nginx-pgsql:alpine-7.0.23
+    environment:
+      - ZBX_SERVER_HOST=zabbix-server
+      - DB_SERVER_HOST=zabbix-db
+      - POSTGRES_USER=${ZABBIX_DB_USER:-zabbix}
+      - POSTGRES_PASSWORD=${ZABBIX_DB_PASSWORD:-zabbix}
+      - POSTGRES_DB=${ZABBIX_DB_NAME:-zabbix}
+      - PHP_TZ=${TZ:-Africa/Ouagadougou}
+    ports:
+      - "127.0.0.1:8081:8080"
+    depends_on:
+      zabbix-db:
+        condition: service_healthy
+      zabbix-server:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  # Agent supervisant le conteneur du serveur Zabbix lui-même. Il donne à
+  # l'installation neuve au moins un hôte qui remonte de VRAIES mesures
+  # (CPU, mémoire, système de fichiers) plutôt qu'un hôte vide.
+  zabbix-agent:
+    profiles: ["tools", "zabbix"]
+    image: zabbix/zabbix-agent2:alpine-7.0.23
+    hostname: zabbix-agent
+    environment:
+      - ZBX_HOSTNAME=Zabbix server
+      - ZBX_SERVER_HOST=zabbix-server
+      - TZ=${TZ:-Africa/Ouagadougou}
+    depends_on:
+      zabbix-server:
+        condition: service_started
+
+  # ─────────────────────────── iTop 3.2.3-2 ───────────────────────────
+  itop-db:
+    profiles: ["tools", "itop"]
+    image: mariadb:10.11
+    command:
+      # iTop crée des index sur des colonnes texte longues : sans
+      # DYNAMIC/utf8mb4 par défaut, l'installation échoue sur « index too long ».
+      - --innodb-file-per-table=1
+      - --innodb-default-row-format=dynamic
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      - MARIADB_ROOT_PASSWORD=${ITOP_DB_ROOT_PASSWORD:?ITOP_DB_ROOT_PASSWORD manquant}
+      - MARIADB_DATABASE=${ITOP_DB_NAME:-itop}
+      - MARIADB_USER=${ITOP_DB_USER:-itop}
+      - MARIADB_PASSWORD=${ITOP_DB_PASSWORD:-itop}
+    volumes:
+      - itop_dbdata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  # Interface et API REST — http://localhost:8082
+  # Le collecteur interroge http://itop/webservices/rest.php sur le réseau
+  # compose, avec le compte de service noc_collector (profil « REST Services
+  # User »), jamais avec le compte d'administration.
+  itop:
+    profiles: ["tools", "itop"]
+    build: ./tools/itop
+    image: noc-tools/itop:3.2.3-2
+    environment:
+      - ITOP_DB_HOST=itop-db
+      - ITOP_DB_NAME=${ITOP_DB_NAME:-itop}
+      - ITOP_DB_USER=${ITOP_DB_USER:-itop}
+      - ITOP_DB_PASSWORD=${ITOP_DB_PASSWORD:-itop}
+      - ITOP_ADMIN_USER=${ITOP_ADMIN_USER:-admin}
+      - ITOP_ADMIN_PASSWORD=${ITOP_ADMIN_PASSWORD:-Admin!2026}
+      - ITOP_REST_USER=${ITOP_API_USER:-noc_collector}
+      - ITOP_REST_PASSWORD=${ITOP_API_PASSWORD:-}
+      - ITOP_APP_URL=${ITOP_APP_URL:-http://localhost:8082/}
+      - ITOP_LANGUAGE=${ITOP_LANGUAGE:-FR FR}
+      - TZ=${TZ:-Africa/Ouagadougou}
+    ports:
+      - "127.0.0.1:8082:80"
+    volumes:
+      # L'application, sa configuration et son modèle compilé. Sans ce volume,
+      # reconstruire l'image imposerait de refaire l'installation.
+      - itop_html:/var/www/html
+    depends_on:
+      itop-db:
+        condition: service_healthy
+
+  # ─────────────────────────── Centreon 22.10.7 ───────────────────────────
+  # MariaDB 10.5 : la version que la documentation Centreon 22.10 exige. Les
+  # deux options ci-dessous sont des prérequis que l'installateur vérifie
+  # avant d'accepter de créer les schémas.
+  centreon-db:
+    profiles: ["tools", "centreon"]
+    image: mariadb:10.5
+    command:
+      - --innodb-file-per-table=1
+      - --open-files-limit=32000
+    environment:
+      - MARIADB_ROOT_PASSWORD=${CENTREON_DB_ROOT_PASSWORD:-centreon_root}
+    ulimits:
+      nofile:
+        soft: 40000
+        hard: 40000
+    volumes:
+      - centreon_dbdata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  # Central Centreon — http://localhost:8084/centreon
+  # L'installation se déroule seule au premier démarrage et prend plusieurs
+  # minutes ; le conteneur n'est déclaré sain qu'une fois que l'API REST
+  # répond à un login, c'est-à-dire quand le collecteur pourra travailler.
+  centreon:
+    profiles: ["tools", "centreon"]
+    build: ./tools/centreon
+    image: noc-tools/centreon:22.10.7
+    hostname: centreon
+    environment:
+      - CENTREON_DB_HOST=centreon-db
+      - CENTREON_DB_ROOT_PASSWORD=${CENTREON_DB_ROOT_PASSWORD:-centreon_root}
+      - CENTREON_DB_USER=${CENTREON_DB_USER:-centreon}
+      - CENTREON_DB_PASSWORD=${CENTREON_DB_PASSWORD:-centreon}
+      # Politique de mot de passe de Centreon : 12 caractères minimum, avec
+      # minuscule, majuscule, chiffre et un caractère parmi @$!%*?&.
+      - CENTREON_ADMIN_PASSWORD=${CENTREON_API_PASSWORD:-Centreon!2026}
+      - TZ=${TZ:-Africa/Ouagadougou}
+    ports:
+      - "127.0.0.1:8084:80"
+    volumes:
+      # Tout ce que l'installation écrit hors base : un conteneur recréé doit
+      # sauter l'assistant, pas échouer sur un schéma déjà peuplé.
+      - centreon_etc:/etc/centreon
+      - centreon_gorgone_etc:/etc/centreon-gorgone
+      - centreon_engine_etc:/etc/centreon-engine
+      - centreon_broker_etc:/etc/centreon-broker
+      - centreon_varlib:/var/lib/centreon
+      - centreon_broker_varlib:/var/lib/centreon-broker
+    depends_on:
+      centreon-db:
+        condition: service_healthy
+
+  # ─────────────────────────── Provisionnement ───────────────────────────
+  # Peuple les trois outils avec l'inventaire RÉEL du laboratoire : les
+  # conteneurs de cette pile, supervisés par de vraies sondes (agent Zabbix,
+  # check_ping, check_http). Aucune donnée inventée — voir tools/README.md.
+  #
+  # Tâche ponctuelle et idempotente, à lancer une fois les outils sains :
+  #     docker compose --profile provision run --rm provision
+  provision:
+    profiles: ["provision"]
+    build: ./tools/provision
+    image: noc-tools/provision:1.0
+    environment:
+      - ZABBIX_API_URL=${ZABBIX_API_URL:-http://zabbix-web:8080}
+      - ZABBIX_API_USER=${ZABBIX_API_USER:-Admin}
+      - ZABBIX_API_PASSWORD=${ZABBIX_API_PASSWORD:-zabbix}
+      - CENTREON_API_URL=${CENTREON_API_URL:-http://centreon/centreon}
+      - CENTREON_API_USER=${CENTREON_API_USER:-admin}
+      - CENTREON_API_PASSWORD=${CENTREON_API_PASSWORD:-Centreon!2026}
+      - ITOP_API_URL=${ITOP_API_URL:-http://itop}
+      - ITOP_API_USER=${ITOP_ADMIN_USER:-admin}
+      - ITOP_API_PASSWORD=${ITOP_ADMIN_PASSWORD:-Admin!2026}
+      # Vide par défaut : NetXMS n'est provisionné que si l'opérateur a
+      # explicitement démarré le profil « netxms » et renseigné ces valeurs
+      # (voir .env.example, section 4) — contrairement aux trois autres
+      # outils qui tournent par défaut avec le profil « tools ».
+      - NETXMS_API_URL=${NETXMS_API_URL:-}
+      - NETXMS_API_USER=${NETXMS_API_USER:-}
+      - NETXMS_API_PASSWORD=${NETXMS_API_PASSWORD:-}
+      - PROVISION_TOOLS=${PROVISION_TOOLS:-zabbix,centreon,itop}
+      - TZ=${TZ:-Africa/Ouagadougou}
+    restart: "no"
+
+  # ─────────────────────────── NetXMS : données de production ───────────────────────────
+  # Base PostgreSQL SEULE, sans serveur NetXMS. Elle reçoit le dump de
+  # production (database/restore_netxms_dump.sh), purgé de ses secrets, et le
+  # collecteur la lit en lecture seule (integrations/netxms_db.py).
+  #
+  # POURQUOI PAS UN SERVEUR NETXMS PAR-DESSUS. Démarré sur ce dump, netxmsd
+  # reprendrait la configuration de production telle quelle : il sonderait les
+  # équipements réels de l'agence et exécuterait ses actions — courriels et
+  # messages Telegram envoyés à de vraies personnes. La base seule n'agit sur
+  # rien.
+  #
+  # PostgreSQL 16 : la version d'origine du dump. PostGIS : le dump déclare des
+  # colonnes public.geometry (schémas donnebase, equipementinfastructure).
+  # Port publié sur 127.0.0.1 UNIQUEMENT : c'est l'inventaire réel du réseau.
+  #
+  #     docker compose --profile netxms up -d netxms-db
+  netxms-db:
+    profiles: ["netxms"]
+    image: postgis/postgis:16-3.5-alpine
+    environment:
+      - POSTGRES_USER=${NETXMS_DB_USER:-netxms}
+      - POSTGRES_PASSWORD=${NETXMS_DB_PASSWORD:-netxms}
+      - POSTGRES_DB=${NETXMS_DB_NAME:-netxms}
+      - TZ=${TZ:-Africa/Ouagadougou}
+    ports:
+      - "127.0.0.1:5438:5432"
+    volumes:
+      - netxms_pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U ${NETXMS_DB_USER:-netxms} -d ${NETXMS_DB_NAME:-netxms}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ─────────────────────── NetXMS : serveur NEUF (activable) ───────────────────────
+  # Même logique que Zabbix/Centreon/iTop ci-dessus : une installation NEUVE
+  # de la version exacte de l'agence (5.0.8), PAS une restauration du dump de
+  # production. Voir tools/netxms/Dockerfile pour le raisonnement complet et
+  # les deux points à confirmer au premier build.
+  #
+  # Base DISTINCTE de `netxms-db` ci-dessus, à dessein : `netxms-db` ne reçoit
+  # que le dump de production (jamais de netxmsd par-dessus, voir plus haut) ;
+  # celle-ci est vierge, et un netxmsd peut y tourner sans risque puisqu'il
+  # n'hérite d'aucun canal de notification ni d'aucune communauté SNMP réels.
+  #
+  #     docker compose --profile netxms up -d
+  #
+  # active alors NetXMS exactement comme les trois autres outils : interface
+  # (port 127.0.0.1:8087 → API Legacy Web sur /netxms-websvc) et connecteur
+  # NETXMS_API_URL=http://netxms-server:8080/netxms-websvc côté collecteur.
+  netxms-server-db:
+    profiles: ["netxms"]
+    image: postgis/postgis:16-3.5-alpine
+    environment:
+      - POSTGRES_USER=${NETXMS_SERVER_DB_USER:-netxms}
+      - POSTGRES_PASSWORD=${NETXMS_SERVER_DB_PASSWORD:-netxms}
+      - POSTGRES_DB=${NETXMS_SERVER_DB_NAME:-netxms}
+      - TZ=${TZ:-Africa/Ouagadougou}
+    volumes:
+      - netxms_server_pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${NETXMS_SERVER_DB_USER:-netxms} -d ${NETXMS_SERVER_DB_NAME:-netxms}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  netxms-server:
+    profiles: ["netxms"]
+    build: ./tools/netxms
+    image: noc-tools/netxms:5.0.8
+    environment:
+      - NETXMS_SERVER_DB_HOST=netxms-server-db
+      - NETXMS_SERVER_DB_NAME=${NETXMS_SERVER_DB_NAME:-netxms}
+      - NETXMS_SERVER_DB_USER=${NETXMS_SERVER_DB_USER:-netxms}
+      - NETXMS_SERVER_DB_PASSWORD=${NETXMS_SERVER_DB_PASSWORD:-netxms}
+      - NETXMS_SERVER_NAME=${NETXMS_SERVER_NAME:-NOC Laboratoire}
+      - TZ=${TZ:-Africa/Ouagadougou}
+    ports:
+      - "127.0.0.1:8087:8080"
+    volumes:
+      # /etc/netxmsd.conf est régénéré à chaque démarrage (voir entrypoint) ;
+      # ce qui doit survivre à une reconstruction d'image est l'état de la
+      # base — déjà couvert par netxms_server_pgdata — et rien côté
+      # application, contrairement à Centreon ou iTop.
+      - netxms_server_var:/var/lib/netxms
+    depends_on:
+      netxms-server-db:
+        condition: service_healthy
+
+  # ─────────────────────────── Mailpit : courriel de laboratoire ───────────────────────────
+  # Faux serveur SMTP : il accepte tout et ne remet rien à personne. Les
+  # courriels d'alerte se lisent sur http://localhost:8025. Il valide le
+  # chemin complet — détection, abonnés, gabarit, SMTP — sans qu'une adresse
+  # réelle reçoive une alerte de test.
+  #
+  #     docker compose --profile mail up -d mailpit
+  #     .env : SMTP_HOST=mailpit  SMTP_PORT=1025  SMTP_USE_TLS=false
+  mailpit:
+    profiles: ["mail"]
+    image: axllent/mailpit:v1.31.1
+    ports:
+      - "127.0.0.1:8025:8025"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  reports:
+  zabbix_pgdata:
+  itop_dbdata:
+  itop_html:
+  centreon_dbdata:
+  centreon_etc:
+  centreon_gorgone_etc:
+  centreon_engine_etc:
+  centreon_broker_etc:
+  centreon_varlib:
+  centreon_broker_varlib:
+  netxms_pgdata:
+  netxms_server_pgdata:
+  netxms_server_var:

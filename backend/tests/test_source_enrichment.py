@@ -64,6 +64,20 @@ def test_merge_preserves_ci_context_interfaces_and_impact_links():
     assert by_name["Agence-01"].impacted_by == [by_name["Routeur central"].id]
 
 
+def test_disabled_source_node_is_preserved_as_inactive():
+    node = Node(
+        tool="zabbix",
+        ref="host-disabled",
+        name="Switch désactivé",
+        enabled=False,
+        state="up",
+    )
+
+    merged, _ = merge_nodes([node])
+
+    assert merged[0].enabled is False
+
+
 def test_poll_tool_collects_optional_sla_targets_without_external_services():
     class FakeClient:
         async def check(self):
@@ -133,7 +147,7 @@ def test_itop_ticket_fields_and_sla_targets_are_normalized():
 def test_itop_ci_maps_business_criticality():
     client = ITopClient("http://itop")
 
-    async def fake_get_class(cls, fields, optional_fields=()):
+    async def fake_get_class(cls, fields, optional_fields=(), page=1):
         if cls != "NetworkDevice":
             return None
         return {

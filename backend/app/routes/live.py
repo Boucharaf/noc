@@ -41,7 +41,7 @@ def _one_of(values) -> str:
     return "^(" + "|".join(values) + ")$"
 
 
-_PERIOD_PATTERN = r"^(1h|6h|24h|7d|30d|90d|1y)$"
+_PERIOD_PATTERN = r"^(1h|6h|24h|3d|7d|30d|90d|1y)$"
 
 # Clé d'alerte ou d'équipement en chemin (`zabbix:1042`).
 ResourceKey = Annotated[str, Path(min_length=1, max_length=300)]
@@ -184,7 +184,7 @@ async def get_alert(
 # ---------------------------------------------------------------------------
 @router.get("/nodes")
 async def list_nodes(
-    state: str | None = Query(None, pattern=_one_of(NODE_STATES)),
+    state: str | None = Query(None, pattern=_one_of((*NODE_STATES, "inactive"))),
     site: str | None = Query(None, max_length=150),
     tool: str | None = Query(None, max_length=100),
     search: str | None = Query(None, max_length=200),
@@ -282,9 +282,14 @@ async def get_node(
 # Réseau
 # ---------------------------------------------------------------------------
 @router.get("/network/snapshot")
-async def network_snapshot(current_user: User = Depends(get_current_user)):
+async def network_snapshot(
+    site: str | None = Query(None, max_length=150),
+    organisation: str | None = Query(None, max_length=200),
+    node_type: str | None = Query(None, max_length=100),
+    current_user: User = Depends(get_current_user),
+):
     try:
-        return await metrics_service.network_snapshot()
+        return await metrics_service.network_snapshot(site, organisation, node_type)
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
 

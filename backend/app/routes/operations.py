@@ -14,7 +14,7 @@ décisions d'exploitation, pas des constats.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, time
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Path, Query
@@ -47,6 +47,20 @@ _SEVERITY_PATTERN = "^(" + "|".join(SEVERITIES) + ")$"
 # inconnue crée une ligne d'état, et une clé de plusieurs mégaoctets ne
 # désigne aucune alerte.
 AlertKey = Annotated[str, Path(min_length=3, max_length=300)]
+
+
+def _period_bounds(
+    year: int | None, month: int | None
+) -> tuple[datetime | None, datetime | None]:
+    if year is None and month is None:
+        return None, None
+    if year is None or month is None:
+        raise HTTPException(422, "year et month doivent être fournis ensemble.")
+    start, end = kpi_service.month_bounds(year, month)
+    return (
+        datetime.combine(start, time.min, UTC),
+        datetime.combine(end, time.min, UTC),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +99,8 @@ class MaintenanceIn(BaseModel):
     starts_at: datetime
     ends_at: datetime
     node_key: str | None = Field(None, max_length=300)
-    site: str | None = Field(None, max_length=150)
+    node_keys: list[str] = Field(default_factory=list, max_length=2000)
+    site: str = Field(..., min_length=1, max_length=150)
     suppress_alerts: bool = True
 
 
@@ -256,6 +271,7 @@ async def create_maintenance(
         starts_at=body.starts_at,
         ends_at=body.ends_at,
         node_key=body.node_key,
+        node_keys=body.node_keys,
         site=body.site,
         suppress_alerts=body.suppress_alerts,
     )
@@ -302,20 +318,26 @@ def update_sla_target(
 @router.get("/sla/compliance")
 def sla_compliance(
     days: int = Query(30, ge=1, le=365),
+    year: int | None = Query(None, ge=2020, le=2100),
+    month: int | None = Query(None, ge=1, le=12),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return sla_service.compliance(db, days)
+    start_at, end_at = _period_bounds(year, month)
+    return sla_service.compliance(db, days, start_at, end_at)
 
 
 @router.get("/sla/breaches")
 def sla_breaches(
     days: int = Query(30, ge=1, le=365),
     limit: int = Query(50, ge=1, le=500),
+    year: int | None = Query(None, ge=2020, le=2100),
+    month: int | None = Query(None, ge=1, le=12),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return sla_service.breaches(db, days, limit)
+    start_at, end_at = _period_bounds(year, month)
+    return sla_service.breaches(db, days, limit, start_at, end_at)
 
 
 @router.get("/sla/at-risk")
@@ -355,19 +377,41 @@ def kpi_monthly(
     return kpi_service.monthly_summary(db, year, month, site)
 
 
+@router.get("/kpi/monthly-trend")
+def kpi_monthly_trend(
+    year: int = Query(..., ge=2020, le=2100),
+    month: int = Query(..., ge=1, le=12),
+    months: int = Query(12, ge=1, le=36),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return kpi_service.monthly_trend(db, year, month, months)
+
+
 @router.get("/kpi/sites")
 def kpi_sites(
     days: int = Query(30, ge=1, le=365),
     limit: int = Query(20, ge=1, le=200),
+    year: int | None = Query(None, ge=2020, le=2100),
+    month: int | None = Query(None, ge=1, le=12),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return kpi_service.sites_ranking(db, days, limit)
+    start_at, end_at = _period_bounds(year, month)
+    return kpi_service.sites_ranking(
+        db,
+        days,
+        limit,
+        start_at.date() if start_at else None,
+        end_at.date() if end_at else None,
+    )
 
 
 @router.get("/kpi/causes")
 def kpi_causes(
     days: int = Query(90, ge=1, le=730),
+    year: int | None = Query(None, ge=2020, le=2100),
+    month: int | None = Query(None, ge=1, le=12),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -376,13 +420,17 @@ def kpi_causes(
     La seule donnée d'analyse dont le NOC est propriétaire : aucun outil de
     supervision ne la connaît.
     """
-    return kpi_service.causes(db, days)
+    start_at, end_at = _period_bounds(year, month)
+    return kpi_service.causes(db, days, start_at=start_at, end_at=end_at)
 
 
 @router.get("/kpi/resolution-times")
 def kpi_resolution_times(
     days: int = Query(30, ge=1, le=365),
+    year: int | None = Query(None, ge=2020, le=2100),
+    month: int | None = Query(None, ge=1, le=12),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return kpi_service.resolution_times(db, days)
+    start_at, end_at = _period_bounds(year, month)
+    return kpi_service.resolution_times(db, days, start_at, end_at)

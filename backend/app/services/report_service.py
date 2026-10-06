@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime, time
 
 from sqlalchemy.orm import Session
 
@@ -44,21 +44,29 @@ def month_label(month: int, year: int) -> str:
 def collect_report_data(db: Session, month: int, year: int) -> dict:
     """Rassemble les données du rapport depuis les services du dashboard."""
     monthly = kpi_service.monthly_summary(db, year, month)
-    days_in_period = 31
+    start_date, end_date = kpi_service.month_bounds(year, month)
+    start_at = datetime.combine(start_date, time.min, UTC)
+    end_at = datetime.combine(end_date, time.min, UTC)
 
     return {
         "organisation": REPORT_ORGANISATION,
-        "generated_at": datetime.now(timezone.utc),
+        "generated_at": datetime.now(UTC),
         "period": month_label(month, year),
         "month": month,
         "year": year,
         "monthly": monthly,
-        "trend": kpi_service.trend(db, days=days_in_period),
-        "sites": kpi_service.sites_ranking(db, days=days_in_period, limit=15),
-        "causes": kpi_service.causes(db, days=days_in_period),
-        "resolution": kpi_service.resolution_times(db, days=days_in_period),
-        "sla": sla_service.compliance(db, days=days_in_period),
-        "breaches": sla_service.breaches(db, days=days_in_period, limit=15),
+        "trend": kpi_service.trend(
+            db, start_date=start_date, end_date=end_date
+        ),
+        "sites": kpi_service.sites_ranking(
+            db, limit=15, start_date=start_date, end_date=end_date
+        ),
+        "causes": kpi_service.causes(db, start_at=start_at, end_at=end_at),
+        "resolution": kpi_service.resolution_times(db, start_at=start_at, end_at=end_at),
+        "sla": sla_service.compliance(db, start_at=start_at, end_at=end_at),
+        "breaches": sla_service.breaches(
+            db, limit=15, start_at=start_at, end_at=end_at
+        ),
     }
 
 

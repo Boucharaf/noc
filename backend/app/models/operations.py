@@ -170,12 +170,17 @@ class MaintenanceWindow(Base):
     Les alertes qui y tombent sont marquées et exclues des indicateurs : une
     coupure voulue n'est pas une panne, et la compter fausserait à la fois le
     volume d'incidents et le respect du SLA.
+
+    `site` est obligatoire à la création. `node_keys`, lorsqu'il est fourni,
+    limite la fenêtre à plusieurs équipements de ce site; sans cette liste,
+    la fenêtre couvre le site entier.
     """
 
     __tablename__ = "ops_maintenance_window"
 
     id = Column(Integer, primary_key=True)
     node_key = Column(Text)
+    node_keys = Column(JSONB)
     site = Column(Text)
     reason = Column(Text, nullable=False)
     starts_at = Column(DateTime(timezone=True), nullable=False)

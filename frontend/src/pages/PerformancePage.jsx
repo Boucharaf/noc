@@ -14,7 +14,6 @@ import {
   useNetworkKpi,
   useNetworkRanking,
   useNetworkSeries,
-  useNodeStates,
   useNodes,
 } from "../hooks/queries";
 
@@ -60,8 +59,7 @@ export default function PerformancePage() {
     ...new Set(allNodes.map((n) => n.node_type).filter(Boolean)),
   ].map((t) => ({ value: t, label: t }));
 
-  const nodeStates = useNodeStates();
-  const network = useNetworkKpi();
+  const network = useNetworkKpi({ site, organisation, nodeType });
   const series = useNetworkSeries({
     metricType: metric,
     hours,
@@ -91,7 +89,7 @@ export default function PerformancePage() {
     <div className="space-y-2.5">
       <PageHeader
         title="Performance réseau"
-        subtitle="Courbes historiques lues auprès des outils sources · disponibilité instantanée du parc"
+        subtitle="Courbe et classement sur la fenêtre choisie · tuiles d'état du parc en temps réel"
         actions={
           <Toolbar>
             <FilterSelect
@@ -135,7 +133,7 @@ export default function PerformancePage() {
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
         <NetworkVitals
           data={network.data}
-          expectedNodes={nodeStates.data?.total}
+          expectedNodes={network.data?.nodes_total}
           compact
         />
       </div>

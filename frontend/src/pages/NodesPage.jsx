@@ -10,7 +10,7 @@ import { Pagination } from "../components/ui/Table";
 import { QueryBoundary, SkeletonRows } from "../components/ui/States";
 import { NODE_STATES, nodeStateMeta, toolLabel } from "../lib/vocabulary";
 import { num } from "../lib/format";
-import { useNodeStates, useNodes, useReference } from "../hooks/queries";
+import { useNodeCoverage, useNodeStates, useNodes, useReference } from "../hooks/queries";
 
 /**
  * Inventaire du parc.
@@ -32,6 +32,7 @@ export default function NodesPage() {
   const [params, setParams] = useSearchParams();
   const { data: reference } = useReference();
   const stateCounts = useNodeStates();
+  const coverage = useNodeCoverage();
 
   const setParam = useCallback(
     (key, value) => {
@@ -214,7 +215,7 @@ export default function NodesPage() {
               onChange={(value) => setParam("source_tool", value)}
               allLabel="Tous les outils"
               width={140}
-              options={(reference?.source_tools ?? []).map((tool) => ({
+              options={(coverage.data ?? []).map(({ tool }) => ({
                 value: tool,
                 label: toolLabel(tool),
               }))}

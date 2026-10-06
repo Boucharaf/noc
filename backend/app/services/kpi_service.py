@@ -26,7 +26,7 @@ compromis assumé de l'architecture — voir ARCHITECTURE.md, §5.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -141,15 +141,27 @@ async def hour_distribution() -> list[dict]:
 # ---------------------------------------------------------------------------
 # « Depuis » — agrégats journaliers
 # ---------------------------------------------------------------------------
-def trend(db: Session, days: int = 30, site: str | None = None) -> list[dict]:
+def trend(
+    db: Session,
+    days: int = 30,
+    site: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> list[dict]:
     """Évolution jour par jour sur la période demandée.
 
     `site=None` lit la ligne « tous sites confondus » et non la somme des
     sites : les équipements dont aucun outil ne connaît la localité
     n'appartiennent à aucun site, et les additionner en oublierait une partie.
     """
-    since = date.today() - timedelta(days=days)
-    query = select(KpiDaily).where(KpiDaily.day >= since)
+    if (start_date is None) != (end_date is None):
+        raise ValueError("start_date et end_date doivent être fournis ensemble.")
+    query = select(KpiDaily)
+    if start_date is not None and end_date is not None:
+        query = query.where(KpiDaily.day >= start_date, KpiDaily.day < end_date)
+    else:
+        since = date.today() - timedelta(days=days)
+        query = query.where(KpiDaily.day >= since)
     query = query.where(
         KpiDaily.site == site if site else KpiDaily.site.is_(None)
     )
@@ -231,10 +243,89 @@ def monthly_summary(db: Session, year: int, month: int, site: str | None = None)
     }
 
 
-def sites_ranking(db: Session, days: int = 30, limit: int = 20) -> list[dict]:
+def monthly_trend(db: Session, year: int, month: int, months: int = 12) -> list[dict]:
+    """Monthly fleet averages and NOC-handled alert counts."""
+    month_index = year * 12 + month - 1 - (months - 1)
+    first_year, first_month_index = divmod(month_index, 12)
+    start = date(first_year, first_month_index + 1, 1)
+    _, end = month_bounds(year, month)
+    start_at = datetime.combine(start, datetime.min.time(), UTC)
+    end_at = datetime.combine(end, datetime.min.time(), UTC)
+
+    daily_rows = db.execute(
+        select(
+            func.date_trunc("month", KpiDaily.day).label("period"),
+            func.avg(KpiDaily.avg_alerts).label("avg_alerts"),
+            func.avg(KpiDaily.fleet_availability_pct).label("availability_pct"),
+        )
+        .where(
+            KpiDaily.site.is_(None),
+            KpiDaily.day >= start,
+            KpiDaily.day < end,
+        )
+        .group_by("period")
+    ).all()
+    handled_rows = db.execute(
+        select(
+            func.date_trunc("month", AlertState.detected_at).label("period"),
+            func.count().label("handled"),
+        )
+        .where(AlertState.detected_at >= start_at, AlertState.detected_at < end_at)
+        .group_by("period")
+    ).all()
+    resolved_rows = db.execute(
+        select(
+            func.date_trunc("month", AlertState.resolved_at).label("period"),
+            func.count().label("resolved"),
+        )
+        .where(AlertState.resolved_at >= start_at, AlertState.resolved_at < end_at)
+        .group_by("period")
+    ).all()
+
+    def keyed(rows: list) -> dict[tuple[int, int], object]:
+        return {(row.period.year, row.period.month): row for row in rows}
+
+    daily = keyed(daily_rows)
+    handled = keyed(handled_rows)
+    resolved = keyed(resolved_rows)
+    output = []
+    for offset in range(months):
+        current_index = first_year * 12 + first_month_index + offset
+        current_year, current_month_index = divmod(current_index, 12)
+        key = current_year, current_month_index + 1
+        daily_row = daily.get(key)
+        output.append(
+            {
+                "year": key[0],
+                "month": key[1],
+                "avg_alerts": (
+                    round(daily_row.avg_alerts, 1)
+                    if daily_row and daily_row.avg_alerts is not None
+                    else None
+                ),
+                "availability_pct": (
+                    round(daily_row.availability_pct, 2)
+                    if daily_row and daily_row.availability_pct is not None
+                    else None
+                ),
+                "handled": handled[key].handled if key in handled else 0,
+                "resolved": resolved[key].resolved if key in resolved else 0,
+            }
+        )
+    return output
+
+
+def sites_ranking(
+    db: Session,
+    days: int = 30,
+    limit: int = 20,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> list[dict]:
     """Sites classés par disponibilité moyenne, les moins bons d'abord."""
-    since = date.today() - timedelta(days=days)
-    rows = db.execute(
+    if (start_date is None) != (end_date is None):
+        raise ValueError("start_date et end_date doivent être fournis ensemble.")
+    query = (
         select(
             KpiDaily.site,
             func.avg(KpiDaily.fleet_availability_pct).label("availability"),
@@ -242,11 +333,17 @@ def sites_ranking(db: Session, days: int = 30, limit: int = 20) -> list[dict]:
             func.avg(KpiDaily.avg_down).label("down"),
             func.avg(KpiDaily.avg_nodes).label("nodes"),
         )
-        .where(KpiDaily.day >= since, KpiDaily.site.isnot(None))
+        .where(KpiDaily.site.isnot(None))
         .group_by(KpiDaily.site)
         .order_by(func.avg(KpiDaily.fleet_availability_pct).asc().nullslast())
         .limit(limit)
     )
+    if start_date is not None and end_date is not None:
+        query = query.where(KpiDaily.day >= start_date, KpiDaily.day < end_date)
+    else:
+        since = date.today() - timedelta(days=days)
+        query = query.where(KpiDaily.day >= since)
+    rows = db.execute(query)
     return [
         {
             "site": row.site,
@@ -262,7 +359,13 @@ def sites_ranking(db: Session, days: int = 30, limit: int = 20) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Causes — le seul historique que le NOC produit lui-même
 # ---------------------------------------------------------------------------
-def causes(db: Session, days: int = 90, limit: int = 15) -> list[dict]:
+def causes(
+    db: Session,
+    days: int = 90,
+    limit: int = 15,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+) -> list[dict]:
     """Causes retenues par les exploitants sur la période.
 
     C'est la donnée la plus précieuse du système, et la seule dont le NOC
@@ -270,10 +373,18 @@ def causes(db: Session, days: int = 90, limit: int = 15) -> list[dict]:
     venait d'un groupe électrogène à sec. Elle vient de `ops_alert_state`,
     renseignée à la clôture par le technicien.
     """
-    since = datetime.now(timezone.utc) - timedelta(days=days)
+    if (start_at is None) != (end_at is None):
+        raise ValueError("start_at et end_at doivent être fournis ensemble.")
+    if start_at is None:
+        end_at = datetime.now(UTC)
+        start_at = end_at - timedelta(days=days)
     rows = db.execute(
         select(AlertState.cause, func.count().label("count"))
-        .where(AlertState.cause.isnot(None), AlertState.resolved_at >= since)
+        .where(
+            AlertState.cause.isnot(None),
+            AlertState.resolved_at >= start_at,
+            AlertState.resolved_at < end_at,
+        )
         .group_by(AlertState.cause)
         .order_by(func.count().desc())
         .limit(limit)
@@ -285,7 +396,12 @@ def causes(db: Session, days: int = 90, limit: int = 15) -> list[dict]:
     return results
 
 
-def resolution_times(db: Session, days: int = 30) -> dict:
+def resolution_times(
+    db: Session,
+    days: int = 30,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+) -> dict:
     """Délais de prise en charge et de résolution, mesurés par le NOC.
 
     Calculés sur `ops_alert_state` et non sur les outils sources : le NOC
@@ -293,7 +409,11 @@ def resolution_times(db: Session, days: int = 30) -> dict:
     service. Le délai de détection de l'outil est une autre question, et
     elle appartient à l'outil.
     """
-    since = datetime.now(timezone.utc) - timedelta(days=days)
+    if (start_at is None) != (end_at is None):
+        raise ValueError("start_at et end_at doivent être fournis ensemble.")
+    if start_at is None:
+        end_at = datetime.now(UTC)
+        start_at = end_at - timedelta(days=days)
 
     tta = db.execute(
         select(
@@ -303,7 +423,8 @@ def resolution_times(db: Session, days: int = 30) -> dict:
         ).where(
             AlertState.acknowledged_at.isnot(None),
             AlertState.detected_at.isnot(None),
-            AlertState.acknowledged_at >= since,
+            AlertState.acknowledged_at >= start_at,
+            AlertState.acknowledged_at < end_at,
         )
     ).scalar()
 
@@ -315,12 +436,15 @@ def resolution_times(db: Session, days: int = 30) -> dict:
         ).where(
             AlertState.resolved_at.isnot(None),
             AlertState.detected_at.isnot(None),
-            AlertState.resolved_at >= since,
+            AlertState.resolved_at >= start_at,
+            AlertState.resolved_at < end_at,
         )
     ).scalar()
 
     handled = db.execute(
-        select(func.count()).select_from(AlertState).where(AlertState.resolved_at >= since)
+        select(func.count())
+        .select_from(AlertState)
+        .where(AlertState.resolved_at >= start_at, AlertState.resolved_at < end_at)
     ).scalar()
 
     return {

@@ -202,8 +202,8 @@ export const nodes = {
 /* Réseau et métriques                                                  */
 /* ------------------------------------------------------------------ */
 export const metrics = {
-  /** Instantané : lecture Redis, jamais en échec tant que la collecte tourne. */
-  snapshot: () => get("/network/snapshot"),
+  /** Instantané Redis, éventuellement filtré par site, organisation et type. */
+  snapshot: (params) => get("/network/snapshot", params),
   down: () => get("/network/down"),
   top: (limit) => get("/network/top", { limit }),
 
@@ -226,6 +226,8 @@ export const kpi = {
   trend: (params) => get("/kpi/trend", params),
   /** @param {object} params year, month, site */
   monthly: (params) => get("/kpi/monthly", params),
+  /** @param {object} params year, month, months */
+  monthlyTrend: (params) => get("/kpi/monthly-trend", params),
   sites: (params) => get("/kpi/sites", params),
   /** Causes retenues par les exploitants — la seule analyse propre au NOC. */
   causes: (params) => get("/kpi/causes", params),

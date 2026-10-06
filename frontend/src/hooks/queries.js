@@ -188,8 +188,15 @@ export function useAlertActions() {
  * `page_size`), et ajoute `items` — les nœuds sous leurs anciens noms de
  * champs (`node_id`, `locality`) — à côté de `nodes`, la forme native.
  */
-export function useNodes(params = {}) {
-  const { q, page, page_size: pageSize, locality_id: localityId, ...rest } = params;
+export function useNodes(params = {}, options = {}) {
+  const {
+    q,
+    page,
+    page_size: pageSize,
+    locality_id: localityId,
+    enabled = true,
+    ...rest
+  } = params;
   const query = { ...rest };
   if (query.site === undefined && localityId !== undefined) {
     query.site = String(localityId);
@@ -203,6 +210,7 @@ export function useNodes(params = {}) {
   return useQuery({
     queryKey: ["nodes", "list", query],
     queryFn: () => api.nodes.list(query),
+    enabled: options.enabled ?? enabled,
     refetchInterval: useInterval(REFRESH.OPERATIONAL),
     select: (data) =>
       data && {
@@ -273,10 +281,14 @@ export function useNodeCoverage() {
 /* ================================================================== */
 /* Réseau                                                              */
 /* ================================================================== */
-export function useNetworkSnapshot() {
+export function useNetworkSnapshot({ site, organisation, nodeType } = {}) {
   return useQuery({
-    queryKey: ["network", "snapshot"],
-    queryFn: api.metrics.snapshot,
+    queryKey: ["network", "snapshot", site, organisation, nodeType],
+    queryFn: () => api.metrics.snapshot({
+      site,
+      organisation,
+      node_type: nodeType,
+    }),
     refetchInterval: useInterval(REFRESH.LIVE),
   });
 }
@@ -352,6 +364,7 @@ const SERIES_PERIODS = [
   [1, "1h"],
   [6, "6h"],
   [24, "24h"],
+  [72, "3d"],
   [168, "7d"],
   [720, "30d"],
   [2160, "90d"],
@@ -489,18 +502,30 @@ export function useKpiMonthly(params) {
   });
 }
 
-export function useKpiSites({ days = 30, limit = 20 } = {}) {
+export function useKpiMonthlyTrend({ months = 12, ...params } = {}) {
+  const period = usePeriodParams();
+  const query = { ...period, ...params, months };
   return useQuery({
-    queryKey: ["kpi", "sites", days, limit],
-    queryFn: () => api.kpi.sites({ days, limit }),
+    queryKey: ["kpi", "monthly-trend", query],
+    queryFn: () => api.kpi.monthlyTrend(query),
     refetchInterval: useInterval(REFRESH.ANALYTIC),
   });
 }
 
-export function useKpiCauses({ days = 90 } = {}) {
+export function useKpiSites({ days = 30, limit = 20, year, month } = {}) {
+  const query = { days, limit, year, month };
   return useQuery({
-    queryKey: ["kpi", "causes", days],
-    queryFn: () => api.kpi.causes({ days }),
+    queryKey: ["kpi", "sites", query],
+    queryFn: () => api.kpi.sites(query),
+    refetchInterval: useInterval(REFRESH.ANALYTIC),
+  });
+}
+
+export function useKpiCauses({ days = 90, year, month } = {}) {
+  const query = { days, year, month };
+  return useQuery({
+    queryKey: ["kpi", "causes", query],
+    queryFn: () => api.kpi.causes(query),
     select: (rows) => {
       const total = (rows ?? []).reduce((sum, row) => sum + (row.count ?? 0), 0);
       return (rows ?? []).map((row) => ({
@@ -515,10 +540,11 @@ export function useKpiCauses({ days = 90 } = {}) {
   });
 }
 
-export function useResolutionTimes({ days = 30 } = {}) {
+export function useResolutionTimes({ days = 30, year, month } = {}) {
+  const query = { days, year, month };
   return useQuery({
-    queryKey: ["kpi", "resolution", days],
-    queryFn: () => api.kpi.resolutionTimes({ days }),
+    queryKey: ["kpi", "resolution", query],
+    queryFn: () => api.kpi.resolutionTimes(query),
     refetchInterval: useInterval(REFRESH.ANALYTIC),
   });
 }
@@ -526,18 +552,20 @@ export function useResolutionTimes({ days = 30 } = {}) {
 /* ================================================================== */
 /* Engagements de service                                              */
 /* ================================================================== */
-export function useSlaCompliance({ days = 30 } = {}) {
+export function useSlaCompliance({ days = 30, year, month } = {}) {
+  const query = { days, year, month };
   return useQuery({
-    queryKey: ["sla", "compliance", days],
-    queryFn: () => api.sla.compliance({ days }),
+    queryKey: ["sla", "compliance", query],
+    queryFn: () => api.sla.compliance(query),
     refetchInterval: useInterval(REFRESH.ANALYTIC),
   });
 }
 
-export function useSlaBreaches({ days = 30 } = {}) {
+export function useSlaBreaches({ days = 30, year, month } = {}) {
+  const query = { days, year, month };
   return useQuery({
-    queryKey: ["sla", "breaches", days],
-    queryFn: () => api.sla.breaches({ days }),
+    queryKey: ["sla", "breaches", query],
+    queryFn: () => api.sla.breaches(query),
     refetchInterval: useInterval(REFRESH.ANALYTIC),
   });
 }
@@ -854,8 +882,9 @@ export function useOpenAlerts({ limit = 50, ...rest } = {}) {
  * l'instant présent, pas une moyenne glissante. Le calculer sur une fenêtre
  * demanderait d'interroger les outils sources à chaque rafraîchissement.
  */
-export function useNetworkKpi() {
-  const query = useNetworkSnapshot();
+export function useNetworkKpi(options = {}) {
+  const filters = typeof options === "string" ? { site: options } : options;
+  const query = useNetworkSnapshot(filters);
   const data = query.data;
   return {
     ...query,
@@ -1162,17 +1191,39 @@ export function useNodeLatest(nodeId) {
  * Le backend rend, par gravité, les délais moyens et si l'objectif est tenu
  * EN MOYENNE ; les dépassements individuels viennent de /sla/breaches. Les
  * taux de conformité sont recalculés ici à partir de ces deux sources. Les
- * « indicateurs de service » réseau (latence, disponibilité contractuelle)
- * n'ont plus de source : la liste est vide plutôt qu'inventée.
+ * La conformité TTR vient de /sla/compliance. La disponibilité est croisée
+ * avec l'agrégat mensuel et la cible configurée la plus exigeante ; la
+ * latence reste absente faute de source de données.
  */
 export function useSla(params = {}) {
-  const compliance = useSlaCompliance(params);
+  const period = usePeriodParams();
+  const query = { ...period, ...params };
+  const compliance = useSlaCompliance(query);
+  const availability = useKpiMonthly(query);
+  const targets = useSlaTargets();
   const data = compliance.data;
   const resolved = data?.resolved_total ?? 0;
   const totalBreached = data?.breached_total ?? 0;
+  const availabilityTargets = (targets.data ?? []).filter(
+    (target) => target.availability_target_pct != null,
+  );
+  const availabilityTarget = availabilityTargets.length
+    ? Math.max(...availabilityTargets.map((target) => target.availability_target_pct))
+    : null;
+  const availabilityPct = availability.data?.current?.availability_pct ?? null;
+  const isLoading = compliance.isLoading || availability.isLoading || targets.isLoading;
+  const isError = compliance.isError || availability.isError || targets.isError;
 
   return {
     ...compliance,
+    isLoading,
+    isError,
+    error: compliance.error ?? availability.error ?? targets.error,
+    refetch: () => Promise.all([
+      compliance.refetch(),
+      availability.refetch(),
+      targets.refetch(),
+    ]),
     data: data
       ? {
           ...data,
@@ -1180,7 +1231,20 @@ export function useSla(params = {}) {
             ? Math.max(0, ((resolved - totalBreached) / resolved) * 100)
             : null,
           total_breached: totalBreached,
-          indicators: [],
+          availability_target_pct: availabilityTarget,
+          indicators: availabilityTargets.map((target) => ({
+            metric: "Disponibilité du parc",
+            severity: target.severity,
+            value: availabilityPct,
+            target: target.availability_target_pct,
+            unit: "%",
+            status:
+              availabilityPct == null
+                ? "unavailable"
+                : availabilityPct >= target.availability_target_pct
+                  ? "met"
+                  : "missed",
+          })),
           by_severity: (data.by_severity ?? []).map((row) => {
             const breached = row.breached ?? 0;
             return {

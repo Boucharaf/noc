@@ -191,6 +191,7 @@ ON CONFLICT (severity) DO NOTHING;
 CREATE TABLE IF NOT EXISTS ops_maintenance_window (
     id              SERIAL PRIMARY KEY,
     node_key        TEXT,
+    node_keys       JSONB,
     site            TEXT,
     reason          TEXT NOT NULL,
     starts_at       TIMESTAMPTZ NOT NULL,
@@ -198,13 +199,14 @@ CREATE TABLE IF NOT EXISTS ops_maintenance_window (
     suppress_alerts BOOLEAN NOT NULL DEFAULT TRUE,
     created_by      INTEGER REFERENCES noc_user(id) ON DELETE SET NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    -- Une fenêtre doit couvrir un équipement OU un site, jamais ni l'un ni
-    -- l'autre : sans cette contrainte, une fenêtre vide s'appliquerait à
-    -- tout le parc et éteindrait la supervision entière.
+    -- Une fenêtre doit couvrir un équipement ou un site; node_keys permet
+    -- une sélection multiple limitée au site choisi.
     CONSTRAINT ops_maintenance_scope
         CHECK (node_key IS NOT NULL OR site IS NOT NULL),
     CONSTRAINT ops_maintenance_period CHECK (ends_at > starts_at)
 );
+
+ALTER TABLE ops_maintenance_window ADD COLUMN IF NOT EXISTS node_keys JSONB;
 
 CREATE INDEX IF NOT EXISTS idx_ops_maintenance_active
     ON ops_maintenance_window(starts_at, ends_at);

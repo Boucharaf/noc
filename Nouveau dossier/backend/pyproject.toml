@@ -1,0 +1,21 @@
+[tool.ruff]
+# 100 colonnes plutôt que 88 : les requêtes SQL en chaînes triples et les
+# signatures FastAPI avec dépendances dépassent régulièrement 88 sans
+# qu'un retour à la ligne améliore la lecture.
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "B008",  # Depends() en valeur par défaut : c'est la façon normale
+             # d'écrire une dépendance FastAPI.
+]
+
+[tool.ruff.lint.per-file-ignores]
+"app/models/__init__.py" = ["F401"]   # ré-exports volontaires
+"tests/*" = ["E402"]                  # variables d'env posées avant import
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

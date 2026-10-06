@@ -24,8 +24,8 @@ import {
   useKpiHourDistribution,
   useKpiLocalities,
   useKpiLocalitiesMap,
+  useKpiMonthlyTrend,
   useKpiSummary,
-  useKpiTrend,
   useOrganisations,
   useResolutionTimes,
   useSites,
@@ -55,15 +55,15 @@ export default function DirectionView() {
 
   const summary = useKpiSummary();
   const activeAlerts = useAlertSummary();
-  const resolution = useResolutionTimes({ days: 30 });
+  const resolution = useResolutionTimes({ month, year });
   const sla = useSla();
-  const trend = useKpiTrend({ days: 183 });
-  const localities = useKpiLocalities(10);
+  const trend = useKpiMonthlyTrend({ months: 6, month, year });
+  const localities = useKpiLocalities({ limit: 10, month, year });
   const localitiesMap = useKpiLocalitiesMap();
   const organisations = useOrganisations();
   const sites = useSites();
   const topNodes = useTopNodes(10);
-  const causes = useKpiCauses();
+  const causes = useKpiCauses({ month, year });
   const hours = useKpiHourDistribution();
   const coverage = useCoverage();
 
@@ -86,7 +86,11 @@ export default function DirectionView() {
     }
   };
 
-  const trendData = trend.data ?? [];
+  const trendData = (trend.data ?? []).map((point) => ({
+    ...point,
+    label: monthLabel(point.month, point.year),
+    total_incidents: point.avg_alerts,
+  }));
   const unavailableSites = (sites.data ?? []).filter(
     (site) => site.site !== "Localité non renseignée" && site.down > 0,
   ).length;
@@ -179,17 +183,17 @@ export default function DirectionView() {
           to="/incidents?severity=critical"
         />
         <Stat
-          label="Résolus par le NOC (30 j)"
+          label={`Résolus par le NOC (${monthLabel(month, year)})`}
           value={num(resolution.data?.handled_alerts, "0")}
         />
         <Stat
-          label="MTTR moyen (30 j)"
+          label={`MTTR moyen (${monthLabel(month, year)})`}
           value={duration(resolution.data?.mttr_minutes)}
           color={resolution.data?.mttr_minutes > 240 ? "var(--sev-high)" : "var(--state-up)"}
           target="≤ 4 h"
         />
         <Stat
-          label="MTTA moyen (30 j)"
+          label={`MTTA moyen (${monthLabel(month, year)})`}
           value={duration(resolution.data?.mtta_minutes)}
           color={resolution.data?.mtta_minutes > 15 ? "var(--sev-medium)" : "var(--state-up)"}
           target="≤ 15 min"

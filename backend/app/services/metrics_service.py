@@ -27,24 +27,59 @@ from app.services import history_service, live_service
 logger = logging.getLogger(__name__)
 
 
-async def network_snapshot() -> dict:
+async def network_snapshot(
+    site: str | None = None,
+    organisation: str | None = None,
+    node_type: str | None = None,
+) -> dict:
     """Santé du réseau à l'instant présent, depuis l'instantané."""
-    summary = await live_service.fleet_summary()
     nodes = await live_service.get_nodes()
+    alerts = await live_service.get_alerts()
+    if site:
+        nodes = [node for node in nodes if node.get("site") == site]
+    if organisation:
+        nodes = [node for node in nodes if node.get("organisation") == organisation]
+    if node_type:
+        nodes = [node for node in nodes if node.get("node_type") == node_type]
+
+    if site or organisation or node_type:
+        node_sources = {
+            f"{tool}:{reference}"
+            for node in nodes
+            for tool, reference in (node.get("sources") or {}).items()
+        }
+        alerts = [
+            alert
+            for alert in alerts
+            if f"{alert.get('tool')}:{alert.get('node_ref')}" in node_sources
+        ]
+
+    nodes_by_state: dict[str, int] = {}
+    for node in nodes:
+        state = node.get("state", "unknown")
+        nodes_by_state[state] = nodes_by_state.get(state, 0) + 1
+
+    alerts_by_severity: dict[str, int] = {}
+    for alert in alerts:
+        severity = alert.get("severity", "unknown")
+        alerts_by_severity[severity] = alerts_by_severity.get(severity, 0) + 1
+
+    total = len(nodes)
+    nodes_up = nodes_by_state.get("up", 0)
 
     return {
-        "nodes_total": summary["nodes_total"],
-        "nodes_up": summary["nodes_by_state"].get("up", 0),
-        "nodes_down": summary["nodes_by_state"].get("down", 0),
-        "nodes_degraded": summary["nodes_by_state"].get("degraded", 0),
+        "nodes_total": total,
+        "nodes_up": nodes_up,
+        "nodes_down": nodes_by_state.get("down", 0),
+        "nodes_degraded": nodes_by_state.get("degraded", 0),
         # « silent » n'est pas « up ». Un équipement dont l'outil ne dit plus
         # rien est un trou de supervision, et le compter comme sain est la
         # façon la plus sûre de rater une panne.
-        "nodes_silent": summary["nodes_by_state"].get("silent", 0),
-        "nodes_maintenance": summary["nodes_by_state"].get("maintenance", 0),
-        "fleet_health_pct": summary["fleet_health_pct"],
-        "alerts_total": summary["alerts_total"],
-        "alerts_critical": summary["alerts_by_severity"].get("critical", 0),
+        "nodes_silent": nodes_by_state.get("silent", 0),
+        "nodes_maintenance": nodes_by_state.get("maintenance", 0),
+        "fleet_health_pct": round(100.0 * nodes_up / total, 2) if total else None,
+        "alerts_total": len(alerts),
+        "alerts_critical": alerts_by_severity.get("critical", 0),
         "tools_covering": len(
             {tool for node in nodes for tool in (node.get("sources") or {})}
         ),

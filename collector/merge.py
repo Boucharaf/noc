@@ -61,6 +61,7 @@ class MergedNode:
     hostname: str                 # nom technique — celui qui a servi au rapprochement
     ip: str | None
     state: str
+    enabled: bool
     site: str | None
     latitude: float | None
     longitude: float | None
@@ -285,6 +286,8 @@ def _fold(group_id: str, members: list[Node]) -> MergedNode:
         hostname=hostname,
         ip=ip,
         state=state,
+        # Keep the node enabled while at least one source still monitors it.
+        enabled=any(node.enabled for node in members),
         site=site,
         latitude=latitude,
         longitude=longitude,
