@@ -513,7 +513,10 @@ export function useKpiMonthlyTrend({ months = 12, ...params } = {}) {
 }
 
 export function useKpiSites({ days = 30, limit = 20, year, month } = {}) {
-  const query = { days, limit, year, month };
+  const period = usePeriodParams();
+  const resolvedYear = year ?? period.year;
+  const resolvedMonth = month ?? period.month;
+  const query = { days, limit, year: resolvedYear, month: resolvedMonth };
   return useQuery({
     queryKey: ["kpi", "sites", query],
     queryFn: () => api.kpi.sites(query),
@@ -522,7 +525,10 @@ export function useKpiSites({ days = 30, limit = 20, year, month } = {}) {
 }
 
 export function useKpiCauses({ days = 90, year, month } = {}) {
-  const query = { days, year, month };
+  const period = usePeriodParams();
+  const resolvedYear = year ?? period.year;
+  const resolvedMonth = month ?? period.month;
+  const query = { days, year: resolvedYear, month: resolvedMonth };
   return useQuery({
     queryKey: ["kpi", "causes", query],
     queryFn: () => api.kpi.causes(query),
@@ -541,7 +547,12 @@ export function useKpiCauses({ days = 90, year, month } = {}) {
 }
 
 export function useResolutionTimes({ days = 30, year, month } = {}) {
-  const query = { days, year, month };
+  const period = usePeriodParams();
+  // Si year/month sont fournis explicitement, ils priment ; sinon on lit le store
+  // pour que le changement de mois dans le PeriodPicker déclenche un refetch.
+  const resolvedYear = year ?? period.year;
+  const resolvedMonth = month ?? period.month;
+  const query = { days, year: resolvedYear, month: resolvedMonth };
   return useQuery({
     queryKey: ["kpi", "resolution", query],
     queryFn: () => api.kpi.resolutionTimes(query),
@@ -553,7 +564,10 @@ export function useResolutionTimes({ days = 30, year, month } = {}) {
 /* Engagements de service                                              */
 /* ================================================================== */
 export function useSlaCompliance({ days = 30, year, month } = {}) {
-  const query = { days, year, month };
+  const period = usePeriodParams();
+  const resolvedYear = year ?? period.year;
+  const resolvedMonth = month ?? period.month;
+  const query = { days, year: resolvedYear, month: resolvedMonth };
   return useQuery({
     queryKey: ["sla", "compliance", query],
     queryFn: () => api.sla.compliance(query),
@@ -562,7 +576,10 @@ export function useSlaCompliance({ days = 30, year, month } = {}) {
 }
 
 export function useSlaBreaches({ days = 30, year, month } = {}) {
-  const query = { days, year, month };
+  const period = usePeriodParams();
+  const resolvedYear = year ?? period.year;
+  const resolvedMonth = month ?? period.month;
+  const query = { days, year: resolvedYear, month: resolvedMonth };
   return useQuery({
     queryKey: ["sla", "breaches", query],
     queryFn: () => api.sla.breaches(query),
@@ -1149,39 +1166,58 @@ export function useLocalityNodes(site) {
   return useNodes(site ? { site } : {});
 }
 
-/** Alertes actives d'un équipement — déjà portées par sa fiche. */
+/** Alertes actives d'un équipement — appel direct avec filtre node_key côté serveur.
+ *
+ * On n'utilise PAS useIncidents ici : ce hook charge TOUT le mur (limit 5000)
+ * puis filtre côté client. Sur un parc actif, cela représente plusieurs milliers
+ * d'alertes téléchargées pour en garder quelques-unes. On appelle directement
+ * api.alerts.list avec node_key, maintenant que le backend l'accepte.
+ */
 export function useNodeIncidents(nodeId) {
-  const query = useIncidents({ node_key: nodeId, page_size: 50 });
-  return { ...query, data: query.data?.items ?? [] };
+  const query = useQuery({
+    queryKey: ["alerts", "node", nodeId],
+    queryFn: () => api.alerts.list({ node_key: nodeId, limit: 200 }),
+    enabled: Boolean(nodeId),
+    refetchInterval: useInterval(REFRESH.LIVE),
+    select: (data) => (data?.alerts ?? []).map(toIncident),
+  });
+  return { ...query, data: query.data ?? [] };
 }
 
 /**
  * Dernière valeur de chaque métrique d'un équipement.
  *
- * Interroge l'outil source, et rend la dernière valeur de la série sur une
- * heure : il n'y a plus de table de « dernières valeurs » côté NOC,
- * puisqu'aucune métrique n'y est recopiée.
+ * Interroge l'outil source via GET /nodes/{id}/metrics?period=1h.
+ * Si l'outil source est indisponible (502), on retourne un objet vide {}
+ * plutôt que undefined : la page peut ainsi afficher les onglets de métriques
+ * (avec "—") au lieu de les cacher entièrement, ce qui laissait croire à une
+ * absence totale de supervision.
  */
 export function useNodeLatest(nodeId) {
   const query = useNodeSeries(nodeId, { period: "1h" });
   const series = query.data?.series;
   return {
     ...query,
-    data: series
-      ? Object.fromEntries(
-          Object.entries(series).map(([metric, value]) => [
-            metric,
-                value.points?.length
-                  ? {
-                      ...value.points[value.points.length - 1],
-                      time:
-                        value.points[value.points.length - 1].time ??
-                        value.points[value.points.length - 1].at,
-                    }
-                  : null,
-          ]),
-        )
-      : undefined,
+    // En cas d'erreur (502 outil source indisponible), on expose {} et non
+    // undefined : l'appelant distingue "données non encore chargées" (undefined)
+    // de "source interrogée mais sans réponse" ({}).
+    data: query.isError
+      ? {}
+      : series
+        ? Object.fromEntries(
+            Object.entries(series).map(([metric, value]) => [
+              metric,
+              value.points?.length
+                ? {
+                    ...value.points[value.points.length - 1],
+                    time:
+                      value.points[value.points.length - 1].time ??
+                      value.points[value.points.length - 1].at,
+                  }
+                : null,
+            ]),
+          )
+        : undefined,
   };
 }
 

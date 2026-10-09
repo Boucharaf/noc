@@ -15,13 +15,13 @@ terrain en cours.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import NODE_STATES
-from app.models import FieldIntervention, MaintenanceWindow
+from app.models import AlertState, FieldIntervention, MaintenanceWindow
 from app.services import live_service
 from app.services.maintenance_service import covers as maintenance_covers
 
@@ -159,6 +159,61 @@ async def get_node(db: Session, node_id: str) -> dict | None:
         if (node.get("sources") or {}).get(alert["tool"]) == alert.get("node_ref")
     ]
 
+    # -----------------------------------------------------------------
+    # Historique des incidents depuis PostgreSQL (résolutions seulement)
+    # -----------------------------------------------------------------
+    cutoff_30d = datetime.now(timezone.utc) - timedelta(days=30)
+    cutoff_90d = datetime.now(timezone.utc) - timedelta(days=90)
+
+    resolved_90d = list(
+        db.execute(
+            select(AlertState).where(
+                AlertState.node_key == node_id,
+                AlertState.resolved_at >= cutoff_90d,
+            )
+        ).scalars()
+    )
+
+    incidents_30d = sum(
+        1 for s in resolved_90d if s.resolved_at and s.resolved_at >= cutoff_30d
+    )
+    incidents_90d = len(resolved_90d)
+
+    # MTTR en minutes : de la détection à la résolution
+    mttr_values = []
+    for s in resolved_90d:
+        if s.resolved_at and s.detected_at:
+            delta = (s.resolved_at - s.detected_at).total_seconds() / 60
+            if delta >= 0:
+                mttr_values.append(delta)
+    avg_mttr_minutes = (
+        round(sum(mttr_values) / len(mttr_values), 1) if mttr_values else None
+    )
+
+    # Indisponibilité 30 j (somme des durées de résolution sur 30 j)
+    downtime_30d_minutes = (
+        round(
+            sum(
+                (s.resolved_at - s.detected_at).total_seconds() / 60
+                for s in resolved_90d
+                if s.resolved_at
+                and s.detected_at
+                and s.resolved_at >= cutoff_30d
+                and (s.resolved_at - s.detected_at).total_seconds() >= 0
+            ),
+            1,
+        )
+        or None
+    )
+
+    # -----------------------------------------------------------------
+    # source_refs : liste [{source_tool, external_ref}] pour l'affichage
+    # -----------------------------------------------------------------
+    source_refs = [
+        {"source_tool": tool, "external_ref": ref}
+        for tool, ref in sorted((node.get("sources") or {}).items())
+    ]
+
     return {
         **node,
         "state": "maintenance" if window else node.get("state", "unknown"),
@@ -166,6 +221,7 @@ async def get_node(db: Session, node_id: str) -> dict | None:
         "maintenance_reason": window.reason if window else None,
         "maintenance_until": window.ends_at.isoformat() if window else None,
         "tools": sorted((node.get("sources") or {}).keys()),
+        "source_refs": source_refs,
         "active_alerts": alerts,
         "field_interventions": [
             {
@@ -176,6 +232,13 @@ async def get_node(db: Session, node_id: str) -> dict | None:
             }
             for row in interventions
         ],
+        # Métriques historiques — calculées depuis les résolutions PostgreSQL.
+        # Les valeurs sont None si aucun incident n'a été résolu via le NOC
+        # sur la période : c'est différent de zéro (aucun incident enregistré).
+        "incidents_30d": incidents_30d,
+        "incidents_90d": incidents_90d,
+        "avg_mttr_minutes": avg_mttr_minutes,
+        "downtime_30d_minutes": downtime_30d_minutes,
     }
 
 

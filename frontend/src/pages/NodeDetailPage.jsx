@@ -79,12 +79,23 @@ export default function NodeDetailPage() {
 
   const nodeQuery = useNode(id);
   const latest = useNodeLatest(id);
-  const incidents = useNodeIncidents(id, 30);
+  const incidents = useNodeIncidents(id);
 
   const node = nodeQuery.data;
-  const availableMetrics = latest.data
-    ? METRIC_TYPES.filter((type) => latest.data[type]?.value != null)
-    : [];
+  // availableMetrics : métriques ayant une valeur mesurée récente.
+  // - latest.data === undefined → pas encore chargé → [] (pas d'onglets)
+  // - latest.data === {} → outil source injoignable → on affiche METRIC_TYPES
+  //   entiers avec "—" : l'exploitant voit les onglets attendus et sait que
+  //   la source est temporairement indisponible, sans croire à l'absence de
+  //   supervision.
+  // - latest.data = { latency_ms: {...}, ... } → ceux avec une valeur réelle
+  const sourceDown = latest.data != null && Object.keys(latest.data).length === 0;
+  const availableMetrics =
+    latest.data == null
+      ? []
+      : sourceDown
+        ? METRIC_TYPES
+        : METRIC_TYPES.filter((type) => latest.data[type]?.value != null);
   const activeMetric = availableMetrics.includes(metric)
     ? metric
     : availableMetrics[0] ?? METRIC_TYPES[0] ?? null;
@@ -149,33 +160,45 @@ export default function NodeDetailPage() {
           <>
             {/* --- Dernières mesures --- */}
             {availableMetrics.length ? (
-              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
-                {availableMetrics.map((type) => {
-                const info = metricMeta(type);
-                const point = latest.data?.[type];
-                const value = point?.value ?? null;
-                return (
-                  <Stat
-                    key={type}
-                    compact
-                    label={info.label}
-                    value={
-                      value === null
-                        ? "—"
-                        : type.startsWith("bandwidth")
-                          ? bandwidth(value)
-                          : `${decimal(value, info.digits)}${info.unit === "%" ? " %" : info.unit ? ` ${info.unit}` : ""}`
-                    }
-                    color={
-                      value === null
-                        ? "var(--ink-3)"
-                        : (thresholdColor(type, value) ?? undefined)
-                    }
-                    hint={point ? ageFrom(point.time) : "non collectée"}
-                  />
-                );
-                })}
-              </div>
+              <>
+                {sourceDown && (
+                  <p className="text-[11.5px] px-1 mb-1" style={{ color: "var(--sev-medium)" }}>
+                    ⚠ Source de métriques temporairement injoignable
+                    {data.source_tools?.length
+                      ? ` (${data.source_tools.map(toolLabel).join(", ")})`
+                      : ""}
+                    . Les valeurs affichées ci-dessous sont indicatives — elles seront
+                    mises à jour dès que la connexion sera rétablie.
+                  </p>
+                )}
+                <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
+                  {availableMetrics.map((type) => {
+                    const info = metricMeta(type);
+                    const point = latest.data?.[type];
+                    const value = point?.value ?? null;
+                    return (
+                      <Stat
+                        key={type}
+                        compact
+                        label={info.label}
+                        value={
+                          value === null
+                            ? "—"
+                            : type.startsWith("bandwidth")
+                              ? bandwidth(value)
+                              : `${decimal(value, info.digits)}${info.unit === "%" ? " %" : info.unit ? ` ${info.unit}` : ""}`
+                        }
+                        color={
+                          value === null
+                            ? "var(--ink-3)"
+                            : (thresholdColor(type, value) ?? undefined)
+                        }
+                        hint={point ? ageFrom(point.time) : "non collectée"}
+                      />
+                    );
+                  })}
+                </div>
+              </>
             ) : (
               <p className="text-[12px] px-1" style={{ color: "var(--ink-3)" }}>
                 {latest.isLoading

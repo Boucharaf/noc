@@ -78,6 +78,13 @@ class MergedNode:
     last_check_at: datetime | None = None
     next_check_at: datetime | None = None
     last_output: str | None = None
+    # Dernière mesure reçue — synonyme de last_check_at, mais nommé
+    # explicitement pour que le frontend puisse l'afficher sans ambiguïté.
+    last_metric_at: datetime | None = None
+    # Heure depuis laquelle l'équipement est en panne (`state == "down"`).
+    # None quand l'état n'est pas "down" ou quand on ne connaît pas le début.
+    # Calculé par cycle.py en comparant avec le snapshot précédent.
+    down_since: datetime | None = None
     # Traçabilité : quels outils voient cet équipement, et sous quelle
     # référence. Affiché sur la fiche d'équipement — un exploitant qui doute
     # doit pouvoir remonter à la source en un clic.
@@ -302,6 +309,9 @@ def _fold(group_id: str, members: list[Node]) -> MergedNode:
         last_check_at=last_check_at,
         next_check_at=next_check_at,
         last_output=last_output,
+        # last_metric_at reprend last_check_at : c'est la dernière fois qu'un
+        # outil de supervision a interrogé cet équipement et reçu une réponse.
+        last_metric_at=last_check_at,
         sources={node.tool: node.ref for node in members},
     )
 

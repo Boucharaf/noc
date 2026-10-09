@@ -140,6 +140,7 @@ async def list_alerts(
     site: str | None = None,
     organisation: str | None = None,
     node_type: str | None = None,
+    node_key: str | None = None,
     acknowledged: bool | None = None,
     include_maintenance: bool = True,
     limit: int = 500,
@@ -243,6 +244,8 @@ async def list_alerts(
 
     # -- filtres ----------------------------------------------------------
     def keep(alert: dict) -> bool:
+        if node_key and alert.get("node_key") != node_key:
+            return False
         if severity and alert.get("severity") != severity:
             return False
         if tool and alert.get("tool") != tool:

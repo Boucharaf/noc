@@ -198,6 +198,28 @@ async def run_cycle(
     merged, report = merge_nodes(all_nodes)
     merged, orphans = attach_alerts(merged, all_alerts)
 
+    # Propager down_since depuis le snapshot précédent.
+    # Un équipement qui était déjà "down" au cycle précédent conserve son
+    # down_since d'origine : c'est ce qui permet d'afficher "hors service
+    # depuis 3 heures" plutôt que "hors service depuis 5 minutes".
+    # Un équipement qui devient "down" ce cycle reçoit l'heure de démarrage
+    # du cycle comme down_since.
+    previous_nodes_raw = await store.read_nodes() or []
+    previous_down_since: dict[str, str] = {
+        n["id"]: n["down_since"]
+        for n in previous_nodes_raw
+        if n.get("state") == "down" and n.get("down_since")
+    }
+    for node in merged:
+        if node.state == "down":
+            if node.id in previous_down_since:
+                # L'équipement était déjà "down" : on conserve l'horodatage
+                # d'origine pour que la durée d'indispo soit exacte.
+                node.down_since = datetime.fromisoformat(previous_down_since[node.id])
+            else:
+                # Première détection "down" ce cycle.
+                node.down_since = started_at
+
     meta = build_meta(
         started_at=started_at,
         duration_s=time.perf_counter() - started,

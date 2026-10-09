@@ -286,6 +286,7 @@ export const interop = {
 export const notifications = {
   vapidPublicKey: () => get("/notifications/vapid-public-key"),
   subscribe: (subscription) => post("/notifications/subscribe", subscription),
+  unsubscribe: (endpoint) => del("/notifications/subscribe", { data: { endpoint } }),
   /** Configuration SMTP et destinataires effectifs — Chef NOC. */
   emailStatus: () => get("/notifications/email/status"),
   /**

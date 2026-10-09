@@ -83,6 +83,22 @@ export default function ConsoleView() {
     return counts;
   }, [alerts]);
 
+  // Plus ancienne alerte non acquittée — calculé depuis la liste chargée.
+  // useAlertSummary retourne toujours null pour ce champ (voir commentaire
+  // dans le hook). On le calcule ici directement sur la liste triée.
+  const oldestUnacknowledgedAt = useMemo(() => {
+    const unacked = (alerts ?? []).filter(
+      (a) => a.status === "open" && !a.acknowledged,
+    );
+    if (unacked.length === 0) return null;
+    // La liste est déjà triée gravité puis date croissante par le backend.
+    // On cherche la plus ancienne date de détection parmi les non-acquittées.
+    return unacked.reduce((oldest, a) => {
+      if (!a.detected_at) return oldest;
+      return oldest === null || a.detected_at < oldest ? a.detected_at : oldest;
+    }, null);
+  }, [alerts]);
+
   return (
     <div className="space-y-2.5">
       <PageHeader
@@ -124,12 +140,8 @@ export default function ConsoleView() {
         />
         <Stat
           label="Plus ancien non acq."
-          value={
-            summary.data?.oldest_unacknowledged_at
-              ? ageFrom(summary.data.oldest_unacknowledged_at)
-              : "—"
-          }
-          color={summary.data?.oldest_unacknowledged_at ? "var(--sev-medium)" : "var(--state-up)"}
+          value={oldestUnacknowledgedAt ? ageFrom(oldestUnacknowledgedAt) : "—"}
+          color={oldestUnacknowledgedAt ? "var(--sev-medium)" : "var(--state-up)"}
           hint="tension réelle de la salle"
         />
         <Stat

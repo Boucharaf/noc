@@ -6,7 +6,7 @@ import Panel from "../components/ui/Panel";
 import Stat, { Meter } from "../components/ui/Stat";
 import SitesMap from "../components/domain/SitesMap";
 import { BarChart, Donut, HourHeatmap, LineChart } from "../components/charts";
-import { Notice } from "../components/ui/Controls";
+import { Notice, Segmented } from "../components/ui/Controls";
 import { PageHeader, PeriodPicker } from "../components/layout/TopBar";
 import { QueryBoundary } from "../components/ui/States";
 import { decimal, duration, monthLabel, num, pct } from "../lib/format";
@@ -26,6 +26,7 @@ import {
   useKpiLocalitiesMap,
   useKpiMonthlyTrend,
   useKpiSummary,
+  useNetworkKpi,
   useOrganisations,
   useResolutionTimes,
   useSites,
@@ -53,11 +54,17 @@ export default function DirectionView() {
   const isCurrent = usePeriodStore((s) => s.isCurrentPeriod());
   const canDownload = usePermission(PERMISSIONS.DOWNLOAD_REPORT);
 
+  // État local déclaré AVANT les hooks qui en dépendent (règle des hooks React)
+  const [trendMonths, setTrendMonths] = useState(6);
+  const [downloadError, setDownloadError] = useState(null);
+  const [downloading, setDownloading] = useState(null);
+
   const summary = useKpiSummary();
   const activeAlerts = useAlertSummary();
+  const networkLive = useNetworkKpi();          // fallback live quand kpi_daily insuffisant
   const resolution = useResolutionTimes({ month, year });
   const sla = useSla();
-  const trend = useKpiMonthlyTrend({ months: 6, month, year });
+  const trend = useKpiMonthlyTrend({ months: trendMonths, month, year });
   const localities = useKpiLocalities({ limit: 10, month, year });
   const localitiesMap = useKpiLocalitiesMap();
   const organisations = useOrganisations();
@@ -67,11 +74,13 @@ export default function DirectionView() {
   const hours = useKpiHourDistribution();
   const coverage = useCoverage();
 
-  const [downloadError, setDownloadError] = useState(null);
-  const [downloading, setDownloading] = useState(null);
-
   const kpi = summary.data?.reliable === false ? undefined : summary.data?.kpi;
   const deltas = summary.data?.vs_previous_month;
+  // Disponibilité : source historique (kpi_daily) en priorité, sinon source
+  // live Redis (fleet_health_pct). Quand kpi_daily < 15 jours, kpi est undefined
+  // et la card affichait "—" alors que la valeur temps réel est disponible.
+  const availabilityPct =
+    kpi?.network_availability_pct ?? networkLive.data?.availability_pct ?? null;
 
   const download = async (format) => {
     setDownloadError(null);
@@ -165,11 +174,12 @@ export default function DirectionView() {
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
         <Stat
           label="Disponibilité réseau"
-          value={pct(kpi?.network_availability_pct, 2)}
-          color={availabilityColor(kpi?.network_availability_pct)}
+          value={pct(availabilityPct, 2)}
+          color={availabilityColor(availabilityPct)}
           target="≥ 99 %"
           delta={deltas?.availability_delta}
           deltaLabel="points vs mois précédent"
+          hint={kpi?.network_availability_pct == null && availabilityPct != null ? "valeur temps réel" : undefined}
         />
         <Stat
           label="Alertes actives"
@@ -236,17 +246,38 @@ export default function DirectionView() {
       </div>
 
       <div className="grid grid-cols-12 gap-2.5">
-        {/* --- Tendance --- */}
-        <div className="col-span-12 xl:col-span-8 min-w-0">
+        {/* --- Tendances --- */}
+        <div className="col-span-12 xl:col-span-8 min-w-0 space-y-2.5">
+
+          {/* Sélecteur de période commun aux deux graphiques */}
+          <div className="flex items-center justify-between px-0.5">
+            <span className="text-[11.5px]" style={{ color: "var(--ink-3)" }}>
+              Période d'analyse
+            </span>
+            <Segmented
+              ariaLabel="Période de tendance"
+              value={trendMonths}
+              onChange={setTrendMonths}
+              options={[
+                { value: 1, label: "1 mois" },
+                { value: 2, label: "2 mois" },
+                { value: 3, label: "3 mois" },
+                { value: 6, label: "6 mois" },
+              ]}
+            />
+          </div>
+
+          {/* Graphique 1 — Alertes actives (nombre, pas un pourcentage) */}
           <Panel
-            title="Tendance sur 6 mois"
-            subtitle="moyenne quotidienne des alertes actives et disponibilité"
+            title="Alertes actives"
+            subtitle="nombre moyen d'alertes ouvertes par jour"
           >
             <QueryBoundary query={trend} compact emptyMessage="Pas d'historique disponible">
               <LineChart
-                height={210}
+                height={190}
                 labels={trendData.map((point) => point.label)}
-                legend
+                yMin={0}
+                valueFormatter={(value) => `${Math.round(value)} alertes`}
                 series={[
                   {
                     label: "Alertes actives (moy./jour)",
@@ -256,26 +287,34 @@ export default function DirectionView() {
                   },
                 ]}
               />
-              <div className="mt-2">
-                <LineChart
-                  height={110}
-                  labels={trendData.map((point) => point.label)}
-                  yMin={90}
-                  yMax={100}
-                  targetLine={99}
-                  valueFormatter={(value) => `${decimal(value, 1)} %`}
-                  series={[
-                    {
-                      label: "Disponibilité",
-                      data: trendData.map((point) => point.availability_pct),
-                      color: "var(--accent)",
-                      fill: true,
-                    },
-                  ]}
-                />
-              </div>
             </QueryBoundary>
           </Panel>
+
+          {/* Graphique 2 — Disponibilité (0 à 100 %, ligne cible à 99 %) */}
+          <Panel
+            title="Disponibilité du réseau"
+            subtitle="disponibilité moyenne quotidienne du parc supervisé"
+          >
+            <QueryBoundary query={trend} compact emptyMessage="Pas d'historique disponible">
+              <LineChart
+                height={190}
+                labels={trendData.map((point) => point.label)}
+                yMin={0}
+                yMax={100}
+                targetLine={99}
+                valueFormatter={(value) => `${decimal(value, 2)} %`}
+                series={[
+                  {
+                    label: "Disponibilité (%)",
+                    data: trendData.map((point) => point.availability_pct),
+                    color: "var(--state-up)",
+                    fill: true,
+                  },
+                ]}
+              />
+            </QueryBoundary>
+          </Panel>
+
         </div>
 
         {/* --- Causes --- */}

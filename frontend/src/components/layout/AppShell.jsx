@@ -1,7 +1,6 @@
 import { useCallback, useRef } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
-import AlertTicker from "./AlertTicker";
 import ErrorBoundary from "../ui/ErrorBoundary";
 import SideNav from "./SideNav";
 import TopBar from "./TopBar";
@@ -85,7 +84,6 @@ export default function AppShell() {
           <SideNav role={role} toolsDown={toolsDown} />
         </div>
         <div className="flex-1 flex flex-col min-w-0 min-h-0">
-          <AlertTicker />
           <main className="flex-1 min-h-0 overflow-y-auto p-2.5">
             {/* La frontière entoure UNIQUEMENT le contenu de page : si un
                 écran plante, la barre d'état, le ticker et la navigation
