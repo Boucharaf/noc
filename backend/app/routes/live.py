@@ -13,6 +13,8 @@ NOC est celui où il ne sait pas qu'il est aveugle.
 """
 from __future__ import annotations
 
+import logging
+
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
@@ -24,6 +26,7 @@ from app.dependencies.auth import get_current_user, require_role
 from app.models import User
 from app.services import (
     alerts_service,
+    geo_service,
     history_service,
     interop_service,
     kpi_service,
@@ -31,6 +34,8 @@ from app.services import (
     metrics_service,
     node_service,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["état courant"])
 
@@ -47,18 +52,29 @@ _PERIOD_PATTERN = r"^(1h|6h|24h|3d|7d|30d|90d|1y)$"
 ResourceKey = Annotated[str, Path(min_length=1, max_length=300)]
 
 
+def scope_params(
+    region: str | None = Query(None, max_length=200),
+    province: str | None = Query(None, max_length=200),
+    site: str | None = Query(None, max_length=200),
+    search: str | None = Query(None, max_length=200),
+) -> dict:
+    """Périmètre commun à tous les écrans (barre région > province > site)."""
+    return {"region": region, "province": province, "site": site, "search": search}
+
+
+Scope = Annotated[dict, Depends(scope_params)]
+
+
 def _unavailable(exc: live_service.SnapshotUnavailable) -> HTTPException:
     """503 et non 500 : ce n'est pas un défaut du backend mais une chaîne de
-    collecte interrompue, et le message doit dire quoi regarder."""
+    collecte interrompue. Le détail technique va au journal, pas à l'écran :
+    il décrit l'infrastructure interne."""
+    logger.warning("Instantané indisponible : %s", exc.detail)
     return HTTPException(
         status_code=503,
         detail={
             "error": "snapshot_unavailable",
-            "message": (
-                "Aucun instantané récent : le collecteur ne publie plus. "
-                "Vérifier le conteneur `collector` et l'écran Interopérabilité."
-            ),
-            "detail": exc.detail,
+            "message": "Données momentanément indisponibles. Réessayer dans quelques minutes.",
         },
     )
 
@@ -67,61 +83,88 @@ def _unavailable(exc: live_service.SnapshotUnavailable) -> HTTPException:
 # Synthèses
 # ---------------------------------------------------------------------------
 @router.get("/overview")
-async def overview(current_user: User = Depends(get_current_user)):
-    """Tuiles du haut de page : le parc, les alertes, la fraîcheur."""
+async def overview(
+    region: str | None = Query(None, max_length=200),
+    province: str | None = Query(None, max_length=200),
+    site: str | None = Query(None, max_length=200),
+    search: str | None = Query(None, max_length=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Tuiles du haut de page : le parc, les alertes, la fraîcheur — sur le
+    périmètre demandé (tout le parc par défaut)."""
     try:
-        return await kpi_service.live_summary()
+        return await kpi_service.live_summary(db, region, province, site, search)
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
 
 
 @router.get("/sites")
-async def sites(current_user: User = Depends(get_current_user)):
-    """Synthèse par site, du plus dégradé au plus sain."""
+async def sites(
+    scope: Scope,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Synthèse par site du périmètre, du plus dégradé au plus sain."""
     try:
-        return await live_service.sites_summary()
+        nodes, alerts, _incidents = await geo_service.scoped(db, **scope)
+        return await live_service.sites_summary(nodes, alerts)
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
 
 
 @router.get("/organisations")
-async def organisations(_current_user: User = Depends(get_current_user)):
-    """État courant du parc, regroupé par ministère/structure iTop."""
+async def organisations(current_user: User = Depends(get_current_user)):
     try:
-        return await live_service.organisations_summary()
+        return await live_service.summarise_organisations()
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
 
 
 @router.get("/alerts/by-severity")
-async def alerts_by_severity(current_user: User = Depends(get_current_user)):
+async def alerts_by_severity(
+    scope: Scope,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     try:
-        return await kpi_service.alerts_by_severity()
+        return await kpi_service.alerts_by_severity((await geo_service.scoped(db, **scope))[1])
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
 
 
 @router.get("/alerts/by-tool")
-async def alerts_by_tool(current_user: User = Depends(get_current_user)):
+async def alerts_by_tool(
+    scope: Scope,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     try:
-        return await kpi_service.alerts_by_tool()
+        return await kpi_service.alerts_by_tool((await geo_service.scoped(db, **scope))[1])
+    except live_service.SnapshotUnavailable as exc:
+        raise _unavailable(exc) from exc
+
+
+@router.get("/alerts/ages")
+async def alert_ages(
+    scope: Scope,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        return await kpi_service.alert_ages((await geo_service.scoped(db, **scope))[1])
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
 
 
 @router.get("/alerts/hour-distribution")
-async def hour_distribution(current_user: User = Depends(get_current_user)):
+async def hour_distribution(
+    scope: Scope,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     try:
-        return await kpi_service.hour_distribution()
-    except live_service.SnapshotUnavailable as exc:
-        raise _unavailable(exc) from exc
-
-
-@router.get("/sla/source-targets")
-async def source_sla_targets(current_user: User = Depends(get_current_user)):
-    """Engagements publiés par les outils sources (notamment les SLT iTop)."""
-    try:
-        return await live_service.get_source_sla_targets()
+        return await kpi_service.hour_distribution((await geo_service.scoped(db, **scope))[1])
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
 
@@ -132,11 +175,16 @@ async def source_sla_targets(current_user: User = Depends(get_current_user)):
 @router.get("/alerts")
 async def list_alerts(
     severity: str | None = Query(None, pattern=_one_of(SEVERITIES)),
+    kind: str | None = Query(
+        None, pattern="^(technical|itsm_ticket|manual_incident)$"
+    ),
     tool: str | None = Query(None, max_length=100),
+    region: str | None = Query(None, max_length=200),
+    province: str | None = Query(None, max_length=200),
     site: str | None = Query(None, max_length=150),
+    search: str | None = Query(None, max_length=200),
     organisation: str | None = Query(None, max_length=200),
     node_type: str | None = Query(None, max_length=100),
-    node_key: str | None = Query(None, max_length=300),
     acknowledged: bool | None = None,
     include_maintenance: bool = True,
     limit: int = Query(500, ge=1, le=5000),
@@ -148,10 +196,13 @@ async def list_alerts(
             db,
             severity=severity,
             tool=tool,
+            kind=kind,
+            region=region,
+            province=province,
             site=site,
+            search=search,
             organisation=organisation,
             node_type=node_type,
-            node_key=node_key,
             acknowledged=acknowledged,
             include_maintenance=include_maintenance,
             limit=limit,
@@ -186,7 +237,9 @@ async def get_alert(
 # ---------------------------------------------------------------------------
 @router.get("/nodes")
 async def list_nodes(
-    state: str | None = Query(None, pattern=_one_of((*NODE_STATES, "inactive"))),
+    state: str | None = Query(None, pattern=_one_of(NODE_STATES)),
+    region: str | None = Query(None, max_length=200),
+    province: str | None = Query(None, max_length=200),
     site: str | None = Query(None, max_length=150),
     tool: str | None = Query(None, max_length=100),
     search: str | None = Query(None, max_length=200),
@@ -200,7 +253,8 @@ async def list_nodes(
 ):
     try:
         return await node_service.list_nodes(
-            db, state=state, site=site, tool=tool, search=search,
+            db, state=state, region=region, province=province, site=site,
+            tool=tool, search=search,
             organisation=organisation, node_type=node_type,
             sort=sort, limit=limit, offset=offset,
         )
@@ -209,15 +263,23 @@ async def list_nodes(
 
 
 @router.get("/nodes/states")
-async def node_states(current_user: User = Depends(get_current_user)):
+async def node_states(
+    scope: Scope,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     try:
-        return await node_service.state_counts()
+        return await node_service.state_counts(db, (await geo_service.scoped(db, **scope))[0])
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
 
 
 @router.get("/nodes/coverage")
-async def node_coverage(current_user: User = Depends(get_current_user)):
+async def node_coverage(
+    scope: Scope,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Couverture par outil, et nombre d'équipements vus par un seul.
 
     Ce dernier chiffre est le plus utile : un équipement vu par un seul
@@ -225,7 +287,7 @@ async def node_coverage(current_user: User = Depends(get_current_user)):
     sans que rien ne le signale.
     """
     try:
-        return await node_service.coverage_by_tool()
+        return await node_service.coverage_by_tool((await geo_service.scoped(db, **scope))[0])
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
 
@@ -251,18 +313,29 @@ async def node_metrics(
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
     except history_service.HistoryUnavailable as exc:
+        logger.warning("Historique %s indisponible : %s", exc.tool, exc.detail)
         raise HTTPException(
             status_code=502,
             detail={
                 "error": "source_unavailable",
                 "tool": exc.tool,
-                "message": (
-                    f"L'outil {exc.tool} n'a pas répondu : {exc.detail}. "
-                    "L'historique est lu chez l'outil source, il n'est pas "
-                    "recopié dans le NOC."
-                ),
+                # Le message brut de l'outil (adresse, erreur réseau) reste au
+                # journal : il décrit l'infrastructure.
+                "message": f"L'outil {exc.tool} n'a pas répondu. Réessayer plus tard.",
             },
         ) from exc
+
+
+@router.get("/nodes/{node_id:path}/metrics-latest")
+async def node_latest_metrics(
+    node_id: ResourceKey,
+    current_user: User = Depends(get_current_user),
+):
+    """Dernières valeurs de toutes les métriques via une lecture groupée."""
+    try:
+        return await metrics_service.node_latest(node_id)
+    except live_service.SnapshotUnavailable as exc:
+        raise _unavailable(exc) from exc
 
 
 @router.get("/nodes/{node_id:path}")
@@ -283,34 +356,82 @@ async def get_node(
 # ---------------------------------------------------------------------------
 # Réseau
 # ---------------------------------------------------------------------------
+@router.get("/trend/live")
+async def live_trend(
+    scope: Scope,
+    current_user: User = Depends(get_current_user),
+):
+    """Mini-courbes des tuiles : l'état du périmètre à chaque cycle de
+    collecte des dernières 24 h. Tenu pour le réseau, les régions et les
+    provinces ; un site se lit sur sa province (`level` le dit)."""
+    region, province = scope.get("region"), scope.get("province")
+    level, place = ("province", province) if province else ("region", region) if region else ("network", None)
+    points = []
+    for point in await live_service.get_trend():
+        bucket = (
+            point.get("g") if level == "network"
+            else (point.get("p" if level == "province" else "r") or {}).get(place)
+        )
+        if not bucket:
+            continue
+        points.append({
+            "at": point["at"],
+            "availability_pct": bucket.get("av"),
+            "nodes": bucket.get("n"),
+            "nodes_down": bucket.get("down"),
+            "nodes_up": bucket.get("up"),
+            "nodes_degraded": bucket.get("deg"),
+            # Anciens points : « sil » (muet) avant la fusion dans « inconnu ».
+            "nodes_unknown": bucket.get("unk", bucket.get("sil")),
+            "nodes_maintenance": bucket.get("mnt"),
+            "alerts": bucket.get("al"),
+            "alerts_critical": bucket.get("cr"),
+            "incidents": bucket.get("inc"),
+        })
+    return {
+        "level": level,
+        "place": place,
+        "approximate": bool(scope.get("site") or scope.get("search")),
+        "points": points,
+    }
+
+
 @router.get("/network/snapshot")
 async def network_snapshot(
-    site: str | None = Query(None, max_length=150),
-    organisation: str | None = Query(None, max_length=200),
-    node_type: str | None = Query(None, max_length=100),
+    scope: Scope,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     try:
-        return await metrics_service.network_snapshot(site, organisation, node_type)
+        nodes, alerts, _incidents = await geo_service.scoped(db, **scope)
+        return await metrics_service.network_snapshot(db, nodes, alerts)
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
 
 
 @router.get("/network/down")
-async def network_down(current_user: User = Depends(get_current_user)):
+async def network_down(
+    scope: Scope,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     try:
-        return await metrics_service.nodes_down()
+        return await metrics_service.nodes_down(db, (await geo_service.scoped(db, **scope))[0])
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
 
 
 @router.get("/network/top")
 async def network_top(
+    scope: Scope,
     limit: int = Query(10, ge=1, le=100),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     try:
-        return await metrics_service.top_nodes(limit)
+        return await metrics_service.top_nodes(
+            limit, db, (await geo_service.scoped(db, **scope))[0]
+        )
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
 
@@ -320,9 +441,13 @@ async def network_series(
     metric: str = Query("latency_ms", pattern=_one_of(METRIC_TYPES)),
     period: str = Query("24h", pattern=_PERIOD_PATTERN),
     sample: int = Query(12, ge=1, le=50),
+    region: str | None = Query(None, max_length=200),
+    province: str | None = Query(None, max_length=200),
     site: str | None = Query(None, max_length=150),
+    search: str | None = Query(None, max_length=200),
     organisation: str | None = Query(None, max_length=200),
     node_type: str | None = Query(None, max_length=100),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Courbe agrégée du réseau, sur un ÉCHANTILLON d'équipements.
@@ -333,8 +458,11 @@ async def network_series(
     La réponse indique sur combien d'équipements la courbe porte.
     """
     try:
+        nodes, _alerts, _incidents = await geo_service.scoped(
+            db, region=region, province=province, site=site, search=search
+        )
         return await metrics_service.network_series(
-            metric, period, sample, site, organisation, node_type
+            metric, period, sample, None, organisation, node_type, nodes=nodes
         )
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc

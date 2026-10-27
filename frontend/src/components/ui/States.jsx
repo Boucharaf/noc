@@ -56,7 +56,7 @@ export function ErrorState({ error, onRetry, compact = false }) {
   const title = forbidden
     ? "Accès non autorisé"
     : offline
-      ? "Backend injoignable"
+      ? "Service momentanément injoignable"
       : "Échec du chargement";
 
   return (

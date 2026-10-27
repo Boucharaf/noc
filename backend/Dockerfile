@@ -35,8 +35,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/app ./app
 COPY backend/sql ./sql
-COPY backend/alembic.ini ./alembic.ini
-COPY backend/migrations ./migrations
 # Outils d'exploitation, indispensables dans l'image : au premier démarrage,
 # créer un compte est IMPOSSIBLE par l'API (elle exige d'être déjà connecté
 # en chef NOC). `docker compose exec backend python
@@ -69,4 +67,10 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 # --no-server-header : ne pas annoncer « uvicorn » et sa version.
 # --ws-max-size : le client n'envoie qu'une trame d'authentification ; le
 # défaut de 16 Mo par message laisserait saturer la mémoire du worker.
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2 --no-server-header --ws-max-size 65536"]
+# --timeout-worker-healthcheck 30 : au chargement d'un tableau de bord, une
+# vingtaine de requêtes (listes de 5 000 alertes, inventaire complet) arrivent
+# ensemble sur un worker ; au-delà des 5 s par défaut sans réponse au contrôle
+# interne, uvicorn tuait le worker en pleine rafale (HTTP 502 à l'écran). La
+# vivacité réelle reste surveillée par le HEALTHCHECK ci-dessus.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", \
+     "--no-server-header", "--ws-max-size", "65536", "--timeout-worker-healthcheck", "30"]

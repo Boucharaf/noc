@@ -94,22 +94,15 @@ env_value() {
   { grep -E "^$1=" .env || true; } | tail -1 | cut -d= -f2- | tr -d '\r'
 }
 
-DB_USER="$(env_value NETXMS_DB_USER)";  DB_USER="${DB_USER:-netxms}"
+DB_USER="$(env_value NETXMS_DB_USER)";  DB_USER="${DB_USER:-$(env_value POSTGRES_USER)}"; DB_USER="${DB_USER:-postgres}"
 DB_NAME="$(env_value NETXMS_DB_NAME)";  DB_NAME="${DB_NAME:-netxms}"
 READER_PASSWORD="$(env_value NETXMS_DB_READER_PASSWORD)"
 DUMP="${DUMP:-$REPO_ROOT/database/netxmsbd07082026.sql}"
 
-if command -v psql >/dev/null 2>&1; then
-  DB_PASSWORD="$(env_value NETXMS_DB_PASSWORD)"
-  export PGPASSWORD="${PGPASSWORD:-${DB_PASSWORD:-netxms}}"
-  run_psql() { psql -h 127.0.0.1 -p 5438 -U "$DB_USER" -v ON_ERROR_STOP=1 "$@"; }
-  PSQL_WHERE="hôte, 127.0.0.1:5438"
-else
-  # Connexion locale au conteneur : l'image officielle y accepte le
-  # superutilisateur sans mot de passe.
-  run_psql() { docker compose exec -T netxms-db psql -U "$DB_USER" -v ON_ERROR_STOP=1 "$@"; }
-  PSQL_WHERE="conteneur netxms-db"
-fi
+# Utiliser le client PostgreSQL du conteneur et le profil Compose explicite.
+# Le contexte Docker reste celui choisi par le terminal de l'utilisateur.
+run_psql() { docker compose --profile netxms exec -T netxms-db psql -U "$DB_USER" -v ON_ERROR_STOP=1 "$@"; }
+PSQL_WHERE="conteneur netxms-db"
 psql_maint()  { run_psql -d postgres "$@"; }
 psql_target() { run_psql -d "$DB_NAME" "$@"; }
 scalar()      { "$@" | tr -d '\r[:space:]'; }

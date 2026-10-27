@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from app.core.config import COLLECT_INTERVAL_S, SUPERVISION_TOOLS
+from app.core.config import COLLECT_INTERVAL_S
 from app.services import live_service
 
 logger = logging.getLogger(__name__)
@@ -56,8 +56,10 @@ async def status() -> dict:
         rows.append(
             {
                 "tool": tool["tool"],
+                "configured": bool(tool.get("configured")),
                 "reachable": bool(tool.get("reachable")),
                 "never_collected": bool(tool.get("never_collected")),
+                "not_configured": bool(tool.get("not_configured")),
                 "version": tool.get("version"),
                 "latency_ms": tool.get("latency_ms"),
                 # Message brut de l'outil. Volontairement non reformulé.
@@ -88,10 +90,12 @@ async def status() -> dict:
             "stale": await live_service.is_stale(),
             "nodes": meta.get("nodes") if meta else None,
             "alerts": meta.get("alerts") if meta else None,
+            "itsm_tickets": meta.get("itsm_tickets") if meta else None,
         },
         "tools": rows,
-        "configured": list(SUPERVISION_TOOLS),
+        "configured": [row["tool"] for row in rows if row["configured"]],
         "merge": (meta or {}).get("merge"),
+        "source_data": (meta or {}).get("source_data"),
         "orphan_alerts": (meta or {}).get("orphan_alerts"),
     }
 
@@ -125,6 +129,10 @@ async def merge_report() -> dict:
         "duplicates_resolved": max(0, raw - merged),
         "matched_by_ip": merge.get("matched_by_ip", 0),
         "matched_by_name": merge.get("matched_by_name", 0),
+        "matched_by_verified_identity": merge.get("matched_by_verified_identity", 0),
+        "ambiguous_total": merge.get("ambiguous_total", 0),
+        "ambiguities": merge.get("ambiguities", []),
+        "state_conflicts": merge.get("state_conflicts", []),
         "single_source_nodes": merge.get("single_source", []),
         "orphan_alerts": meta.get("orphan_alerts", 0),
     }

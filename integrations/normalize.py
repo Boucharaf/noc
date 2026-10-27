@@ -12,7 +12,8 @@ sans justification devient indiscutable pour la personne qui la relira.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import unicodedata
+from datetime import datetime, timezone, tzinfo
 
 from .models import SEVERITIES
 
@@ -27,7 +28,7 @@ _ZABBIX = {
     "5": "critical",  # Disaster
     "4": "high",      # High
     "3": "medium",    # Average
-    "2": "low",       # Warning
+    "2": "medium",    # Warning
     "1": "info",      # Information
     "0": _UNKNOWN,    # Not classified
 }
@@ -64,7 +65,7 @@ _NETXMS = {
     "4": "critical",
     "3": "high",
     "2": "medium",
-    "1": "low",
+    "1": "medium",
     "0": "info",
 }
 
@@ -80,7 +81,7 @@ _TEXTUAL = {
     "minor": "medium",
     "medium": "medium",
     "average": "medium",
-    "warning": "low",
+    "warning": "medium",
     "low": "low",
     "information": "info",
     "informational": "info",
@@ -113,6 +114,40 @@ def severity(scale: str, raw) -> str:
     if table is not None and key in table:
         return table[key]
     return _TEXTUAL.get(key, _UNKNOWN)
+
+
+# Gravité D'ORIGINE, dans le vocabulaire de chaque outil, traduite en clair :
+# le NOC l'affiche telle quelle (« Désastre » pour Zabbix, « Majeure » pour
+# NetXMS) au lieu d'un code (« 5 », « 3 »). La couleur suit l'échelle commune
+# (`severity`), pour que les outils restent comparables entre eux.
+_SOURCE_LABELS = {
+    "zabbix": {"0": "Non classée", "1": "Information", "2": "Avertissement",
+               "3": "Moyenne", "4": "Haute", "5": "Désastre"},
+    "centreon_service": {"1": "Avertissement", "2": "Critique", "3": "Inconnu"},
+    "centreon_host": {"1": "Hôte arrêté", "2": "Hôte injoignable"},
+    "itop": {"1": "Critique", "2": "Haute", "3": "Moyenne", "4": "Basse"},
+    "netxms": {"0": "Normale", "1": "Avertissement", "2": "Mineure",
+               "3": "Majeure", "4": "Critique"},
+}
+_SOURCE_TEXTUAL = {
+    "critical": "Critique", "disaster": "Désastre", "down": "Hôte arrêté",
+    "major": "Majeure", "high": "Haute", "unreachable": "Hôte injoignable",
+    "minor": "Mineure", "medium": "Moyenne", "average": "Moyenne",
+    "warning": "Avertissement", "low": "Basse", "information": "Information",
+    "informational": "Information", "info": "Information",
+    "indeterminate": "Indéterminée", "cleared": "Levée", "unknown": "Inconnu",
+}
+
+
+def source_severity(scale: str, raw) -> str | None:
+    """Gravité telle que l'outil la classe, en clair. None si illisible."""
+    if raw is None or str(raw).strip() == "":
+        return None
+    key = str(raw).strip().lower()
+    table = _SOURCE_LABELS.get(scale)
+    if table is not None and key in table:
+        return table[key]
+    return _SOURCE_TEXTUAL.get(key, str(raw).strip())
 
 
 def worst(severities) -> str:
@@ -158,20 +193,137 @@ def iso_to_dt(value) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def sql_to_dt(value) -> datetime | None:
+def sql_to_dt(value, tz: tzinfo | None = None) -> datetime | None:
     """Date au format « AAAA-MM-JJ HH:MM:SS » (iTop) vers datetime UTC.
 
-    iTop rend ses dates dans le fuseau configuré de l'application, sans
-    indicateur. On les considère UTC : le conteneur et l'application partagent
-    la variable TZ, donc l'écart éventuel est le même partout, et le déclarer
-    explicitement vaut mieux qu'une date naïve qui sera réinterprétée
-    différemment à chaque relecture.
+    iTop rend ses dates dans le fuseau de SA configuration (paramètre
+    `timezone` de config-itop.php, « Europe/Paris » à l'installation), sans
+    indicateur. Les lire comme UTC décalait chaque date d'une à deux heures —
+    ouvertures, résolutions et donc délais SLA. `tz` est ce fuseau
+    (ITOP_TIMEZONE) ; sans lui, la date est prise en UTC.
     """
     if not value or str(value).startswith("0000"):
         return None
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
         try:
-            return datetime.strptime(str(value).strip(), fmt).replace(tzinfo=timezone.utc)
+            naive = datetime.strptime(str(value).strip(), fmt)
         except ValueError:
             continue
+        return naive.replace(tzinfo=tz or timezone.utc).astimezone(timezone.utc)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Séries temporelles
+# ---------------------------------------------------------------------------
+# Comment combiner plusieurs séries sources (interfaces, systèmes de fichiers,
+# sondes) en UNE courbe par équipement. La moyenne ne convient pas partout :
+# le trafic d'un routeur est la SOMME de ses interfaces, et un disque plein
+# se lit sur le système de fichiers le plus rempli, pas sur la moyenne qui le
+# masquerait derrière un /boot vide.
+_SERIES_COMBINE = {
+    "bandwidth_in_mbps": "sum",
+    "bandwidth_out_mbps": "sum",
+    "if_errors": "sum",
+    "disk_pct": "max",
+    "packet_loss_pct": "max",
+    "temp_cpu": "max",
+}
+
+
+def combine_series(series: list, metric_type: str, bucket_s: int) -> list:
+    """Fusionne des séries `[(datetime, valeur), …]` en une liste de points.
+
+    Les sondes d'un même équipement ne tournent pas à la même seconde :
+    regrouper sur l'horodatage exact juxtaposerait les séries au lieu de les
+    combiner, et la courbe alternerait d'un item à l'autre. Les points sont
+    donc ramenés à des intervalles de `bucket_s` secondes ; chaque série
+    contribue au plus une valeur (sa moyenne) par intervalle, puis les
+    séries sont combinées selon la nature de la métrique.
+    """
+    from .models import MetricPoint
+
+    mode = _SERIES_COMBINE.get(metric_type, "avg")
+    bucket_s = max(1, int(bucket_s))
+    combined: dict[int, list[float]] = {}
+    for points in series:
+        per_bucket: dict[int, list[float]] = {}
+        for at, value in points:
+            bucket = int(at.timestamp()) // bucket_s * bucket_s
+            per_bucket.setdefault(bucket, []).append(value)
+        for bucket, values in per_bucket.items():
+            combined.setdefault(bucket, []).append(sum(values) / len(values))
+
+    result = []
+    for bucket, values in sorted(combined.items()):
+        if mode == "sum":
+            value = sum(values)
+        elif mode == "max":
+            value = max(values)
+        else:
+            value = sum(values) / len(values)
+        result.append(
+            MetricPoint(at=datetime.fromtimestamp(bucket, tz=timezone.utc), value=value)
+        )
+    return result
+
+
+def combine_latest(values: list[float], metric_type: str) -> float:
+    """Même règle que `combine_series`, pour les dernières valeurs."""
+    mode = _SERIES_COMBINE.get(metric_type, "avg")
+    if mode == "sum":
+        return sum(values)
+    if mode == "max":
+        return max(values)
+    return sum(values) / len(values)
+
+
+# ---------------------------------------------------------------------------
+# Localisation
+# ---------------------------------------------------------------------------
+# Convention retenue avec l'agence pour les outils sans référentiel
+# géographique (Zabbix, Centreon, Nagios) : un groupe d'hôtes par niveau.
+#     Site/<nom>   Province/<nom>   Region/<nom> (ou Région/<nom>)
+_LOCALITY_PREFIXES = {
+    "site": ("site/", "site:", "localité/", "localite/"),
+    "province": ("province/", "province:"),
+    "region": ("region/", "région/", "region:", "région:"),
+}
+
+
+def locality_from_groups(groups) -> dict[str, str | None]:
+    """Site, province et région déclarés par les groupes d'un équipement."""
+    found: dict[str, str | None] = {"site": None, "province": None, "region": None}
+    for group in groups:
+        name = str(group).strip()
+        lowered = name.lower()
+        for level, prefixes in _LOCALITY_PREFIXES.items():
+            if found[level]:
+                continue
+            for prefix in prefixes:
+                if lowered.startswith(prefix):
+                    found[level] = name[len(prefix):].strip() or None
+                    break
+    return found
+
+
+def locality_key(name: str | None) -> str:
+    """Clé de comparaison d'un nom de lieu : sans accents ni casse.
+
+    « KUILSÉ », « Kuilsé » et « KUILSE » désignent la même région selon la
+    source (base NetXMS, fond de carte, saisie manuelle).
+    """
+    if not name:
+        return ""
+    decomposed = unicodedata.normalize("NFKD", str(name))
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).strip().upper()
+
+
+def display_locality(name: str | None) -> str | None:
+    """Nom de région ou de province pour l'affichage : « KUILSÉ » -> « Kuilsé »."""
+    if not name or not str(name).strip():
+        return None
+    return " ".join(
+        "-".join(part.capitalize() for part in word.split("-"))
+        for word in str(name).strip().split()
+    )

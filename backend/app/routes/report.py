@@ -4,16 +4,18 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.dependencies.auth import require_role
+from app.dependencies.auth import require_internal_key, require_role
 from app.models import User
 from app.services import report_service
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/report", tags=["rapports"])
+internal_router = APIRouter(prefix="/api/internal", tags=["interne"])
 
 _DOWNLOAD = ("directeur", "chef_noc")
 
@@ -21,6 +23,12 @@ _MEDIA_TYPES = {
     "pdf": "application/pdf",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
+
+
+class InternalMonthlyReportIn(BaseModel):
+    month: int | None = Field(None, ge=1, le=12)
+    year: int | None = Field(None, ge=2000, le=2100)
+    format: str = Field("pdf", pattern="^(pdf|docx)$")
 
 
 @router.get("/monthly")
@@ -52,4 +60,32 @@ def download_monthly_report(
         path,
         media_type=_MEDIA_TYPES[format],
         filename=f"rapport-noc-{y}-{m:02d}.{format}",
+    )
+
+
+@internal_router.post("/reports/monthly")
+def generate_internal_monthly_report(
+    body: InternalMonthlyReportIn,
+    db: Session = Depends(get_db),
+    _internal: None = Depends(require_internal_key),
+):
+    now = datetime.now(UTC)
+    month, year = body.month or now.month, body.year or now.year
+    try:
+        path = report_service.generate(db, month, year, body.format)
+    except Exception as exc:
+        logger.exception(
+            "Rapport interne %s %02d/%d : génération en échec",
+            body.format,
+            month,
+            year,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Le rapport n'a pas pu être généré.",
+        ) from exc
+    return FileResponse(
+        path,
+        media_type=_MEDIA_TYPES[body.format],
+        filename=f"rapport-noc-{year}-{month:02d}.{body.format}",
     )

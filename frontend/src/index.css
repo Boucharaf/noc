@@ -18,10 +18,9 @@
       MTTR qui danse d'un pixel à chaque rafraîchissement est illisible
       en vision périphérique, et la vision périphérique est le mode de
       lecture normal d'un mur d'écrans.
-   4. Rien ne bouge sans raison. La seule animation permanente est le
-      point « live » et le ticker d'alertes ; les deux portent une
-      information (le flux temps réel est vivant). Tout le reste est
-      statique, et `prefers-reduced-motion` coupe même ceux-là.
+   4. Rien ne bouge sans raison. Le bandeau d'alertes est fixe ; la seule
+      animation permanente est le point « live », témoin du flux temps réel.
+      `prefers-reduced-motion` coupe aussi cette animation.
    ===================================================================== */
 
 @custom-variant light (&:where(.light, .light *));
@@ -79,7 +78,6 @@
   --radius-lg: 5px;
 
   --topbar-h: 46px;
-  --ticker-h: 26px;
   --rail-w: 208px;
   --rail-w-collapsed: 52px;
 }
@@ -215,6 +213,7 @@ body {
 
 .panel-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 7px 10px;
@@ -230,7 +229,9 @@ body {
   letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--ink-2);
-  white-space: nowrap;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .panel-body {
@@ -535,27 +536,20 @@ body {
   100% { box-shadow: 0 0 0 0 transparent; }
 }
 
-/* --- Ticker d'alertes ------------------------------------------------
-   Un seul défilement continu, vitesse constante quel que soit le nombre
-   d'éléments : c'est ce que fait un bandeau de salle de contrôle. */
-.ticker-track {
-  display: flex;
-  width: max-content;
-  animation: ticker-scroll linear infinite;
-}
-@keyframes ticker-scroll {
-  from { transform: translateX(0); }
-  to { transform: translateX(-50%); }
-}
-.ticker-track:hover {
-  animation-play-state: paused;
-}
-
 /* Clignotement réservé aux critiques NON acquittés. Volontairement lent
-   (2 s) et faible en amplitude : un clignotement rapide devient un bruit
-   de fond qu'on cesse de voir au bout d'une heure. */
+ (2 s) et faible en amplitude : un clignotement rapide devient un bruit
+ de fond qu'on cesse de voir au bout d'une heure. */
 .blink-critical {
   animation: blink-crit 2s steps(1, end) infinite;
+}
+/* Mur d'écrans : cadre rouge clignotant à l'arrivée d'un incident critique. */
+.wall-alarm {
+  box-shadow: inset 0 0 0 6px var(--sev-critical);
+  animation: wall-alarm 1.2s ease-in-out infinite;
+}
+@keyframes wall-alarm {
+  0%, 100% { box-shadow: inset 0 0 0 6px var(--sev-critical); }
+  50% { box-shadow: inset 0 0 0 6px transparent; }
 }
 @keyframes blink-crit {
   0%, 60% { opacity: 1; }
@@ -563,9 +557,9 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ticker-track,
   .live-dot,
-  .blink-critical {
+  .blink-critical,
+  .wall-alarm {
     animation: none !important;
   }
 }

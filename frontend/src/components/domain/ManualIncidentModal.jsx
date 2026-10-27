@@ -6,7 +6,7 @@ import { Modal } from "../ui/Overlay";
 import { StateDot } from "../ui/Badge";
 import { QueryBoundary } from "../ui/States";
 import { errorMessage } from "../../api/client";
-import { useIncidentActions, useNodes } from "../../hooks/queries";
+import { useIncidentActions, useNodes, useReference } from "../../hooks/queries";
 
 /**
  * Signalement manuel d'une panne.
@@ -35,11 +35,11 @@ const SEVERITIES = [
 
 export default function ManualIncidentModal({ open, onClose, defaultNodeCode = "" }) {
   const { createManual } = useIncidentActions();
+  const { data: reference } = useReference();
 
   const [search, setSearch] = useState(defaultNodeCode);
   const [selected, setSelected] = useState(null);
   const [severity, setSeverity] = useState("high");
-  const [title, setTitle] = useState("");
   const [cause, setCause] = useState("");
   const [description, setDescription] = useState("");
   const [error, setError] = useState(null);
@@ -51,7 +51,6 @@ export default function ManualIncidentModal({ open, onClose, defaultNodeCode = "
     setSearch("");
     setSelected(null);
     setSeverity("high");
-    setTitle("");
     setCause("");
     setDescription("");
     setError(null);
@@ -64,13 +63,11 @@ export default function ManualIncidentModal({ open, onClose, defaultNodeCode = "
     setError(null);
     try {
       await createManual.mutateAsync({
-        title: title.trim(),
+        // Le NOM exact de la ligne choisie, jamais la saisie brute.
+        node_code: selected.name,
         severity,
         description: description.trim(),
-        cause: cause.trim() || null,
-        node_key: selected.node_id,
-        node_name: selected.name,
-        site: selected.site || selected.locality || null,
+        cause_category: cause || null,
       });
       setDone(true);
       // Laisse le temps de lire la confirmation : refermer instantanément
@@ -97,15 +94,15 @@ export default function ManualIncidentModal({ open, onClose, defaultNodeCode = "
             type="submit"
             form="manual-incident"
             className="btn btn-sm btn-primary"
-            disabled={createManual.isPending || done || !selected || title.trim().length < 3 || !description.trim()}
+            disabled={createManual.isPending || done || !selected || !description.trim()}
           >
-            {createManual.isPending ? "Enregistrement…" : "Créer l'incident"}
+            {createManual.isPending ? "Enregistrement…" : "Enregistrer le signalement"}
           </button>
         </>
       }
     >
       <form id="manual-incident" onSubmit={submit} className="space-y-2.5">
-        {done && <Notice tone="success">Incident créé et diffusé sur le mur d'alertes.</Notice>}
+        {done && <Notice tone="success">Signalement enregistré et diffusé sur le mur d'alertes. Pour un suivi ITSM, ouvrez le ticket dans iTop.</Notice>}
         {error && <Notice tone="error">{error}</Notice>}
 
         <Field
@@ -138,7 +135,7 @@ export default function ManualIncidentModal({ open, onClose, defaultNodeCode = "
             compact
             empty={(data) => !data?.items?.length}
             emptyMessage="Aucun équipement ne correspond"
-            emptyHint="Un équipement absent de l'inventaire ne peut pas porter d'incident : signalez-le au Chef NOC."
+            emptyHint="Un équipement absent de l'inventaire ne peut pas porter de signalement : signalez-le au Chef NOC."
           >
             {(data) => (
               <ul className="divide-y" style={{ borderColor: "var(--border)" }}>
@@ -190,27 +187,21 @@ export default function ManualIncidentModal({ open, onClose, defaultNodeCode = "
             </select>
           </Field>
 
-          <Field label="Cause présumée" hint="Facultatif — à confirmer après diagnostic.">
-            <input
-              className="input"
-              maxLength={200}
+          <Field label="Cause présumée" hint="Facultatif — affine les statistiques.">
+            <select
+              className="select"
               value={cause}
               onChange={(event) => setCause(event.target.value)}
-              placeholder="Ex. alimentation électrique"
-            />
+            >
+              <option value="">Non déterminée</option>
+              {(reference?.causes ?? []).map((item) => (
+                <option key={item.category} value={item.category}>
+                  {item.label || item.category}
+                </option>
+              ))}
+            </select>
           </Field>
         </div>
-
-        <Field label="Objet" required>
-          <input
-            className="input"
-            minLength={3}
-            maxLength={200}
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            placeholder="Ex. Coupure du lien principal"
-          />
-        </Field>
 
         <Field label="Description" required hint="Ce que vous constatez, et depuis quand.">
           <textarea

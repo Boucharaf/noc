@@ -8,6 +8,11 @@ endpoints du dashboard.
 import os
 import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "backend"))
 
 os.environ.setdefault("NOC_WAREHOUSE_DSN", "postgresql://noc:noc@localhost:5432/noc_warehouse")
 os.environ.setdefault("SECRET_KEY", "test-secret")
@@ -19,9 +24,7 @@ os.environ.setdefault("REPORT_OUTPUT_DIR", "/tmp/noc-reports")
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
-from app.db.session import SessionLocal, engine  # noqa: E402
-from app.main import app  # noqa: E402
-from app.services import auth_service  # noqa: E402
+from backend.tests.database_safety import validate_test_database_url  # noqa: E402
 
 NOW = datetime.now(UTC)
 failures = []
@@ -167,6 +170,23 @@ def seed():
 
 
 def main():
+    test_database_url = os.environ.get("NOC_TEST_DATABASE_URL")
+    if not test_database_url:
+        raise SystemExit(
+            "Refus d'exécuter les tests destructifs : définir "
+            "NOC_TEST_DATABASE_URL vers une base PostgreSQL dédiée (*_test)."
+        )
+    try:
+        validate_test_database_url(test_database_url)
+    except ValueError as exc:
+        raise SystemExit(f"URL de test refusée : {exc}") from exc
+    os.environ["NOC_DATABASE_URL"] = test_database_url
+
+    global SessionLocal, engine, app, auth_service
+    from app.db.session import SessionLocal, engine
+    from app.main import app
+    from app.services import auth_service
+
     seed()
     client = TestClient(app)
 

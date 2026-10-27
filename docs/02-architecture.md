@@ -117,9 +117,11 @@ Points clés (code : `collector/cycle.py`) :
   propre tâche.
 - **Le cycle est borné dans le temps** (`COLLECT_CYCLE_TIMEOUT_S`) : un outil
   qui ne répond pas est abandonné pour ce cycle.
-- **Un instantané partiel est publié**, jamais un instantané vide : si Zabbix
-  répond et Centreon non, le parc Zabbix s'affiche et Centreon est signalé en
-  panne.
+- **Un instantané partiel est publié**, jamais un instantané vide inventé :
+  si Zabbix répond et Centreon non, le parc Zabbix s'affiche et Centreon est
+  signalé en panne. Si aucune source ni aucun cache valide ne fournit de
+  données, l'instantané précédent est conservé au lieu de présenter un parc
+  vide comme sain.
 - **Au premier démarrage, rien n'est diffusé** : toutes les alertes seraient
   « nouvelles » et l'équipe recevrait des centaines de courriels.
 - **Un seul collecteur** doit tourner. En lancer deux doublerait la charge sur

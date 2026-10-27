@@ -2,21 +2,20 @@ import {
   ChevronLeft,
   ChevronRight,
   LogOut,
+  BookOpen,
   Monitor,
   Moon,
   PanelLeft,
-  Pause,
-  Play,
   Sun,
 } from "lucide-react";
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
-import StatusStrip from "./StatusStrip";
 import { ROLE_LABEL } from "../../lib/permissions";
 import { auth } from "../../api/noc";
 import { useAuthStore } from "../../store/auth";
 import { useClock } from "../../hooks/useClock";
+import LegendModal from "./LegendModal";
 import { useUiStore } from "../../store/ui";
 import { ConfirmModal } from "../ui/Overlay";
 
@@ -39,19 +38,18 @@ const REALTIME_STATE = {
   offline: { label: "Flux coupé", color: "var(--sev-critical)" },
 };
 
-export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTotal, canSeeIncidents }) {
+export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTotal }) {
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
   const navigate = useNavigate();
   const now = useClock();
   const [logoutOpen, setLogoutOpen] = useState(false);
+  const [legendOpen, setLegendOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
 
   const theme = useUiStore((s) => s.theme);
   const toggleTheme = useUiStore((s) => s.toggleTheme);
   const toggleRail = useUiStore((s) => s.toggleRail);
-  const autoRefresh = useUiStore((s) => s.autoRefresh);
-  const setAutoRefresh = useUiStore((s) => s.setAutoRefresh);
 
   const realtime = REALTIME_STATE[realtimeStatus] ?? REALTIME_STATE.connecting;
 
@@ -104,11 +102,11 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
           className="dot"
           style={{ background: healthColor, width: 9, height: 9 }}
           title={
-            health
-              ? `Backend : ${health.status} · base ${health.checks?.database?.status ?? "?"} · Redis ${
-                  health.checks?.redis?.status ?? "?"
-                }`
-              : "État du backend inconnu"
+            !health
+              ? "État de la plateforme inconnu"
+              : health.status === "ok"
+                ? "Plateforme opérationnelle"
+                : "Plateforme perturbée"
           }
         />
         <img
@@ -118,14 +116,29 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
         />
       </Link>
 
-      <div
-        className="h-5 border-l shrink-0"
-        style={{ borderColor: "var(--border)" }}
-        aria-hidden="true"
-      />
-
-      <div className="min-w-0 flex-1 overflow-hidden">
-        <StatusStrip canSeeIncidents={canSeeIncidents} />
+      {/* Plus de compteurs d'alertes ni d'incidents dans l'en-tête : ils sont
+          sur chaque tableau de bord, filtrés par le périmètre choisi. L'espace
+          porte l'accès au mur d'écrans, le raccourci de l'exploitant pressé. */}
+      <div className="min-w-0 flex-1 flex items-center justify-center">
+        <Link
+          to="/mur"
+          className="btn btn-sm shrink-0"
+          style={{
+            gap: 8,
+            paddingInline: 14,
+            color: "var(--accent-ink)",
+            borderColor: "color-mix(in srgb, var(--accent) 55%, transparent)",
+            background: "color-mix(in srgb, var(--accent) 12%, var(--surface))",
+            fontWeight: 600,
+          }}
+          title="Mode mur d'écrans : le résumé des incidents iTop, en plein écran"
+        >
+          <Monitor size={14} />
+          <span className="hidden sm:inline">Mode mur d'écran</span>
+          <span className="hidden md:inline text-[10.5px] font-normal" style={{ color: "var(--ink-3)" }}>
+            résumé des incidents · plein écran
+          </span>
+        </Link>
       </div>
 
       {/* Fraîcheur de la collecte : un backend en bonne santé qui ne
@@ -135,7 +148,7 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
           to="/integrations"
           className="hidden lg:flex items-center gap-1.5 shrink-0 text-[10.5px]"
           style={{ textDecoration: "none", color: "var(--ink-3)" }}
-          title="Collecteurs ETL actifs sur le total configuré"
+          title="Outils de supervision actifs sur le total configuré"
         >
           <span
             className="dot"
@@ -158,7 +171,7 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
       <span
         className="hidden md:flex items-center gap-1.5 shrink-0 text-[10.5px]"
         style={{ color: "var(--ink-3)" }}
-        title={`Flux WebSocket : ${realtime.label}`}
+        title={`Mise à jour en direct : ${realtime.label}`}
       >
         {realtimeStatus === "live" ? (
           <span className="live-dot" style={{ background: realtime.color }} />
@@ -180,19 +193,12 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
         <button
           type="button"
           className="btn btn-ghost btn-sm"
-          onClick={() => setAutoRefresh(!autoRefresh)}
-          title={
-            autoRefresh
-              ? "Rafraîchissement automatique actif — cliquer pour figer l'écran"
-              : "Écran figé — cliquer pour reprendre le rafraîchissement"
-          }
-          aria-pressed={autoRefresh}
+          onClick={() => setLegendOpen(true)}
+          title="Légende : couleurs, états et vocabulaire du NOC"
         >
-          {autoRefresh ? <Pause size={13} /> : <Play size={13} style={{ color: "var(--sev-medium)" }} />}
+          <BookOpen size={13} />
+          <span className="hidden xl:inline text-[11px]">Légende</span>
         </button>
-        <Link to="/mur" className="btn btn-ghost btn-sm" title="Mode mur d'écrans (plein écran)">
-          <Monitor size={13} />
-        </Link>
         <button
           type="button"
           className="btn btn-ghost btn-sm"
@@ -239,6 +245,7 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
           Voulez-vous vraiment vous déconnecter de cette session ?
         </p>
       </ConfirmModal>
+      <LegendModal open={legendOpen} onClose={() => setLegendOpen(false)} />
     </header>
   );
 }
@@ -256,7 +263,7 @@ export function PageHeader({ title, subtitle, actions, children }) {
         )}
       </div>
       {children}
-      {actions && <div className="ml-auto flex items-center gap-2 flex-wrap">{actions}</div>}
+      {actions && <div className="ml-auto flex max-w-full items-center gap-2 flex-wrap">{actions}</div>}
     </div>
   );
 }
@@ -264,7 +271,7 @@ export function PageHeader({ title, subtitle, actions, children }) {
 /** Sélecteur de mois — utilisé par tous les écrans analytiques. */
 export function PeriodPicker({ label, onPrevious, onNext, onCurrent, isCurrent }) {
   return (
-    <div className="flex items-center gap-1">
+    <div className="flex flex-wrap items-center gap-1">
       <button type="button" className="btn btn-sm" onClick={onPrevious} aria-label="Mois précédent">
         <ChevronLeft size={13} />
       </button>

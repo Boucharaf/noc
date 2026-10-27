@@ -65,24 +65,11 @@ def _now() -> datetime:
 
 
 @dataclass(frozen=True, slots=True)
-class NetworkInterface:
-    """Interface réseau déclarée par un outil source."""
-
-    tool: str
-    ref: str
-    name: str
-    description: str | None = None
-    ip: str | None = None
-    state: str = "unknown"
-    speed_mbps: float | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class Node:
     """Un équipement supervisé, vu par UN outil.
 
     `ref` est l'identifiant dans l'outil d'origine (hostid Zabbix, id
-    Centreon, clé d'objet iTop). Il n'a de sens que couplé à `tool` : c'est
+    Centreon, id iTop). Il n'a de sens que couplé à `tool` : c'est
     le couple (tool, ref) qui identifie sans ambiguïté, jamais `ref` seul.
     """
 
@@ -108,20 +95,19 @@ class Node:
     # Site/localité déduits des groupes de l'outil quand la convention de
     # nommage le permet ; None sinon — on ne devine pas.
     site: str | None = None
+    # Découpage administratif au-dessus du site : province puis région
+    # (nouveau découpage, 17 régions). Même règle que pour le site : lu chez
+    # l'outil (référentiel NetXMS de l'agence, groupes « Province/… » et
+    # « Region/… » ailleurs), jamais deviné.
+    province: str | None = None
+    region: str | None = None
     latitude: float | None = None
     longitude: float | None = None
     # Renseigné par les outils d'ITSM (iTop) uniquement.
     organisation: str | None = None
     node_type: str | None = None
-    owner: str | None = None
-    business_service: str | None = None
-    criticality: str | None = None
-    depends_on: tuple[str, ...] = ()
-    interfaces: tuple[NetworkInterface, ...] = ()
-    source_status: str | None = None
-    last_check_at: datetime | None = None
-    next_check_at: datetime | None = None
-    last_output: str | None = None
+    observed_at: datetime = field(default_factory=_now)
+    stale: bool = False
 
     def key(self) -> str:
         return f"{self.tool}:{self.ref}"
@@ -129,10 +115,7 @@ class Node:
 
 @dataclass(frozen=True, slots=True)
 class Alert:
-    """Une alerte ACTIVE. Les alertes closes ne circulent jamais par ici :
-    elles appartiennent à l'historique, qui reste chez l'outil source et se
-    consulte à la demande (voir integrations/base.py::SourceClient.fetch_history).
-    """
+    """An active source record, explicitly classified as technical or ITSM."""
 
     tool: str
     ref: str
@@ -143,20 +126,43 @@ class Alert:
     node_name: str | None = None
     acknowledged: bool = False
     acknowledged_at: datetime | None = None
-    acknowledged_by: str | None = None
-    acknowledgement_note: str | None = None
-    is_maintenance: bool = False
-    maintenance_until: datetime | None = None
-    last_change_at: datetime | None = None
-    source_status: str | None = None
-    source_assignee: str | None = None
-    source_team: str | None = None
-    business_service: str | None = None
     # Ticket ITSM rattaché, quand l'outil le connaît (iTop).
     ticket_ref: str | None = None
+    kind: str = "technical"
+    # Champs propres à la source, sans équivalent dans les autres outils :
+    # pour un ticket iTop, agent, équipe, demandeur, dates de prise en
+    # charge et de résolution, CI concernés. Affichés sur la fiche
+    # d'incident, jamais utilisés pour les décomptes.
+    details: dict = field(default_factory=dict)
+    # Gravité d'origine, dans le vocabulaire de l'outil (normalize.source_severity).
+    source_severity: str | None = None
+    last_observed_at: datetime = field(default_factory=_now)
+    stale: bool = False
 
     def key(self) -> str:
         return f"{self.tool}:{self.ref}"
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkInterface:
+    """Network interface status returned by a supervision source."""
+
+    ip: str | None = None
+    available: int | None = None
+    main: bool = False
+
+    @classmethod
+    def from_record(cls, record: dict[str, Any]) -> "NetworkInterface":
+        raw_available = record.get("available")
+        try:
+            available = int(raw_available) if raw_available is not None else None
+        except (TypeError, ValueError):
+            available = None
+        return cls(
+            ip=record.get("ip") or None,
+            available=available,
+            main=str(record.get("main")) == "1",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,7 +198,15 @@ class ToolSnapshot:
     health: ToolHealth
     nodes: tuple[Node, ...] = ()
     alerts: tuple[Alert, ...] = ()
-    sla_targets: tuple[dict[str, Any], ...] = ()
+    nodes_complete: bool = True
+    alerts_complete: bool = True
+    # Dernières valeurs par équipement : {ref: {type de métrique: valeur}}.
+    latest: dict = field(default_factory=dict)
+    # Maintenances planifiées et ordres de travail (voir SourceClient). None :
+    # l'outil n'en fournit pas ou n'a pas répondu — le collecteur reprend
+    # alors la dernière collecte réussie.
+    maintenance: tuple | None = None
+    work_orders: tuple | None = None
 
 
 def to_jsonable(value: Any) -> Any:

@@ -26,29 +26,51 @@ from datetime import datetime, timezone
 
 from .base import SourceClient, ToolUnavailable
 from .models import Alert, MetricPoint, Node, ToolHealth
-from .normalize import epoch_to_dt, iso_to_dt, severity
+from .normalize import (
+    combine_series,
+    iso_to_dt,
+    locality_from_groups,
+    severity,
+    source_severity,
+)
 
 logger = logging.getLogger(__name__)
 
 # Correspondance nom de métrique Centreon -> type du NOC. Les noms viennent
-# des perfdata des sondes standard (check_icmp, check_traffic, check_centreon_cpu).
+# des perfdata des sondes standard (check_icmp, check_traffic, plugins
+# Centreon). Les noms ambigus sont EXCLUS : `used` est la mémoire chez une
+# sonde, l'espace disque en octets chez une autre ; `rtmax` est le pire
+# temps de réponse et tirerait la latence moyenne vers le haut ; load5 et
+# load15 ne se moyennent pas avec load1.
 _METRIC_NAMES = {
     "rta": "latency_ms",
-    "rtmax": "latency_ms",
     "pl": "packet_loss_pct",
     "packet_loss": "packet_loss_pct",
     "traffic_in": "bandwidth_in_mbps",
     "traffic_out": "bandwidth_out_mbps",
     "cpu": "cpu_pct",
     "cpu_used": "cpu_pct",
+    "cpu.utilization.percentage": "cpu_pct",
+    "total_cpu_avg": "cpu_pct",
     "memory_used": "ram_pct",
-    "used": "ram_pct",
-    "disk": "disk_pct",
+    "memory.usage.percentage": "ram_pct",
     "disk_used": "disk_pct",
+    "storage.space.usage.percentage": "disk_pct",
     "uptime": "uptime",
     "load1": "cpu_load",
-    "load5": "cpu_load",
-    "load15": "cpu_load",
+}
+
+# Unités acceptées par type : une métrique qui porte le bon nom mais pas
+# l'unité attendue (memory_used en octets plutôt qu'en %) est écartée plutôt
+# qu'affichée avec une échelle fausse. Une unité absente est tolérée.
+_EXPECTED_UNITS = {
+    "cpu_pct": {"%"},
+    "ram_pct": {"%"},
+    "disk_pct": {"%"},
+    "packet_loss_pct": {"%"},
+    "latency_ms": {"ms", "s"},
+    "bandwidth_in_mbps": {"b/s", "bps"},
+    "bandwidth_out_mbps": {"b/s", "bps"},
 }
 
 # Statuts considérés comme des problèmes. DOWN et UNREACHABLE concernent les
@@ -62,12 +84,6 @@ _SCALE = {
     "bandwidth_out_mbps": 1 / 1e6,
     "uptime": 1.0 / 86400.0,
 }
-
-
-def _source_datetime(value):
-    if isinstance(value, (int, float)) or str(value or "").isdigit():
-        return epoch_to_dt(value)
-    return iso_to_dt(value)
 
 
 class CentreonClient(SourceClient):
@@ -180,49 +196,60 @@ class CentreonClient(SourceClient):
             rows = body.get("result") or []
             collected.extend(rows)
             meta = body.get("meta") or {}
-            total = meta.get("total", len(collected))
-            if len(collected) >= total or not rows:
+            total = meta.get("total")
+            if total is not None and len(collected) >= int(total):
+                return collected
+            if not rows and total is not None and len(collected) < int(total):
+                raise ToolUnavailable(
+                    self.name,
+                    f"pagination incomplète : {len(collected)} ressource(s) reçue(s) "
+                    f"sur {int(total)} annoncées",
+                )
+            if not rows or (total is None and len(rows) < limit):
                 return collected
             page += 1
             if page > 200:  # garde-fou : 20 000 ressources
-                logger.warning("Centreon : pagination interrompue à 200 pages")
-                return collected
+                raise ToolUnavailable(
+                    self.name,
+                    "pagination interrompue après 20 000 ressources; "
+                    "résultat incomplet, réduire le périmètre Centreon",
+                )
 
     async def fetch_nodes(self) -> list[Node]:
-        rows = await self._resources(["host", "service"])
+        # Un service Centreon est un contrôle attaché à un hôte, pas un
+        # équipement supplémentaire dans le parc.
+        rows = await self._resources(["host"])
         nodes: list[Node] = []
         for row in rows:
+            if row.get("type", "host") != "host":
+                continue
+            if row.get("id") is None:
+                raise ToolUnavailable(self.name, "hôte Centreon sans identifiant")
             status = (row.get("status") or {}).get("code")
             in_maintenance = bool(row.get("in_downtime"))
-            resource_type = row.get("type", "host")
-            parent = row.get("parent") or {}
-            
             name = row.get("name") or "(sans nom)"
-            if resource_type == "service":
-                parent_name = parent.get("name") or ""
-                name = f"{parent_name} - {name}" if parent_name else name
+            locality = locality_from_groups(
+                g.get("name", "") for g in (row.get("groups") or [])
+            )
 
             nodes.append(
                 Node(
                     tool=self.name,
-                    ref=f"{resource_type}-{row.get('id')}",
+                    ref=f"host-{row.get('id')}",
                     name=name,
                     hostname=row.get("name") or "",
-                    ip=row.get("fqdn") or (row.get("information") or None),
-                    state=_host_state(status, in_maintenance, resource_type),
-                    enabled=not row.get("is_notification_enabled") is False,
+                    # `fqdn` porte l'adresse de l'hôte. `information` est la
+                    # sortie de la sonde (« OK - rta 0,4 ms ») : jamais une IP.
+                    ip=row.get("fqdn") or None,
+                    state=_host_state(status, in_maintenance, "host"),
+                    enabled=row.get("is_monitoring_enabled") is not False,
                     groups=tuple(
                         g.get("name", "") for g in (row.get("groups") or []) if g.get("name")
                     ),
                     site=_site_from_groups(row.get("groups") or []),
-                    node_type=resource_type,
-                    depends_on=(f"centreon:host-{parent['id']}",)
-                    if resource_type == "service" and parent.get("id")
-                    else (),
-                    source_status=(row.get("status") or {}).get("name"),
-                    last_check_at=_source_datetime(row.get("last_check")),
-                    next_check_at=_source_datetime(row.get("next_check")),
-                    last_output=row.get("information"),
+                    province=locality["province"],
+                    region=locality["region"],
+                    node_type="host",
                 )
             )
         return nodes
@@ -251,37 +278,28 @@ class CentreonClient(SourceClient):
             scale = "centreon_host" if resource_type == "host" else "centreon_service"
             parent = row.get("parent") or {}
             acknowledged = bool(row.get("acknowledged"))
-            acknowledgement = row.get("acknowledgement") or {}
-            parent_id = parent.get("id")
-            parent_ref = f"host-{parent_id}" if parent_id else f"host-{row.get('id')}"
-            ack_author = (
-                acknowledgement.get("author_name")
-                or acknowledgement.get("author")
-                or row.get("acknowledged_by")
-            )
-            if isinstance(ack_author, dict):
-                ack_author = ack_author.get("name") or ack_author.get("username")
+            since = iso_to_dt(row.get("last_status_change"))
+            if since is None:
+                raise ToolUnavailable(
+                    self.name,
+                    f"alerte {row.get('id')} sans date de changement valide",
+                )
             alerts.append(
                 Alert(
                     tool=self.name,
                     ref=f"{resource_type}-{row.get('id')}",
                     severity=severity(scale, code),
+                    source_severity=source_severity(scale, code),
                     message=row.get("information") or status.get("name") or "(sans détail)",
-                    since=(
-                        iso_to_dt(row.get("last_status_change"))
-                        or datetime.now(timezone.utc)
-                    ),
+                    since=since,
                     # Pour un service, l'équipement est l'hôte parent ; pour un
                     # hôte, c'est lui-même.
-                    node_ref=parent_ref,
+                    node_ref=f"host-{parent.get('id') or row.get('id')}",
                     node_name=parent.get("name") or row.get("name"),
                     acknowledged=acknowledged,
-                    acknowledged_at=_source_datetime(acknowledgement.get("entry_time")),
-                    acknowledged_by=ack_author,
-                    acknowledgement_note=acknowledgement.get("comment"),
-                    is_maintenance=bool(row.get("in_downtime")),
-                    last_change_at=_source_datetime(row.get("last_status_change")),
-                    source_status=status.get("name"),
+                    acknowledged_at=iso_to_dt(
+                        (row.get("acknowledgement") or {}).get("entry_time")
+                    ),
                 )
             )
         return alerts
@@ -315,32 +333,62 @@ class CentreonClient(SourceClient):
             "end": end.astimezone(timezone.utc).isoformat(),
         }
         scale = _SCALE.get(metric_type, 1.0)
-        points: list[MetricPoint] = []
+        series: list[list[tuple[datetime, float]]] = []
+        step_s = 60
 
         for service in services:
             service_id = service.get("id")
-            parent_id = (service.get("parent") or {}).get("id", node_ref)
+            parent_id = (service.get("parent") or {}).get("id") or resource_id
             try:
                 body = await self._get(
                     f"/monitoring/hosts/{parent_id}/services/{service_id}/metrics",
                     window,
                 )
-            except ToolUnavailable:
+            except ToolUnavailable as exc:
                 # Un service sans RRD (checks passifs récents) n'est pas une
-                # panne : on passe au suivant.
-                continue
+                # panne. Toute autre erreur doit rester visible.
+                if "HTTP 404" in str(exc):
+                    continue
+                raise
             for metric in body.get("metrics") or []:
                 if _METRIC_NAMES.get(str(metric.get("metric", "")).lower()) != metric_type:
                     continue
+                unit = str(metric.get("unit") or "").strip()
+                expected = _EXPECTED_UNITS.get(metric_type)
+                if unit and expected and unit.lower() not in {u.lower() for u in expected}:
+                    logger.info(
+                        "centreon : métrique %s du service %s ignorée (unité %s)",
+                        metric.get("metric"), service_id, unit,
+                    )
+                    continue
+                factor = 1000.0 if metric_type == "latency_ms" and unit == "s" else scale
                 times = body.get("times") or []
-                for at_raw, value in zip(times, metric.get("data") or []):
+                values = metric.get("data") or []
+                if len(times) != len(values):
+                    raise ToolUnavailable(
+                        self.name,
+                        f"série Centreon incohérente pour le service {service_id} "
+                        f"({len(times)} horodatages, {len(values)} valeurs)",
+                    )
+                points: list[tuple[datetime, float]] = []
+                for at_raw, value in zip(times, values):
                     at = iso_to_dt(at_raw)
-                    if at is None or value is None:
+                    if at is None:
+                        raise ToolUnavailable(
+                            self.name,
+                            f"série Centreon avec horodatage invalide pour le service {service_id}",
+                        )
+                    if value is None:
                         continue
-                    points.append(MetricPoint(at=at, value=float(value) * scale))
+                    points.append((at, float(value) * factor))
+                if len(points) > 1:
+                    step_s = max(step_s, int((points[1][0] - points[0][0]).total_seconds()))
+                series.append(points)
 
-        points.sort(key=lambda p: p.at)
-        return points
+        # Plusieurs services peuvent porter la même métrique (deux sondes Ping,
+        # une sonde de trafic par interface) : combinées par intervalle de la
+        # résolution RRD, elles ne s'entrelacent plus dans une même courbe.
+        return combine_series(series, metric_type, step_s)
 
 
 def _host_state(status_code, in_maintenance: bool, resource_type: str = "host") -> str:

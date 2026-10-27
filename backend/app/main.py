@@ -179,8 +179,6 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-Request-Id"],
 )
 
-app.middleware("http")(rate_limit_middleware)
-
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
@@ -195,6 +193,11 @@ async def security_headers(request: Request, call_next):
     if request.url.path.startswith("/api/"):
         response.headers.setdefault("Cache-Control", "no-store")
     return response
+
+
+@app.middleware("http")
+async def apply_rate_limit(request: Request, call_next):
+    return await rate_limit_middleware(request, call_next)
 
 
 for router in all_routers:

@@ -15,22 +15,19 @@ terrain en cours.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
-from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import NODE_STATES
-from app.models import AlertState, FieldIntervention, MaintenanceWindow
 from app.services import live_service
-from app.services.maintenance_service import covers as maintenance_covers
+from collector.operations import window_is_active
 
 logger = logging.getLogger(__name__)
 
 # Ordre d'affichage : le plus dégradé d'abord. C'est l'ordre dans lequel un
 # exploitant veut voir son parc — pas l'ordre alphabétique.
-_DISPLAY_STATES = (*NODE_STATES, "inactive")
-_STATE_RANK = {state: index for index, state in enumerate(_DISPLAY_STATES)}
+_STATE_RANK = {state: index for index, state in enumerate(NODE_STATES)}
 
 _SORTS = {
     "state": lambda n: (_STATE_RANK.get(n.get("state"), 9), -n.get("alerts", 0), n.get("name", "").lower()),
@@ -41,31 +38,60 @@ _SORTS = {
 }
 
 
-def _active_windows(db: Session, at: datetime) -> list[MaintenanceWindow]:
-    return list(
-        db.execute(
-            select(MaintenanceWindow).where(
-                MaintenanceWindow.starts_at <= at, MaintenanceWindow.ends_at >= at
-            )
-        ).scalars()
-    )
+MAINTENANCE_SOURCE = {"change": "Changement iTop", "maintenance": "Maintenance Zabbix"}
 
 
-def _maintenance_for(windows, node: dict) -> MaintenanceWindow | None:
-    return maintenance_covers(windows, node.get("id"), node.get("site"))
+async def active_windows(at: datetime | None = None) -> list[dict]:
+    """Maintenances en cours, lues dans les outils (voir live_service)."""
+    at = at or datetime.now(timezone.utc)
+    return [
+        window for window in await live_service.get_maintenance()
+        if window.get("node_keys") and window_is_active(window, at)
+    ]
 
 
-def _display_state(node: dict, window: MaintenanceWindow | None = None) -> str:
-    if node.get("enabled") is False:
-        return "inactive"
-    if window:
-        return "maintenance"
-    return node.get("state", "unknown")
+def maintenance_label(window: dict) -> str:
+    source = MAINTENANCE_SOURCE.get(window.get("kind"), "Maintenance")
+    ref = f" {window['ref']}" if window.get("ref") and window.get("kind") == "change" else ""
+    return f"{source}{ref} — {window.get('title') or ''}".strip(" —")
+
+
+def apply_maintenance_windows(nodes: list[dict], windows: list[dict]) -> list[dict]:
+    """Marque « maintenance » les équipements visés par une maintenance en
+    cours, sur une COPIE de l'instantané. Un équipement que son outil
+    déclare déjà en maintenance (hôte Zabbix, downtime Nagios) l'est resté
+    dans l'instantané."""
+    by_node: dict[str, dict] = {}
+    for window in windows:
+        for key in window.get("node_keys") or []:
+            by_node.setdefault(key, window)
+    enriched = []
+    for node in nodes:
+        window = by_node.get(node.get("id"))
+        enriched.append(
+            {
+                **node,
+                "state": "maintenance" if window else node.get("state", "unknown"),
+                "measured_state": node.get("state", "unknown"),
+                "maintenance_reason": maintenance_label(window) if window else None,
+                "maintenance_until": window.get("end") if window else None,
+            }
+        )
+    return enriched
+
+
+async def nodes_with_maintenance(
+    db: Session | None = None, at: datetime | None = None
+) -> list[dict]:
+    nodes = await live_service.get_nodes()
+    return apply_maintenance_windows(nodes, await active_windows(at))
 
 
 async def list_nodes(
     db: Session,
     state: str | None = None,
+    region: str | None = None,
+    province: str | None = None,
     site: str | None = None,
     tool: str | None = None,
     search: str | None = None,
@@ -75,29 +101,20 @@ async def list_nodes(
     limit: int = 200,
     offset: int = 0,
 ) -> dict:
-    nodes = await live_service.get_nodes()
-    windows = _active_windows(db, datetime.now(timezone.utc))
+    # Import local : geo_service dépend lui-même de ce module.
+    from app.services.geo_service import scope_nodes
 
     enriched = []
-    for node in nodes:
-        window = _maintenance_for(windows, node)
+    for node in scope_nodes(await nodes_with_maintenance(db), region, province, site):
         enriched.append(
             {
                 **node,
-                # Un équipement désactivé dans ses sources est distinct d'un
-                # équipement en panne ou en maintenance planifiée.
-                "state": _display_state(node, window),
-                "measured_state": node.get("state", "unknown"),
-                "maintenance_reason": window.reason if window else None,
-                "maintenance_until": window.ends_at.isoformat() if window else None,
                 "tools": sorted((node.get("sources") or {}).keys()),
             }
         )
 
     def keep(node: dict) -> bool:
         if state and node.get("state") != state:
-            return False
-        if site and node.get("site") != site:
             return False
         if tool and tool not in (node.get("sources") or {}):
             return False
@@ -109,7 +126,9 @@ async def list_nodes(
             needle = search.strip().lower()
             haystack = " ".join(
                 str(node.get(field) or "")
-                for field in ("name", "hostname", "ip", "site", "organisation")
+                for field in (
+                    "name", "hostname", "ip", "site", "province", "region", "organisation",
+                )
             ).lower()
             if needle not in haystack:
                 return False
@@ -136,128 +155,58 @@ async def get_node(db: Session, node_id: str) -> dict | None:
     vers l'outil source et qu'ouvrir une fiche ne doit pas dépendre de la
     disponibilité de Zabbix.
     """
-    node = await live_service.get_node(node_id)
+    nodes = await nodes_with_maintenance(db)
+    node = next((item for item in nodes if item.get("id") == node_id), None)
     if node is None:
         return None
 
-    window = _maintenance_for(_active_windows(db, datetime.now(timezone.utc)), node)
-
-    interventions = list(
-        db.execute(
-            select(FieldIntervention)
-            .where(
-                FieldIntervention.node_key == node_id,
-                FieldIntervention.status.in_(("scheduled", "in_progress")),
-            )
-            .order_by(FieldIntervention.scheduled_at)
-        ).scalars()
-    )
-
-    alerts = [
+    records = [
         alert
         for alert in await live_service.get_alerts()
         if (node.get("sources") or {}).get(alert["tool"]) == alert.get("node_ref")
     ]
-
-    # -----------------------------------------------------------------
-    # Historique des incidents depuis PostgreSQL (résolutions seulement)
-    # -----------------------------------------------------------------
-    cutoff_30d = datetime.now(timezone.utc) - timedelta(days=30)
-    cutoff_90d = datetime.now(timezone.utc) - timedelta(days=90)
-
-    resolved_90d = list(
-        db.execute(
-            select(AlertState).where(
-                AlertState.node_key == node_id,
-                AlertState.resolved_at >= cutoff_90d,
-            )
-        ).scalars()
-    )
-
-    incidents_30d = sum(
-        1 for s in resolved_90d if s.resolved_at and s.resolved_at >= cutoff_30d
-    )
-    incidents_90d = len(resolved_90d)
-
-    # MTTR en minutes : de la détection à la résolution
-    mttr_values = []
-    for s in resolved_90d:
-        if s.resolved_at and s.detected_at:
-            delta = (s.resolved_at - s.detected_at).total_seconds() / 60
-            if delta >= 0:
-                mttr_values.append(delta)
-    avg_mttr_minutes = (
-        round(sum(mttr_values) / len(mttr_values), 1) if mttr_values else None
-    )
-
-    # Indisponibilité 30 j (somme des durées de résolution sur 30 j)
-    downtime_30d_minutes = (
-        round(
-            sum(
-                (s.resolved_at - s.detected_at).total_seconds() / 60
-                for s in resolved_90d
-                if s.resolved_at
-                and s.detected_at
-                and s.resolved_at >= cutoff_30d
-                and (s.resolved_at - s.detected_at).total_seconds() >= 0
-            ),
-            1,
-        )
-        or None
-    )
-
-    # -----------------------------------------------------------------
-    # source_refs : liste [{source_tool, external_ref}] pour l'affichage
-    # -----------------------------------------------------------------
-    source_refs = [
-        {"source_tool": tool, "external_ref": ref}
-        for tool, ref in sorted((node.get("sources") or {}).items())
+    alerts = [
+        record for record in records
+        if record.get("kind", "technical") == "technical"
     ]
+    itsm_tickets = [record for record in records if record.get("kind") == "itsm_ticket"]
+
+    from app.services import geo_service  # geo_service importe ce module
 
     return {
         **node,
-        "state": "maintenance" if window else node.get("state", "unknown"),
-        "measured_state": node.get("state", "unknown"),
-        "maintenance_reason": window.reason if window else None,
-        "maintenance_until": window.ends_at.isoformat() if window else None,
+        "position": geo_service.position(node, nodes),
         "tools": sorted((node.get("sources") or {}).keys()),
-        "source_refs": source_refs,
         "active_alerts": alerts,
-        "field_interventions": [
-            {
-                "id": row.id,
-                "status": row.status,
-                "scheduled_at": row.scheduled_at.isoformat() if row.scheduled_at else None,
-                "agent_user_id": row.agent_user_id,
-            }
-            for row in interventions
+        "itsm_tickets": itsm_tickets,
+        # Interventions et maintenances : ordres de travail et changements
+        # iTop (et maintenances Zabbix) qui visent cet équipement.
+        "work_orders": [
+            order for order in await live_service.get_work_orders()
+            if node_id in (order.get("node_keys") or [])
         ],
-        # Métriques historiques — calculées depuis les résolutions PostgreSQL.
-        # Les valeurs sont None si aucun incident n'a été résolu via le NOC
-        # sur la période : c'est différent de zéro (aucun incident enregistré).
-        "incidents_30d": incidents_30d,
-        "incidents_90d": incidents_90d,
-        "avg_mttr_minutes": avg_mttr_minutes,
-        "downtime_30d_minutes": downtime_30d_minutes,
+        "maintenances": [
+            window for window in await live_service.get_maintenance()
+            if node_id in (window.get("node_keys") or [])
+        ],
     }
 
 
-async def state_counts() -> dict[str, int]:
+async def state_counts(db: Session, nodes: list[dict] | None = None) -> dict[str, int]:
     """Décompte par état, pour les tuiles du tableau de bord.
 
     Tous les états du vocabulaire sont présents, y compris à zéro : une
     tuile qui disparaît quand son compteur tombe à zéro fait sauter la mise
     en page et laisse croire à une panne d'affichage.
     """
-    nodes = await live_service.get_nodes()
-    counts = {state: 0 for state in _DISPLAY_STATES}
+    nodes = await nodes_with_maintenance(db) if nodes is None else nodes
+    counts = {state: 0 for state in NODE_STATES}
     for node in nodes:
-        state = _display_state(node)
-        counts[state] = counts.get(state, 0) + 1
+        counts[node.get("state", "unknown")] = counts.get(node.get("state", "unknown"), 0) + 1
     return counts
 
 
-async def coverage_by_tool() -> list[dict]:
+async def coverage_by_tool(nodes: list[dict] | None = None) -> list[dict]:
     """Couverture de supervision, outil par outil.
 
     Répond à la question que se pose le responsable du NOC : « combien
@@ -265,7 +214,7 @@ async def coverage_by_tool() -> list[dict]:
     un seul outil est un point de rupture — si cet outil tombe, on le perd
     de vue sans le savoir.
     """
-    nodes = await live_service.get_nodes()
+    nodes = await live_service.get_nodes() if nodes is None else nodes
     by_tool: dict[str, int] = {}
     single = 0
     for node in nodes:

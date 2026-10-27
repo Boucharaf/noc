@@ -1,3 +1,61 @@
+# Accès aux outils sources, partagés À L'IDENTIQUE par le collecteur
+# (inventaire et alertes) et le backend (courbes, SLT iTop, écran
+# Interopérabilité). Une seule définition : deux listes recopiées avaient
+# divergé, et le backend tournait sans les identifiants Nagios/NSP ni la
+# vérification TLS de NetXMS, Nagios et NSP.
+#
+# Un connecteur ne s'active que si son URL est renseignée — c'est le seul
+# interrupteur, voir .env.example §4.
+x-tool-sources: &tool-sources
+  ZABBIX_API_URL: ${ZABBIX_API_URL:-}
+  ZABBIX_API_USER: ${ZABBIX_API_USER:-}
+  ZABBIX_API_PASSWORD: ${ZABBIX_API_PASSWORD:-}
+  ZABBIX_API_TOKEN: ${ZABBIX_API_TOKEN:-}
+  ZABBIX_VERIFY_SSL: ${ZABBIX_VERIFY_SSL:-true}
+  CENTREON_API_URL: ${CENTREON_API_URL:-}
+  CENTREON_API_USER: ${CENTREON_API_USER:-}
+  CENTREON_API_PASSWORD: ${CENTREON_API_PASSWORD:-}
+  CENTREON_VERIFY_SSL: ${CENTREON_VERIFY_SSL:-true}
+  ITOP_API_URL: ${ITOP_API_URL:-}
+  ITOP_API_USER: ${ITOP_API_USER:-}
+  ITOP_API_PASSWORD: ${ITOP_API_PASSWORD:-}
+  ITOP_VERIFY_SSL: ${ITOP_VERIFY_SSL:-true}
+  ITOP_TICKET_CLASSES: ${ITOP_TICKET_CLASSES:-Incident,UserRequest}
+  ITOP_ZBX_EVENT_FIELD: ${ITOP_ZBX_EVENT_FIELD:-}
+  ITOP_TIMEZONE: ${ITOP_TIMEZONE:-Europe/Paris}
+  NETXMS_API_URL: ${NETXMS_API_URL:-}
+  NETXMS_API_USER: ${NETXMS_API_USER:-}
+  NETXMS_API_PASSWORD: ${NETXMS_API_PASSWORD:-}
+  NETXMS_VERIFY_SSL: ${NETXMS_VERIFY_SSL:-true}
+  NAGIOS_API_URL: ${NAGIOS_API_URL:-}
+  NAGIOS_API_USER: ${NAGIOS_API_USER:-}
+  NAGIOS_API_PASSWORD: ${NAGIOS_API_PASSWORD:-}
+  NAGIOS_VERIFY_SSL: ${NAGIOS_VERIFY_SSL:-true}
+  NAGIOS_MODE: ${NAGIOS_MODE:-unknown}
+  NAGIOS_LIVESTATUS_PORT: ${NAGIOS_LIVESTATUS_PORT:-6557}
+  NSP_API_URL: ${NSP_API_URL:-}
+  NSP_API_USER: ${NSP_API_USER:-}
+  NSP_API_PASSWORD: ${NSP_API_PASSWORD:-}
+  NSP_VERIFY_SSL: ${NSP_VERIFY_SSL:-true}
+  NSP_FM_MODE: ${NSP_FM_MODE:-unknown}
+
+# Équipement réseau de laboratoire (voir « Réseau de laboratoire » plus bas).
+# `environment` n'est pas fusionné par la clé de fusion YAML : chaque
+# équipement déclare le sien en entier.
+x-netdevice: &netdevice
+  profiles: ["tools", "netlab"]
+  build: ./tools/netdevice
+  image: noc-tools/netdevice:1.0
+  # iptables (pertes et coupures SNMP) ; le noyau WSL2 n'a pas tc netem.
+  cap_add: ["NET_ADMIN"]
+  # Le noyau ne répond plus au ping : icmp_responder.py le fait, avec la
+  # latence et les pertes du lien. Réglage propre à l'espace réseau du
+  # conteneur, sans effet sur l'hôte.
+  sysctls:
+    net.ipv4.icmp_echo_ignore_all: "1"
+  mem_limit: 48m
+  restart: unless-stopped
+
 services:
   # ══════════════════════════════════════════════════════════════════════
   #  Cœur de la plateforme
@@ -28,42 +86,14 @@ services:
       context: .
       dockerfile: collector/Dockerfile
     environment:
-      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD manquant dans .env}@redis:6379/0
-      - NOC_DATABASE_URL=postgresql://${POSTGRES_USER:-noc}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD manquant dans .env}@postgres:5432/${POSTGRES_DB:-noc}
-      - COLLECT_INTERVAL_S=${COLLECT_INTERVAL_S:-300}
-      - ROLLUP_ENABLED=${ROLLUP_ENABLED:-true}
-      - ROLLUP_HOUR=${ROLLUP_HOUR:-1}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - TZ=${TZ:-Africa/Ouagadougou}
-      # Outils sources. Un connecteur ne s'active que si son URL est
-      # renseignée — c'est le seul interrupteur, voir .env.example §4.
-      - ZABBIX_API_URL=${ZABBIX_API_URL:-}
-      - ZABBIX_API_USER=${ZABBIX_API_USER:-}
-      - ZABBIX_API_PASSWORD=${ZABBIX_API_PASSWORD:-}
-      - ZABBIX_API_TOKEN=${ZABBIX_API_TOKEN:-}
-      - ZABBIX_VERIFY_SSL=${ZABBIX_VERIFY_SSL:-true}
-      - CENTREON_API_URL=${CENTREON_API_URL:-}
-      - CENTREON_API_USER=${CENTREON_API_USER:-}
-      - CENTREON_API_PASSWORD=${CENTREON_API_PASSWORD:-}
-      - CENTREON_VERIFY_SSL=${CENTREON_VERIFY_SSL:-true}
-      - ITOP_API_URL=${ITOP_API_URL:-}
-      - ITOP_API_USER=${ITOP_API_USER:-}
-      - ITOP_API_PASSWORD=${ITOP_API_PASSWORD:-}
-      - ITOP_VERIFY_SSL=${ITOP_VERIFY_SSL:-true}
-      - ITOP_TICKET_CLASSES=${ITOP_TICKET_CLASSES:-Incident,UserRequest}
-      - ITOP_ZBX_EVENT_FIELD=${ITOP_ZBX_EVENT_FIELD:-}
-      - NETXMS_API_URL=${NETXMS_API_URL:-}
-      - NETXMS_API_USER=${NETXMS_API_USER:-}
-      - NETXMS_API_PASSWORD=${NETXMS_API_PASSWORD:-}
-      - NETXMS_VERIFY_SSL=${NETXMS_VERIFY_SSL:-true}
-      - NAGIOS_API_URL=${NAGIOS_API_URL:-}
-      - NAGIOS_API_USER=${NAGIOS_API_USER:-}
-      - NAGIOS_API_PASSWORD=${NAGIOS_API_PASSWORD:-}
-      - NAGIOS_MODE=${NAGIOS_MODE:-unknown}
-      - NSP_API_URL=${NSP_API_URL:-}
-      - NSP_API_USER=${NSP_API_USER:-}
-      - NSP_API_PASSWORD=${NSP_API_PASSWORD:-}
-      - NSP_FM_MODE=${NSP_FM_MODE:-unknown}
+      <<: *tool-sources
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD manquant dans .env}@redis:6379/0
+      NOC_DATABASE_URL: postgresql://${POSTGRES_USER:-noc}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD manquant dans .env}@postgres:5432/${POSTGRES_DB:-noc}
+      COLLECT_INTERVAL_S: ${COLLECT_INTERVAL_S:-300}
+      ROLLUP_ENABLED: ${ROLLUP_ENABLED:-true}
+      ROLLUP_HOUR: ${ROLLUP_HOUR:-1}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TZ: ${TZ:-Africa/Ouagadougou}
     depends_on:
       redis:
         condition: service_healthy
@@ -73,13 +103,12 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
     healthcheck:
-      # Contrôler que le processus vit ne suffirait pas : une boucle asyncio
-      # peut rester en vie sans plus rien publier, et c'est précisément la
-      # panne qu'on veut voir. On vérifie donc la présence de l'instantané.
+      # Aligné sur l'état dégradé du backend : un instantané vieux de plus de
+      # deux cycles n'est plus considéré comme sain.
       test:
         [
           "CMD-SHELL",
-          "python -c \"import os,sys,redis; sys.exit(0 if redis.from_url(os.environ['REDIS_URL']).get('noc:live:meta') else 1)\"",
+          "python -c \"import datetime,json,os,sys,redis; raw=redis.from_url(os.environ['REDIS_URL']).get('noc:live:meta'); meta=json.loads(raw) if raw else {}; stamp=datetime.datetime.fromisoformat(meta['collected_at'].replace('Z','+00:00')); age=(datetime.datetime.now(datetime.timezone.utc)-stamp).total_seconds(); sys.exit(0 if 0 <= age <= int(os.environ['COLLECT_INTERVAL_S'])*2 else 1)\"",
         ]
       interval: 60s
       timeout: 10s
@@ -90,89 +119,71 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    # AUCUN port publié : seul nginx joint l'API. Publier 8000 contournerait
-    # TLS, les en-têtes de sécurité et la limitation de débit de la
-    # passerelle, et rendrait X-Real-IP falsifiable — donc le verrouillage
-    # des connexions contournable (app/core/rate_limit.py).
+    # Aucun port publié. Le réseau api_proxy relie le backend, le frontend
+    # (proxy interne) et nginx; seul nginx est approuvé pour X-Real-IP.
     # Déboguer : docker compose exec backend curl -s localhost:8000/api/health
     expose:
       - "8000"
     environment:
-      - NOC_DATABASE_URL=postgresql://${POSTGRES_USER:-noc}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD manquant dans .env}@postgres:5432/${POSTGRES_DB:-noc}
-      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD manquant dans .env}@redis:6379/0
+      # Les mêmes accès que le collecteur : le backend interroge les outils
+      # sources pour l'historique, à la demande.
+      <<: *tool-sources
+      NOC_DATABASE_URL: postgresql://${POSTGRES_USER:-noc}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD manquant dans .env}@postgres:5432/${POSTGRES_DB:-noc}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD manquant dans .env}@redis:6379/0
       # DOIT valoir la même chose que pour le collecteur : cette valeur fixe
       # la durée de vie des clés d'instantané. Si le backend la croit plus
       # courte, il déclarera la collecte interrompue alors qu'elle tourne.
-      - COLLECT_INTERVAL_S=${COLLECT_INTERVAL_S:-300}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY manquant dans .env}
-      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
-      - REFRESH_TOKEN_EXPIRATION_DAYS=${REFRESH_TOKEN_EXPIRATION_DAYS:-7}
+      COLLECT_INTERVAL_S: ${COLLECT_INTERVAL_S:-300}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY manquant dans .env}
+      # Seule route concernée : POST /api/internal/reports/monthly, pour une
+      # tâche planifiée externe. Vide, la route répond 503.
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-}
+      TRUSTED_PROXY_IPS: ${NGINX_API_PROXY_IP:-172.31.250.4}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      REFRESH_TOKEN_EXPIRATION_DAYS: ${REFRESH_TOKEN_EXPIRATION_DAYS:-7}
       # `true` par défaut : un oubli dans .env doit laisser le cookie de
       # session protégé, pas l'exposer en clair.
-      - REFRESH_COOKIE_SECURE=${REFRESH_COOKIE_SECURE:-true}
-      - CORS_ORIGINS=${CORS_ORIGINS}
-      - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
-      - RATE_LIMIT_READ_PER_MIN=${RATE_LIMIT_READ_PER_MIN:-1200}
-      - RATE_LIMIT_WRITE_PER_MIN=${RATE_LIMIT_WRITE_PER_MIN:-120}
-      - RATE_LIMIT_USER_READ_PER_MIN=${RATE_LIMIT_USER_READ_PER_MIN:-1200}
-      - RATE_LIMIT_USER_WRITE_PER_MIN=${RATE_LIMIT_USER_WRITE_PER_MIN:-120}
-      - LOGIN_MAX_FAILURES_PER_USER=${LOGIN_MAX_FAILURES_PER_USER:-10}
-      - LOGIN_MAX_FAILURES_PER_IP=${LOGIN_MAX_FAILURES_PER_IP:-60}
-      - LOGIN_LOCK_WINDOW_SECONDS=${LOGIN_LOCK_WINDOW_SECONDS:-900}
-      - API_DOCS_ENABLED=${API_DOCS_ENABLED:-false}
-      - REALTIME_ENABLED=${REALTIME_ENABLED:-true}
-      - NOTIFY_SEVERITIES=${NOTIFY_SEVERITIES:-critical,high}
-      - SUPERVISION_TOOLS=${SUPERVISION_TOOLS:-zabbix,centreon,itop,netxms,nagios,nsp}
-      # Les mêmes accès que le collecteur : le backend interroge les outils
-      # sources pour l'historique, à la demande.
-      - ZABBIX_API_URL=${ZABBIX_API_URL:-}
-      - ZABBIX_API_USER=${ZABBIX_API_USER:-}
-      - ZABBIX_API_PASSWORD=${ZABBIX_API_PASSWORD:-}
-      - ZABBIX_API_TOKEN=${ZABBIX_API_TOKEN:-}
-      - ZABBIX_VERIFY_SSL=${ZABBIX_VERIFY_SSL:-true}
-      - CENTREON_API_URL=${CENTREON_API_URL:-}
-      - CENTREON_API_USER=${CENTREON_API_USER:-}
-      - CENTREON_API_PASSWORD=${CENTREON_API_PASSWORD:-}
-      - CENTREON_VERIFY_SSL=${CENTREON_VERIFY_SSL:-true}
-      - ITOP_API_URL=${ITOP_API_URL:-}
-      - ITOP_API_USER=${ITOP_API_USER:-}
-      - ITOP_API_PASSWORD=${ITOP_API_PASSWORD:-}
-      - ITOP_VERIFY_SSL=${ITOP_VERIFY_SSL:-true}
-      - NETXMS_API_URL=${NETXMS_API_URL:-}
-      - NETXMS_API_USER=${NETXMS_API_USER:-}
-      - NETXMS_API_PASSWORD=${NETXMS_API_PASSWORD:-}
-      - NAGIOS_API_URL=${NAGIOS_API_URL:-}
-      - NAGIOS_MODE=${NAGIOS_MODE:-unknown}
-      - NSP_API_URL=${NSP_API_URL:-}
-      - NSP_FM_MODE=${NSP_FM_MODE:-unknown}
+      REFRESH_COOKIE_SECURE: ${REFRESH_COOKIE_SECURE:-true}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      RATE_LIMIT_READ_PER_MIN: ${RATE_LIMIT_READ_PER_MIN:-100}
+      RATE_LIMIT_WRITE_PER_MIN: ${RATE_LIMIT_WRITE_PER_MIN:-30}
+      RATE_LIMIT_USER_READ_PER_MIN: ${RATE_LIMIT_USER_READ_PER_MIN:-300}
+      RATE_LIMIT_USER_WRITE_PER_MIN: ${RATE_LIMIT_USER_WRITE_PER_MIN:-90}
+      LOGIN_MAX_FAILURES_PER_USER: ${LOGIN_MAX_FAILURES_PER_USER:-10}
+      LOGIN_MAX_FAILURES_PER_IP: ${LOGIN_MAX_FAILURES_PER_IP:-30}
+      LOGIN_LOCK_WINDOW_SECONDS: ${LOGIN_LOCK_WINDOW_SECONDS:-900}
+      API_DOCS_ENABLED: ${API_DOCS_ENABLED:-false}
+      REALTIME_ENABLED: ${REALTIME_ENABLED:-true}
+      NOTIFY_SEVERITIES: ${NOTIFY_SEVERITIES:-critical,high}
       # Notifications
-      - NOTIFICATIONS_ENABLED=${NOTIFICATIONS_ENABLED:-false}
-      - VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
-      - VAPID_PRIVATE_KEY=${VAPID_PRIVATE_KEY:-}
-      - VAPID_CLAIMS_EMAIL=${VAPID_CLAIMS_EMAIL:-noc@anptic.bf}
-      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID:-}
-      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN:-}
-      - TWILIO_API_KEY_SID=${TWILIO_API_KEY_SID:-}
-      - TWILIO_API_KEY_SECRET=${TWILIO_API_KEY_SECRET:-}
-      - TWILIO_CONTENT_SID=${TWILIO_CONTENT_SID:-}
-      - TWILIO_FROM_NUMBER=${TWILIO_FROM_NUMBER:-}
-      - NOC_SMS_RECIPIENTS=${NOC_SMS_RECIPIENTS:-}
-      - SMTP_HOST=${SMTP_HOST:-}
-      - SMTP_PORT=${SMTP_PORT:-587}
-      - SMTP_USER=${SMTP_USER:-}
-      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
-      - SMTP_FROM=${SMTP_FROM:-noc@anptic.bf}
+      NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-false}
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+      VAPID_CLAIMS_EMAIL: ${VAPID_CLAIMS_EMAIL:-noc@anptic.bf}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_API_KEY_SID: ${TWILIO_API_KEY_SID:-}
+      TWILIO_API_KEY_SECRET: ${TWILIO_API_KEY_SECRET:-}
+      TWILIO_CONTENT_SID: ${TWILIO_CONTENT_SID:-}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
+      NOC_SMS_RECIPIENTS: ${NOC_SMS_RECIPIENTS:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-noc@anptic.bf}
       # Sans ces trois-là, un relais sans chiffrement (port 25 interne, ou
       # Mailpit en local) était inutilisable : STARTTLS était tenté d'office.
-      - SMTP_USE_TLS=${SMTP_USE_TLS:-true}
-      - SMTP_USE_SSL=${SMTP_USE_SSL:-}
-      - SMTP_VERIFY_SSL=${SMTP_VERIFY_SSL:-true}
-      - NOC_EMAIL_RECIPIENTS=${NOC_EMAIL_RECIPIENTS:-}
-      - DASHBOARD_URL=${DASHBOARD_URL:-}
-      - REPORT_OUTPUT_DIR=/reports
-      - REPORT_ORGANISATION=${REPORT_ORGANISATION:-ANPTIC — RESINA}
-      - TZ=${TZ:-Africa/Ouagadougou}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-}
+      SMTP_VERIFY_SSL: ${SMTP_VERIFY_SSL:-true}
+      NOC_EMAIL_RECIPIENTS: ${NOC_EMAIL_RECIPIENTS:-}
+      DASHBOARD_URL: ${DASHBOARD_URL:-}
+      REPORT_OUTPUT_DIR: /reports
+      REPORT_ORGANISATION: ${REPORT_ORGANISATION:-ANPTIC — RESINA}
+      TZ: ${TZ:-Africa/Ouagadougou}
     volumes:
       - reports:/reports
     depends_on:
@@ -182,6 +193,9 @@ services:
         condition: service_healthy
     security_opt:
       - no-new-privileges:true
+    networks:
+      - default
+      - api_proxy
     restart: unless-stopped
     healthcheck:
       # /api/health/live et non /api/health : la seconde répond 503 dès que
@@ -206,6 +220,9 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    networks:
+      gateway: {}
+      api_proxy: {}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
@@ -295,6 +312,10 @@ services:
       frontend:
         condition: service_healthy
     restart: unless-stopped
+    networks:
+      gateway: {}
+      api_proxy:
+        ipv4_address: ${NGINX_API_PROXY_IP:-172.31.250.4}
     healthcheck:
       test:
         [
@@ -317,6 +338,9 @@ services:
   #   Zabbix   7.0.23     images officielles Zabbix SIA
   #   Centreon 22.10.7    image construite depuis les paquets de l'éditeur
   #   iTop     3.2.3-2    image construite depuis l'archive Combodo
+  # Nagios Core 4.5.12 complète le laboratoire (version de l'agence à
+  # confirmer — l'API JSON des CGI est stable sur toute la branche 4.x).
+  # Nokia NSP n'a pas d'instance locale : l'éditeur ne le distribue pas.
   #
   # Pourquoi à l'identique : une intégration validée contre Zabbix 7.2 ne
   # prouve rien sur du 7.0 — le paramètre `auth` du JSON-RPC, la présence de
@@ -331,7 +355,8 @@ services:
   #     docker compose --profile zabbix   up -d     (~1,0 Go)
   #     docker compose --profile itop     up -d     (~0,8 Go)
   #     docker compose --profile centreon up -d     (~2,0 Go)
-  #     docker compose --profile tools    up -d     (les trois)
+  #     docker compose --profile nagios   up -d     (~0,2 Go)
+  #     docker compose --profile tools    up -d     (les quatre)
   #
   # Sur une machine de 8 Go, monter Zabbix et iTop ensemble puis Centreon
   # séparément est le mode d'emploi réaliste. Voir tools/README.md.
@@ -348,6 +373,11 @@ services:
       - POSTGRES_USER=${ZABBIX_DB_USER:-zabbix}
       - POSTGRES_PASSWORD=${ZABBIX_DB_PASSWORD:-zabbix}
       - POSTGRES_DB=${ZABBIX_DB_NAME:-zabbix}
+    # Mémoire de PostgreSQL réduite au laboratoire (défaut : 128 Mo de
+    # shared_buffers et 100 connexions).
+    command: ["postgres", "-c", "shared_buffers=48MB", "-c", "max_connections=60",
+              "-c", "work_mem=2MB", "-c", "maintenance_work_mem=32MB"]
+    mem_limit: 300m
     volumes:
       - zabbix_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -365,17 +395,32 @@ services:
       - POSTGRES_USER=${ZABBIX_DB_USER:-zabbix}
       - POSTGRES_PASSWORD=${ZABBIX_DB_PASSWORD:-zabbix}
       - POSTGRES_DB=${ZABBIX_DB_NAME:-zabbix}
-      # Sans ces deux réglages, l'historique reste 31 jours et les tendances
-      # 365 jours. C'est justement cet historique que le NOC interroge à la
-      # demande au lieu de le recopier : il doit exister.
+      # Housekeeper toutes les heures ; trois processus pinger pour les
+      # sondes ICMP du laboratoire (gabarit « ICMP Ping », provision.py).
+      # La DURÉE de conservation de l'historique, elle, se règle dans
+      # l'interface (Administration > Housekeeping) : 31 jours de valeurs
+      # brutes et 365 jours de tendances par défaut.
       - ZBX_HOUSEKEEPINGFREQUENCY=1
       - ZBX_STARTPINGERS=3
+      # Poste de 8 Go : caches et processus réduits à ce qu'exige un
+      # laboratoire d'une vingtaine d'hôtes (les défauts visent des milliers).
+      - ZBX_CACHESIZE=16M
+      - ZBX_HISTORYCACHESIZE=8M
+      - ZBX_HISTORYINDEXCACHESIZE=4M
+      - ZBX_TRENDCACHESIZE=4M
+      - ZBX_VALUECACHESIZE=16M
+      - ZBX_STARTPOLLERS=3
+      - ZBX_STARTPOLLERSUNREACHABLE=1
+      - ZBX_STARTTRAPPERS=2
+      - ZBX_STARTDISCOVERERS=1
+      - ZBX_STARTHTTPPOLLERS=1
       - TZ=${TZ:-Africa/Ouagadougou}
+    mem_limit: 300m
     depends_on:
       zabbix-db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "grep -q . /dev/null; pidof zabbix_server > /dev/null"]
+      test: ["CMD-SHELL", "pidof zabbix_server > /dev/null"]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -433,7 +478,7 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
     environment:
-      - MARIADB_ROOT_PASSWORD=${ITOP_DB_ROOT_PASSWORD:?ITOP_DB_ROOT_PASSWORD manquant}
+      - MARIADB_ROOT_PASSWORD=${ITOP_DB_ROOT_PASSWORD:-itop_root}
       - MARIADB_DATABASE=${ITOP_DB_NAME:-itop}
       - MARIADB_USER=${ITOP_DB_USER:-itop}
       - MARIADB_PASSWORD=${ITOP_DB_PASSWORD:-itop}
@@ -460,8 +505,11 @@ services:
       - ITOP_DB_PASSWORD=${ITOP_DB_PASSWORD:-itop}
       - ITOP_ADMIN_USER=${ITOP_ADMIN_USER:-admin}
       - ITOP_ADMIN_PASSWORD=${ITOP_ADMIN_PASSWORD:-Admin!2026}
-      - ITOP_REST_USER=${ITOP_API_USER:-noc_collector}
-      - ITOP_REST_PASSWORD=${ITOP_API_PASSWORD:-}
+      # Compte de service du LABORATOIRE — distinct d'ITOP_API_*, qui peut
+      # désigner l'iTop de l'agence : le conteneur ne doit jamais créer chez
+      # lui un compte portant les identifiants d'une autre instance.
+      - ITOP_REST_USER=${ITOP_LAB_REST_USER:-noc_collector}
+      - ITOP_REST_PASSWORD=${ITOP_LAB_REST_PASSWORD:-}
       - ITOP_APP_URL=${ITOP_APP_URL:-http://localhost:8082/}
       - ITOP_LANGUAGE=${ITOP_LANGUAGE:-FR FR}
       - TZ=${TZ:-Africa/Ouagadougou}
@@ -515,7 +563,7 @@ services:
       - CENTREON_DB_PASSWORD=${CENTREON_DB_PASSWORD:-centreon}
       # Politique de mot de passe de Centreon : 12 caractères minimum, avec
       # minuscule, majuscule, chiffre et un caractère parmi @$!%*?&.
-      - CENTREON_ADMIN_PASSWORD=${CENTREON_API_PASSWORD:-Centreon!2026}
+      - CENTREON_ADMIN_PASSWORD=${CENTREON_LAB_PASSWORD:-Centreon!2026}
       - TZ=${TZ:-Africa/Ouagadougou}
     ports:
       - "127.0.0.1:8084:80"
@@ -532,6 +580,128 @@ services:
       centreon-db:
         condition: service_healthy
 
+  # ─────────────────────────── Nagios Core 4.5.12 ───────────────────────────
+  # Interface — http://localhost:8085/nagios (nagiosadmin / NAGIOS_API_PASSWORD)
+  # Le collecteur lit les CGI JSON (NAGIOS_MODE=statusjson) sur
+  # http://nagios/nagios/cgi-bin/ par le réseau compose.
+  #
+  # Inventaire : tools/nagios/noc-lab.cfg — les conteneurs RÉELS de la pile,
+  # sondés par check_ping / check_http / check_tcp. Aucune donnée inventée.
+  nagios:
+    profiles: ["tools", "nagios"]
+    image: jasonrivers/nagios:4.5.12
+    hostname: nagios
+    # Fichier PID Apache périmé : après un `restart`, apache2 croit qu'un
+    # serveur tourne déjà et refuse de démarrer — Nagios sonde, mais plus
+    # aucune page ni CGI ne répond. Même piège que Centreon (tools/README.md).
+    command: ["/bin/sh", "-c", "rm -f /run/apache2/apache2.pid && exec /usr/local/bin/start_nagios"]
+    environment:
+      - NAGIOSADMIN_USER=${NAGIOS_API_USER:-nagiosadmin}
+      - NAGIOSADMIN_PASS=${NAGIOS_API_PASSWORD:-nagios}
+      - TZ=${TZ:-Africa/Ouagadougou}
+    ports:
+      - "127.0.0.1:8085:80"
+    volumes:
+      - ./tools/nagios/noc-lab.cfg:/opt/nagios/etc/conf.d/noc-lab.cfg:ro
+      # État et rétention (acquittements, maintenances) : un conteneur
+      # recréé ne doit pas oublier les acquittements posés.
+      - nagios_var:/opt/nagios/var
+    restart: unless-stopped
+    healthcheck:
+      # Le moteur ET l'interface : c'est par les CGI que lit le collecteur.
+      test: ["CMD-SHELL", "pidof nagios > /dev/null && pidof apache2 > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  # ─────────────────────────── Réseau de laboratoire ───────────────────────────
+  # Six « équipements » de site (tools/netdevice) : vrai agent SNMP, vrai
+  # trafic entre eux, vraies latence et pertes appliquées sur l'interface par
+  # tc netem. Ils donnent à Zabbix et Centreon des interfaces, des débits,
+  # des temps de réponse et des pannes à superviser — ce que les seuls
+  # conteneurs du NOC ne fournissent pas. ~10 Mo chacun.
+  #
+  #     docker compose --profile netlab up -d
+  #
+  # Noms préfixés LAB- : ils ne se confondent jamais avec un équipement de
+  # l'agence. Localités : groupes Site/, Province/, Region/ posés par
+  # tools/provision (Zabbix) et provision-lab (Centreon).
+  lab-ouaga-core-rt01:
+    <<: *netdevice
+    hostname: lab-ouaga-core-rt01
+    environment:
+      DEVICE_NAME: LAB-OUAGA-CORE-RT01
+      DEVICE_LOCATION: Laboratoire NOC Ouagadougou
+      PEER: lab-ouaga-dist-sw01
+      TRAFFIC_KBPS: "1800"
+      DELAY_MS: "1"
+
+  lab-ouaga-dist-sw01:
+    <<: *netdevice
+    hostname: lab-ouaga-dist-sw01
+    environment:
+      DEVICE_NAME: LAB-OUAGA-DIST-SW01
+      DEVICE_LOCATION: Laboratoire NOC Ouagadougou
+      PEER: lab-ouaga-core-rt01
+      TRAFFIC_KBPS: "900"
+      DELAY_MS: "1"
+
+  # Fibre longue distance : latence modérée, lien propre.
+  lab-bobo-rt01:
+    <<: *netdevice
+    hostname: lab-bobo-rt01
+    environment:
+      DEVICE_NAME: LAB-BOBO-RT01
+      DEVICE_LOCATION: Laboratoire Bobo-Dioulasso
+      PEER: lab-ouaga-core-rt01
+      TRAFFIC_KBPS: "1000"
+      DELAY_MS: "22"
+      JITTER_MS: "4"
+
+  # Faisceau hertzien chargé : latence variable, quelques pertes.
+  lab-manga-rt01:
+    <<: *netdevice
+    hostname: lab-manga-rt01
+    environment:
+      DEVICE_NAME: LAB-MANGA-RT01
+      DEVICE_LOCATION: Laboratoire Manga
+      PEER: lab-ouaga-core-rt01
+      TRAFFIC_KBPS: "450"
+      DELAY_MS: "45"
+      JITTER_MS: "15"
+      LOSS_PCT: "2"
+
+  # Liaison satellite (VSAT) : forte latence et des pertes — le site dégradé.
+  # 380 ms et non les ~600 d'un vrai VSAT géostationnaire : le ping de
+  # Zabbix abandonne une réponse au-delà de 500 ms (délai fping par défaut)
+  # et déclarerait le site en panne au lieu de lent.
+  lab-ouahigouya-vsat01:
+    <<: *netdevice
+    hostname: lab-ouahigouya-vsat01
+    environment:
+      DEVICE_NAME: LAB-OUAHIGOUYA-VSAT01
+      DEVICE_LOCATION: Laboratoire Ouahigouya
+      PEER: lab-ouaga-core-rt01
+      TRAFFIC_KBPS: "200"
+      DELAY_MS: "380"
+      JITTER_MS: "30"
+      LOSS_PCT: "6"
+
+  # Lien instable : coupé 6 minutes toutes les 30 — produit de vraies
+  # alertes « injoignable », puis leur résolution.
+  lab-dedougou-rt01:
+    <<: *netdevice
+    hostname: lab-dedougou-rt01
+    environment:
+      DEVICE_NAME: LAB-DEDOUGOU-RT01
+      DEVICE_LOCATION: Laboratoire Dédougou
+      PEER: lab-ouaga-core-rt01
+      TRAFFIC_KBPS: "300"
+      DELAY_MS: "30"
+      JITTER_MS: "6"
+      OUTAGE_EVERY_MIN: "30"
+      OUTAGE_FOR_MIN: "6"
+
   # ─────────────────────────── Provisionnement ───────────────────────────
   # Peuple les trois outils avec l'inventaire RÉEL du laboratoire : les
   # conteneurs de cette pile, supervisés par de vraies sondes (agent Zabbix,
@@ -543,23 +713,21 @@ services:
     profiles: ["provision"]
     build: ./tools/provision
     image: noc-tools/provision:1.0
+    # ⚠️ CE SERVICE ÉCRIT (création d'hôtes, de CI, de groupes). Ses adresses
+    # sont FIGÉES sur les conteneurs du laboratoire et ne lisent JAMAIS les
+    # variables <OUTIL>_API_* du collecteur : celles-ci peuvent désigner les
+    # outils de l'agence, et un `provision` lancé par habitude modifierait
+    # alors la production.
     environment:
-      - ZABBIX_API_URL=${ZABBIX_API_URL:-http://zabbix-web:8080}
-      - ZABBIX_API_USER=${ZABBIX_API_USER:-Admin}
-      - ZABBIX_API_PASSWORD=${ZABBIX_API_PASSWORD:-zabbix}
-      - CENTREON_API_URL=${CENTREON_API_URL:-http://centreon/centreon}
-      - CENTREON_API_USER=${CENTREON_API_USER:-admin}
-      - CENTREON_API_PASSWORD=${CENTREON_API_PASSWORD:-Centreon!2026}
-      - ITOP_API_URL=${ITOP_API_URL:-http://itop}
+      - ZABBIX_API_URL=http://zabbix-web:8080
+      - ZABBIX_API_USER=${ZABBIX_LAB_USER:-Admin}
+      - ZABBIX_API_PASSWORD=${ZABBIX_LAB_PASSWORD:-zabbix}
+      - CENTREON_API_URL=http://centreon/centreon
+      - CENTREON_API_USER=admin
+      - CENTREON_API_PASSWORD=${CENTREON_LAB_PASSWORD:-Centreon!2026}
+      - ITOP_API_URL=http://itop
       - ITOP_API_USER=${ITOP_ADMIN_USER:-admin}
       - ITOP_API_PASSWORD=${ITOP_ADMIN_PASSWORD:-Admin!2026}
-      # Vide par défaut : NetXMS n'est provisionné que si l'opérateur a
-      # explicitement démarré le profil « netxms » et renseigné ces valeurs
-      # (voir .env.example, section 4) — contrairement aux trois autres
-      # outils qui tournent par défaut avec le profil « tools ».
-      - NETXMS_API_URL=${NETXMS_API_URL:-}
-      - NETXMS_API_USER=${NETXMS_API_USER:-}
-      - NETXMS_API_PASSWORD=${NETXMS_API_PASSWORD:-}
       - PROVISION_TOOLS=${PROVISION_TOOLS:-zabbix,centreon,itop}
       - TZ=${TZ:-Africa/Ouagadougou}
     restart: "no"
@@ -600,66 +768,6 @@ services:
       timeout: 5s
       retries: 10
 
-  # ─────────────────────── NetXMS : serveur NEUF (activable) ───────────────────────
-  # Même logique que Zabbix/Centreon/iTop ci-dessus : une installation NEUVE
-  # de la version exacte de l'agence (5.0.8), PAS une restauration du dump de
-  # production. Voir tools/netxms/Dockerfile pour le raisonnement complet et
-  # les deux points à confirmer au premier build.
-  #
-  # Base DISTINCTE de `netxms-db` ci-dessus, à dessein : `netxms-db` ne reçoit
-  # que le dump de production (jamais de netxmsd par-dessus, voir plus haut) ;
-  # celle-ci est vierge, et un netxmsd peut y tourner sans risque puisqu'il
-  # n'hérite d'aucun canal de notification ni d'aucune communauté SNMP réels.
-  #
-  #     docker compose --profile netxms up -d
-  #
-  # active alors NetXMS exactement comme les trois autres outils : interface
-  # (port 127.0.0.1:8087 → API Legacy Web sur /netxms-websvc) et connecteur
-  # NETXMS_API_URL=http://netxms-server:8080/netxms-websvc côté collecteur.
-  netxms-server-db:
-    profiles: ["netxms"]
-    image: postgis/postgis:16-3.5-alpine
-    environment:
-      - POSTGRES_USER=${NETXMS_SERVER_DB_USER:-netxms}
-      - POSTGRES_PASSWORD=${NETXMS_SERVER_DB_PASSWORD:-netxms}
-      - POSTGRES_DB=${NETXMS_SERVER_DB_NAME:-netxms}
-      - TZ=${TZ:-Africa/Ouagadougou}
-    volumes:
-      - netxms_server_pgdata:/var/lib/postgresql/data
-    restart: unless-stopped
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "pg_isready -U ${NETXMS_SERVER_DB_USER:-netxms} -d ${NETXMS_SERVER_DB_NAME:-netxms}",
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
-  netxms-server:
-    profiles: ["netxms"]
-    build: ./tools/netxms
-    image: noc-tools/netxms:5.0.8
-    environment:
-      - NETXMS_SERVER_DB_HOST=netxms-server-db
-      - NETXMS_SERVER_DB_NAME=${NETXMS_SERVER_DB_NAME:-netxms}
-      - NETXMS_SERVER_DB_USER=${NETXMS_SERVER_DB_USER:-netxms}
-      - NETXMS_SERVER_DB_PASSWORD=${NETXMS_SERVER_DB_PASSWORD:-netxms}
-      - NETXMS_SERVER_NAME=${NETXMS_SERVER_NAME:-NOC Laboratoire}
-      - TZ=${TZ:-Africa/Ouagadougou}
-    ports:
-      - "127.0.0.1:8087:8080"
-    volumes:
-      # /etc/netxmsd.conf est régénéré à chaque démarrage (voir entrypoint) ;
-      # ce qui doit survivre à une reconstruction d'image est l'état de la
-      # base — déjà couvert par netxms_server_pgdata — et rien côté
-      # application, contrairement à Centreon ou iTop.
-      - netxms_server_var:/var/lib/netxms
-    depends_on:
-      netxms-server-db:
-        condition: service_healthy
-
   # ─────────────────────────── Mailpit : courriel de laboratoire ───────────────────────────
   # Faux serveur SMTP : il accepte tout et ne remet rien à personne. Les
   # courriels d'alerte se lisent sur http://localhost:8025. Il valide le
@@ -690,5 +798,12 @@ volumes:
   centreon_varlib:
   centreon_broker_varlib:
   netxms_pgdata:
-  netxms_server_pgdata:
-  netxms_server_var:
+  nagios_var:
+
+networks:
+  gateway:
+  api_proxy:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${API_PROXY_SUBNET:-172.31.250.0/29}

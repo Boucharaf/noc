@@ -66,12 +66,10 @@ CREATE TABLE IF NOT EXISTS noc_user (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Colonnes présentes dans le bootstrap courant. CREATE TABLE IF NOT EXISTS
--- ne modifie pas une table existante : les ALTER idempotents conservent la
--- compatibilité avec les volumes créés avant ces colonnes. Le schéma complet
--- est le bootstrap initial; les évolutions ultérieures sont versionnées avec
--- Alembic (backend/migrations) et appliquées avant le démarrage de l'API.
--- Pour une réparation/bootstrap manuel d'une base existante :
+-- Colonnes apparues après la première mise en service. CREATE TABLE IF NOT
+-- EXISTS ne modifie pas une table existante : sans ces ALTER, une base créée
+-- avant leur ajout resterait sans elles. Ce fichier se rejoue donc sans
+-- danger sur une base en service, et c'est ainsi qu'on la met à jour :
 --   docker compose exec -T postgres psql -U noc -d noc < backend/sql/schema.sql
 ALTER TABLE noc_user ADD COLUMN IF NOT EXISTS email TEXT;
 ALTER TABLE noc_user ADD COLUMN IF NOT EXISTS notify_email BOOLEAN NOT NULL DEFAULT FALSE;
@@ -153,8 +151,6 @@ CREATE TABLE IF NOT EXISTS ops_manual_incident (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-ALTER TABLE ops_manual_incident ADD COLUMN IF NOT EXISTS cause TEXT;
-
 CREATE INDEX IF NOT EXISTS idx_ops_manual_open
     ON ops_manual_incident(detected_at DESC) WHERE resolved_at IS NULL;
 
@@ -191,7 +187,6 @@ ON CONFLICT (severity) DO NOTHING;
 CREATE TABLE IF NOT EXISTS ops_maintenance_window (
     id              SERIAL PRIMARY KEY,
     node_key        TEXT,
-    node_keys       JSONB,
     site            TEXT,
     reason          TEXT NOT NULL,
     starts_at       TIMESTAMPTZ NOT NULL,
@@ -199,14 +194,13 @@ CREATE TABLE IF NOT EXISTS ops_maintenance_window (
     suppress_alerts BOOLEAN NOT NULL DEFAULT TRUE,
     created_by      INTEGER REFERENCES noc_user(id) ON DELETE SET NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    -- Une fenêtre doit couvrir un équipement ou un site; node_keys permet
-    -- une sélection multiple limitée au site choisi.
+    -- Une fenêtre doit couvrir un équipement OU un site, jamais ni l'un ni
+    -- l'autre : sans cette contrainte, une fenêtre vide s'appliquerait à
+    -- tout le parc et éteindrait la supervision entière.
     CONSTRAINT ops_maintenance_scope
         CHECK (node_key IS NOT NULL OR site IS NOT NULL),
     CONSTRAINT ops_maintenance_period CHECK (ends_at > starts_at)
 );
-
-ALTER TABLE ops_maintenance_window ADD COLUMN IF NOT EXISTS node_keys JSONB;
 
 CREATE INDEX IF NOT EXISTS idx_ops_maintenance_active
     ON ops_maintenance_window(starts_at, ends_at);
@@ -315,16 +309,18 @@ CREATE TABLE IF NOT EXISTS kpi_daily (
     avg_degraded            DOUBLE PRECISION,
     avg_alerts              DOUBLE PRECISION,
     avg_critical            DOUBLE PRECISION,
-    fleet_availability_pct  DOUBLE PRECISION,
-    PRIMARY KEY (day, site)
+    fleet_availability_pct  DOUBLE PRECISION
 );
 
--- PostgreSQL considère deux NULL comme distincts dans une clé primaire,
--- ce qui autoriserait plusieurs lignes « tous sites » pour un même jour et
--- ferait échouer le ON CONFLICT du collecteur. Cet index unique partiel
--- rétablit la contrainte pour la ligne de total.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_kpi_daily_total
-    ON kpi_daily(day) WHERE site IS NULL;
+-- La ligne de total porte site=NULL : une PK sur (day, site) interdirait
+-- cette valeur. L'index d'expression garantit une seule ligne par jour/site,
+-- en traitant NULL comme la valeur vide pour l'unicité.
+ALTER TABLE kpi_daily DROP CONSTRAINT IF EXISTS kpi_daily_pkey;
+ALTER TABLE kpi_daily ALTER COLUMN site DROP NOT NULL;
+DROP INDEX IF EXISTS idx_kpi_daily_total;
+UPDATE kpi_daily SET site = NULL WHERE site = '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kpi_daily_day_site
+    ON kpi_daily(day, (COALESCE(site, '')));
 
 CREATE INDEX IF NOT EXISTS idx_kpi_daily_site
     ON kpi_daily(site, day DESC);

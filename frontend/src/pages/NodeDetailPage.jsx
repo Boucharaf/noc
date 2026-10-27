@@ -1,8 +1,10 @@
 import { useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft, PlusCircle } from "lucide-react";
 
-import IncidentDrawer from "../components/domain/IncidentDrawer";
+import AlertDrawer from "../components/domain/AlertDrawer";
+import LocationLink from "../components/domain/LocationLink";
+import NodeStateStrip from "../components/domain/NodeStateStrip";
 import ManualIncidentModal from "../components/domain/ManualIncidentModal";
 import Panel from "../components/ui/Panel";
 import Stat, { DefRow, Meter } from "../components/ui/Stat";
@@ -10,7 +12,6 @@ import { LineChart } from "../components/charts";
 import {
   NodeStateBadge,
   SeverityBadge,
-  StatusBadge,
   ToolTag,
 } from "../components/ui/Badge";
 import { PageHeader } from "../components/layout/TopBar";
@@ -66,6 +67,9 @@ const WINDOWS = [
   { value: 720, label: "30 j" },
 ];
 
+// Échelle des jauges pour les mesures sans borne naturelle.
+const GAUGE_MAX = { latency_ms: 400, packet_loss_pct: 10, temp_cpu: 100, if_errors: 10 };
+
 export default function NodeDetailPage() {
   const { nodeId } = useParams();
   const navigate = useNavigate();
@@ -79,26 +83,17 @@ export default function NodeDetailPage() {
 
   const nodeQuery = useNode(id);
   const latest = useNodeLatest(id);
-  const incidents = useNodeIncidents(id);
+  const incidents = useNodeIncidents(id, 30);
 
   const node = nodeQuery.data;
-  // availableMetrics : métriques ayant une valeur mesurée récente.
-  // - latest.data === undefined → pas encore chargé → [] (pas d'onglets)
-  // - latest.data === {} → outil source injoignable → on affiche METRIC_TYPES
-  //   entiers avec "—" : l'exploitant voit les onglets attendus et sait que
-  //   la source est temporairement indisponible, sans croire à l'absence de
-  //   supervision.
-  // - latest.data = { latency_ms: {...}, ... } → ceux avec une valeur réelle
-  const sourceDown = latest.data != null && Object.keys(latest.data).length === 0;
-  const availableMetrics =
-    latest.data == null
-      ? []
-      : sourceDown
-        ? METRIC_TYPES
-        : METRIC_TYPES.filter((type) => latest.data[type]?.value != null);
-  const activeMetric = availableMetrics.includes(metric)
-    ? metric
-    : availableMetrics[0] ?? METRIC_TYPES[0] ?? null;
+  // Seules les mesures que l'outil source publie pour CET équipement ont une
+  // tuile et un bouton de télémétrie ; les autres sont nommées sur une ligne.
+  const collected = latest.data
+    ? METRIC_TYPES.filter((type) => latest.data[type]?.value != null)
+    : METRIC_TYPES;
+  const missing = latest.data ? METRIC_TYPES.filter((type) => !collected.includes(type)) : [];
+  const availableMetrics = collected.length ? collected : METRIC_TYPES;
+  const activeMetric = metric ?? availableMetrics[0] ?? null;
   const series = useNodeSeries(id, {
     metric: activeMetric,
     period: periodFromHours(hours),
@@ -114,7 +109,7 @@ export default function NodeDetailPage() {
         title={node?.name ?? "Équipement"}
         subtitle={
           node
-            ? [node.locality, node.region, node.ministry || node.organisation]
+            ? [node.locality, node.region, node.ministry]
                 .filter(Boolean)
                 .join(" · ") || "Aucun rattachement géographique connu"
             : undefined
@@ -159,53 +154,50 @@ export default function NodeDetailPage() {
         {(data) => (
           <>
             {/* --- Dernières mesures --- */}
-            {availableMetrics.length ? (
-              <>
-                {sourceDown && (
-                  <p className="text-[11.5px] px-1 mb-1" style={{ color: "var(--sev-medium)" }}>
-                    ⚠ Source de métriques temporairement injoignable
-                    {data.source_tools?.length
-                      ? ` (${data.source_tools.map(toolLabel).join(", ")})`
-                      : ""}
-                    . Les valeurs affichées ci-dessous sont indicatives — elles seront
-                    mises à jour dès que la connexion sera rétablie.
-                  </p>
-                )}
-                <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
-                  {availableMetrics.map((type) => {
-                    const info = metricMeta(type);
-                    const point = latest.data?.[type];
-                    const value = point?.value ?? null;
-                    return (
-                      <Stat
-                        key={type}
-                        compact
-                        label={info.label}
-                        value={
-                          value === null
-                            ? "—"
-                            : type.startsWith("bandwidth")
-                              ? bandwidth(value)
-                              : `${decimal(value, info.digits)}${info.unit === "%" ? " %" : info.unit ? ` ${info.unit}` : ""}`
-                        }
-                        color={
-                          value === null
-                            ? "var(--ink-3)"
-                            : (thresholdColor(type, value) ?? undefined)
-                        }
-                        hint={point ? ageFrom(point.time) : "non collectée"}
-                      />
-                    );
-                  })}
-                </div>
-              </>
-            ) : (
-              <p className="text-[12px] px-1" style={{ color: "var(--ink-3)" }}>
-                {latest.isLoading
-                  ? "Chargement des dernières mesures…"
-                  : `Aucune mesure récente reçue${data.source_tools?.length ? ` de ${data.source_tools.map(toolLabel).join(", ")}` : " des sources connectées"}.`}
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
+              {collected.map((type) => {
+                const info = metricMeta(type);
+                const point = latest.data?.[type];
+                const value = point?.value ?? null;
+                return (
+                  <Stat
+                    key={type}
+                    compact
+                    label={info.label}
+                    value={
+                      value === null
+                        ? "—"
+                        : type.startsWith("bandwidth")
+                          ? bandwidth(value)
+                          : `${decimal(value, info.digits)}${info.unit === "%" ? " %" : info.unit ? ` ${info.unit}` : ""}`
+                    }
+                    color={
+                      value === null
+                        ? "var(--ink-3)"
+                        : (thresholdColor(type, value) ?? undefined)
+                    }
+                    hint={point ? ageFrom(point.time) : "non collectée"}
+                    gauge={
+                      value !== null && info.target != null && info.higherIsBetter !== null
+                        ? {
+                            value,
+                            target: info.target,
+                            max: GAUGE_MAX[type] ?? (info.unit === "%" ? 100 : Math.max(info.target * 2, value)),
+                          }
+                        : undefined
+                    }
+                  />
+                );
+              })}
+            </div>
+            {missing.length > 0 && (
+              <p className="text-[11px] -mt-1 px-0.5" style={{ color: "var(--ink-3)" }}>
+                Non publiées par {data.source_tools?.map(toolLabel).join(", ") || "l'outil"} pour cet équipement :{" "}
+                {missing.map((type) => metricMeta(type).label.toLowerCase()).join(", ")}.
               </p>
             )}
+
+            <NodeStateStrip nodeId={id} />
 
             <div className="grid grid-cols-12 gap-2.5">
               {/* --- Séries temporelles --- */}
@@ -261,7 +253,8 @@ export default function NodeDetailPage() {
                           <LineChart
                             height={230}
                             labels={points.map((point) =>
-                              smartTime(point.time),
+                              // L'API date les points par `at`.
+                              smartTime(point.at ?? point.time),
                             )}
                             yMax={meta.unit === "%" ? 100 : undefined}
                             targetLine={meta.target}
@@ -330,13 +323,6 @@ export default function NodeDetailPage() {
                   <DefRow label="Type">
                     {data.node_type || "non renseigné"}
                   </DefRow>
-                  {data.criticality && (
-                    <DefRow label="Criticité">{data.criticality}</DefRow>
-                  )}
-                  {data.business_service && (
-                    <DefRow label="Service métier">{data.business_service}</DefRow>
-                  )}
-                  {data.owner && <DefRow label="Responsable">{data.owner}</DefRow>}
                   <DefRow label="État">
                     <span style={{ color: stateMeta?.color }}>
                       {stateMeta?.label ?? "inconnu"}
@@ -345,25 +331,19 @@ export default function NodeDetailPage() {
                       className="block text-[10.5px]"
                       style={{ color: "var(--ink-3)" }}
                     >
-                      {stateMeta?.hint ?? "État non fourni par l'instantané."}
+                      {stateMeta?.hint ?? ""}
                     </span>
                   </DefRow>
-                  <DefRow label="Site">
-                    {data.locality_id ? (
-                      <Link
-                        to={`/equipements?locality_id=${data.locality_id}`}
-                        style={{ color: "var(--accent-ink)" }}
-                      >
-                        {data.locality}
-                      </Link>
-                    ) : (
-                      "non rattaché"
-                    )}
+                  <DefRow label="Lieu">
+                    <LocationLink
+                      site={data.site}
+                      province={data.province}
+                      region={data.region}
+                      position={data.position}
+                      name={data.name}
+                    />
                   </DefRow>
-                  <DefRow label="Région">{data.region || "—"}</DefRow>
-                  <DefRow label="Ministère / organisation">
-                    {data.ministry || data.organisation || "—"}
-                  </DefRow>
+                  <DefRow label="Ministère">{data.ministry || "—"}</DefRow>
                   <DefRow label="Dernière mesure" mono>
                     {data.last_metric_at
                       ? dateTime(data.last_metric_at)
@@ -377,68 +357,6 @@ export default function NodeDetailPage() {
                     </DefRow>
                   )}
                 </Panel>
-
-                {(data.interfaces?.length || data.depends_on?.length || data.impacted_by?.length) > 0 && (
-                  <Panel title="Réseau et dépendances">
-                    {data.interfaces?.length > 0 && (
-                      <div className="overflow-x-auto">
-                        <table className="tbl">
-                          <thead>
-                            <tr>
-                              <th>Interface</th>
-                              <th>Adresse</th>
-                              <th>État</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {data.interfaces.map((item) => (
-                              <tr key={`${item.tool}:${item.ref}`}>
-                                <td title={item.description || undefined}>{item.name}</td>
-                                <td className="num">{item.ip || "—"}</td>
-                                <td><NodeStateBadge state={item.state} /></td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-                    {data.depends_on?.length > 0 && (
-                      <DefRow label="Dépend de">
-                        {data.depends_on.map((id) => (
-                          <Link key={id} to={`/equipements/${encodeURIComponent(id)}`} className="mr-2">
-                            {id}
-                          </Link>
-                        ))}
-                      </DefRow>
-                    )}
-                    {data.impacted_by?.length > 0 && (
-                      <DefRow label="Impacte">
-                        {data.impacted_by.map((id) => (
-                          <Link key={id} to={`/equipements/${encodeURIComponent(id)}`} className="mr-2">
-                            {id}
-                          </Link>
-                        ))}
-                      </DefRow>
-                    )}
-                  </Panel>
-                )}
-
-                {(data.source_status || data.last_check_at || data.next_check_at || data.last_output) && (
-                  <Panel title="Dernier contrôle source">
-                    {data.source_status && <DefRow label="Statut">{data.source_status}</DefRow>}
-                    {data.last_check_at && (
-                      <DefRow label="Dernier contrôle" mono>{dateTime(data.last_check_at)}</DefRow>
-                    )}
-                    {data.next_check_at && (
-                      <DefRow label="Prochain contrôle" mono>{dateTime(data.next_check_at)}</DefRow>
-                    )}
-                    {data.last_output && (
-                      <p className="text-[11.5px] mt-1" style={{ color: "var(--ink-2)" }}>
-                        {data.last_output}
-                      </p>
-                    )}
-                  </Panel>
-                )}
 
                 <Panel title="Supervision" subtitle="identifiants par outil">
                   {data.source_refs?.length ? (
@@ -474,24 +392,52 @@ export default function NodeDetailPage() {
                   )}
                 </Panel>
 
+                {(data.maintenances?.length > 0 || data.work_orders?.length > 0) && (
+                  <Panel title="Maintenances et interventions" subtitle="iTop et Zabbix">
+                    <ul className="space-y-1.5 text-[12px]">
+                      {(data.maintenances ?? []).map((window) => (
+                        <li key={window.key}>
+                          <span className="font-medium">
+                            {window.kind === "change" ? `Changement ${window.ref ?? ""}` : "Maintenance Zabbix"}
+                          </span>{" "}
+                          — {window.title}
+                          <span className="block text-[11px] num" style={{ color: "var(--ink-3)" }}>
+                            {dateTime(window.start)} → {window.end ? dateTime(window.end) : "non bornée"}
+                          </span>
+                        </li>
+                      ))}
+                      {(data.work_orders ?? []).map((order) => (
+                        <li key={order.key}>
+                          <span className="font-medium">Ordre de travail</span> — {order.title}
+                          <span className="block text-[11px]" style={{ color: "var(--ink-3)" }}>
+                            {order.status === "closed" ? "clôturé" : "ouvert"}
+                            {order.ticket?.ref ? ` · ${order.ticket.ref}` : ""}
+                            {order.agent || order.team ? ` · ${[order.team, order.agent].filter(Boolean).join(" · ")}` : ""}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </Panel>
+                )}
+
                 <Panel title="Historique">
                   <div className="grid grid-cols-2 gap-2">
                     <Stat
                       compact
                       label="Incidents 30 j"
-                      value={data.incidents_30d == null ? "—" : num(data.incidents_30d, "0")}
+                      value={num(data.incidents_30d, "0")}
                     />
                     <Stat
                       compact
                       label="Incidents 90 j"
-                      value={data.incidents_90d == null ? "—" : num(data.incidents_90d, "0")}
+                      value={num(data.incidents_90d, "0")}
                     />
                     <Stat
                       compact
                       label="MTTR moyen 90 j"
-                      value={data.avg_mttr_minutes == null ? "—" : duration(data.avg_mttr_minutes)}
+                      value={duration(data.avg_mttr_minutes)}
                       color={
-                        data.avg_mttr_minutes != null && data.avg_mttr_minutes > 240
+                        data.avg_mttr_minutes > 240
                           ? "var(--sev-high)"
                           : "var(--state-up)"
                       }
@@ -499,12 +445,9 @@ export default function NodeDetailPage() {
                     <Stat
                       compact
                       label="Indispo. 30 j"
-                      value={data.downtime_30d_minutes == null ? "—" : duration(data.downtime_30d_minutes)}
+                      value={duration(data.downtime_30d_minutes)}
                     />
                   </div>
-                  <p className="text-[10.5px] mt-2" style={{ color: "var(--ink-3)" }}>
-                    Historique détaillé non fourni par les sources actuellement connectées.
-                  </p>
                   {data.availability_pct !== null &&
                     data.availability_pct !== undefined && (
                       <div className="mt-2">
@@ -531,26 +474,24 @@ export default function NodeDetailPage() {
 
             {/* --- Incidents de cet équipement --- */}
             <Panel
-              title="Alertes actives de cet équipement"
-              subtitle="Alertes actives"
+              title="Alertes des outils sur cet équipement"
+              subtitle="en cours"
               flush
-              to={`/incidents?q=${encodeURIComponent(data.name)}`}
-              toLabel="Tout l'historique"
+              to={`/alertes?q=${encodeURIComponent(data.name)}`}
+              toLabel="Toutes les alertes"
             >
               <QueryBoundary
                 query={incidents}
                 compact
                 emptyMessage="Aucun incident enregistré"
-                emptyHint="Aucune alerte active pour cet équipement dans l'instantané actuel."
+                emptyHint="Cet équipement n'a jamais déclenché d'alerte dans les outils de supervision."
               >
                 {(items) => (
                   <table className="tbl">
                     <thead>
                       <tr>
                         <th style={{ width: 82 }}>Gravité</th>
-                        <th style={{ width: 92 }}>Statut</th>
                         <th style={{ width: 110 }}>Détecté</th>
-                        <th style={{ width: 150 }}>Cause</th>
                         <th>Description</th>
                         <th style={{ width: 84 }}>Source</th>
                       </tr>
@@ -563,18 +504,10 @@ export default function NodeDetailPage() {
                           onClick={() => setSelectedIncident(incident.id)}
                         >
                           <td>
-                            <SeverityBadge severity={incident.severity} />
-                          </td>
-                          <td>
-                            <StatusBadge status={incident.status} />
+                            <SeverityBadge severity={incident.severity} source={incident.source_severity} tool={incident.tool} />
                           </td>
                           <td className="num" style={{ color: "var(--ink-3)" }}>
                             {smartTime(incident.detected_at)}
-                          </td>
-                          <td style={{ color: "var(--ink-2)" }}>
-                            {incident.cause_label ||
-                              incident.cause_category ||
-                              "—"}
                           </td>
                           <td
                             className="truncate-cell"
@@ -596,8 +529,8 @@ export default function NodeDetailPage() {
         )}
       </QueryBoundary>
 
-      <IncidentDrawer
-        incidentId={selectedIncident}
+      <AlertDrawer
+        alertKey={selectedIncident}
         open={Boolean(selectedIncident)}
         onClose={() => setSelectedIncident(null)}
       />

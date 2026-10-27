@@ -37,11 +37,12 @@ import {
 const DirectionView = lazy(() => import("./pages/DirectionView"));
 const SupervisionView = lazy(() => import("./pages/SupervisionView"));
 const ConsoleView = lazy(() => import("./pages/ConsoleView"));
-const TerrainView = lazy(() => import("./pages/TerrainView"));
+const InterventionsPage = lazy(() => import("./pages/InterventionsPage"));
 const IncidentsPage = lazy(() => import("./pages/IncidentsPage"));
+const AlertsPage = lazy(() => import("./pages/AlertsPage"));
+const TerritoryPage = lazy(() => import("./pages/TerritoryPage"));
 const NodesPage = lazy(() => import("./pages/NodesPage"));
 const NodeDetailPage = lazy(() => import("./pages/NodeDetailPage"));
-const MapPage = lazy(() => import("./pages/MapPage"));
 const PerformancePage = lazy(() => import("./pages/PerformancePage"));
 const SlaPage = lazy(() => import("./pages/SlaPage"));
 const IntegrationsPage = lazy(() => import("./pages/IntegrationsPage"));
@@ -150,13 +151,16 @@ export default function App() {
               }
             />
             <Route
-              path="/terrain"
+              path="/interventions"
               element={
-                <Guard permission={PERMISSIONS.VIEW_TERRAIN}>
-                  <TerrainView />
+                <Guard permission={PERMISSIONS.VIEW_INTERVENTIONS}>
+                  <InterventionsPage />
                 </Guard>
               }
             />
+            {/* Ancienne application Terrain : les interventions sont désormais
+                les ordres de travail iTop. Les liens enregistrés suivent. */}
+            <Route path="/terrain" element={<Navigate to="/interventions" replace />} />
 
             {/* --- Écrans transverses --- */}
             <Route
@@ -164,6 +168,22 @@ export default function App() {
               element={
                 <Guard permission={PERMISSIONS.VIEW_INCIDENTS}>
                   <IncidentsPage />
+                </Guard>
+              }
+            />
+            <Route
+              path="/alertes"
+              element={
+                <Guard permission={PERMISSIONS.VIEW_ALERTS}>
+                  <AlertsPage />
+                </Guard>
+              }
+            />
+            <Route
+              path="/territoire"
+              element={
+                <Guard permission={PERMISSIONS.VIEW_MAP}>
+                  <TerritoryPage />
                 </Guard>
               }
             />
@@ -183,14 +203,8 @@ export default function App() {
                 </Guard>
               }
             />
-            <Route
-              path="/carte"
-              element={
-                <Guard permission={PERMISSIONS.VIEW_MAP}>
-                  <MapPage />
-                </Guard>
-              }
-            />
+            {/* Ancienne « Carte des sites » : remplacée par Territoire. */}
+            <Route path="/carte" element={<Navigate to="/territoire" replace />} />
             <Route
               path="/performance"
               element={
@@ -218,7 +232,7 @@ export default function App() {
             <Route
               path="/maintenances"
               element={
-                <Guard permission={PERMISSIONS.MANAGE_MAINTENANCE}>
+                <Guard permission={PERMISSIONS.VIEW_MAINTENANCE}>
                   <MaintenancePage />
                 </Guard>
               }

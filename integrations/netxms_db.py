@@ -31,71 +31,94 @@ import ipaddress
 import logging
 
 from .base import SourceClient, ToolUnavailable
-from .models import Alert, NetworkInterface, Node, ToolHealth
+from .models import Alert, Node, ToolHealth
 from .netxms import _OBJECT_STATE
-from .normalize import epoch_to_dt, severity
+from .normalize import display_locality, epoch_to_dt, severity, source_severity
 
 logger = logging.getLogger(__name__)
 
 # Le référentiel de sites de l'agence : la colonne `siteadmin_id` ajoutée à
 # object_properties, qui pointe vers donnebase.siteadministratif. Ce n'est PAS
 # du NetXMS standard — d'où la détection : sur une base qui ne l'a pas, ou si
-# le compte de lecture n'y a pas droit (information_schema ne montre que les
-# colonnes accessibles), le site retombe sur la ville de l'objet.
+# le compte de lecture n'a pas accès aux colonnes requises, le site retombe
+# sur la ville de l'objet. `information_schema.columns` ne montre que les
+# colonnes accessibles. Le compte noc_reader reçoit des droits SELECT par
+# colonne, pas au niveau de la table.
 _SITE_REFERENTIAL_PROBE = """
-SELECT count(*) = 2
+SELECT count(*) = 5
 FROM information_schema.columns
 WHERE (
         (table_schema = 'public' AND table_name = 'object_properties'
          AND column_name = 'siteadmin_id')
         OR (table_schema = 'donnebase' AND table_name = 'siteadministratif'
-                AND column_name = 'nomsiteadministratif')
+                AND column_name IN (
+                    'id_siteadministratif',
+                    'nomsiteadministratif',
+                    'latitude',
+                    'longitude'
+                ))
     )
-    AND has_table_privilege(current_user, 'donnebase.siteadministratif', 'SELECT')
+"""
+
+# Découpage administratif du référentiel de l'agence : site -> ville ->
+# commune -> province -> région. Chaînage par clés et non par géométrie :
+# il couvre tous les sites rattachés à un équipement (774 sur 774 dans le
+# dump du 7 août 2026) sans dépendre de PostGIS côté lecteur. La région
+# retenue est celle du NOUVEAU découpage (colonne « Nouveau », 17 régions),
+# celle que porte le fond de carte region.geojson.
+_GEOGRAPHY_PROBE = """
+SELECT count(*) = 12
+FROM information_schema.columns
+WHERE table_schema = 'donnebase' AND (
+        (table_name = 'siteadministratif' AND column_name = 'id_ville')
+     OR (table_name = 'ville' AND column_name IN ('id_ville', 'id_commune', 'nomville'))
+     OR (table_name = 'limitecommune' AND column_name IN ('id_lcommune', 'id_lprovince'))
+     OR (table_name = 'limiteprovince'
+         AND column_name IN ('id_lprovince', 'id_lregion', 'nomprovince'))
+     OR (table_name = 'limiteregion' AND column_name IN ('id_lregion', 'nomregion', 'Nouveau'))
+)
+"""
+
+_GEOGRAPHY_JOIN = """
+LEFT JOIN donnebase.ville gv ON gv.id_ville = s.id_ville
+LEFT JOIN donnebase.limitecommune gc ON gc.id_lcommune = gv.id_commune
+LEFT JOIN donnebase.limiteprovince gp ON gp.id_lprovince = gc.id_lprovince
+LEFT JOIN donnebase.limiteregion gr ON gr.id_lregion = gp.id_lregion
+-- Repli pour les nœuds SANS site administratif : la ville saisie dans
+-- NetXMS, quand elle ne désigne qu'une seule province (homonymes écartés).
+LEFT JOIN LATERAL (
+    SELECT min(cp.nomprovince) AS nomprovince,
+           min(COALESCE(NULLIF(cr."Nouveau", ''), cr.nomregion)) AS region
+    FROM donnebase.ville cv
+    JOIN donnebase.limitecommune cc ON cc.id_lcommune = cv.id_commune
+    JOIN donnebase.limiteprovince cp ON cp.id_lprovince = cc.id_lprovince
+    JOIN donnebase.limiteregion cr ON cr.id_lregion = cp.id_lregion
+    WHERE p.siteadmin_id IS NULL AND upper(cv.nomville) = upper(trim(p.city))
+    HAVING count(DISTINCT cp.id_lprovince) = 1
+) cg ON true
 """
 
 _NODES_SQL = """
-WITH active_nodes AS (
-    SELECT n.id, n.primary_name, n.primary_ip,
-           p.name, p.status, p.city, p.siteadmin_id
-    FROM nodes n
-    JOIN object_properties p ON p.object_id = n.id
-    WHERE p.is_deleted = 0
-),
-container_groups AS (
-    SELECT cm.object_id, array_agg(cp.name ORDER BY cp.name) AS containers
-    FROM container_members cm
-    JOIN active_nodes n ON n.id = cm.object_id
-    JOIN object_properties cp ON cp.object_id = cm.container_id
-                            AND cp.is_deleted = 0
-    GROUP BY cm.object_id
-),
-node_interfaces AS (
-    SELECT i.node_id,
-           json_agg(json_build_object(
-               'id', i.id, 'name', ip.name, 'status', ip.status
-           ) ORDER BY ip.name) AS interfaces
-    FROM interfaces i
-    JOIN active_nodes n ON n.id = i.node_id
-    JOIN object_properties ip ON ip.object_id = i.id
-                             AND ip.is_deleted = 0
-    GROUP BY i.node_id
-)
 SELECT n.id,
-       n.name,
+       p.name,
        n.primary_name,
        n.primary_ip,
-       n.status,
-       n.city,
+       p.status,
+       p.city,
        {site_column} AS site,
     {latitude_column} AS latitude,
     {longitude_column} AS longitude,
-       cg.containers,
-       COALESCE(ni.interfaces, '[]'::json) AS interfaces
-FROM active_nodes n
-LEFT JOIN container_groups cg ON cg.object_id = n.id
-LEFT JOIN node_interfaces ni ON ni.node_id = n.id
+       {province_column} AS province,
+       {region_column} AS region,
+       (SELECT array_agg(cp.name ORDER BY cp.name)
+          FROM container_members cm
+          JOIN object_properties cp ON cp.object_id = cm.container_id
+         WHERE cm.object_id = n.id AND cp.is_deleted = 0) AS containers
+FROM nodes n
+JOIN object_properties p ON p.object_id = n.id
 {site_join}
+{geography_join}
+WHERE p.is_deleted = 0
 """
 
 # Une alarme d'interface (« GigabitEthernet2 down ») a pour source l'objet
@@ -156,6 +179,7 @@ class NetXMSDatabaseClient(SourceClient):
         # connexion PostgreSQL se règle dans l'URL (?sslmode=verify-full).
         super().__init__(dsn, user, password, verify_ssl, timeout_s)
         self._site_referential: bool | None = None
+        self._geography: bool | None = None
 
     async def _query(self, sql: str) -> list[tuple]:
         """Une requête, sur une connexion ouverte pour elle.
@@ -229,30 +253,57 @@ class NetXMSDatabaseClient(SourceClient):
             )
         return self._site_referential
 
+    async def _uses_geography(self) -> bool:
+        if self._geography is None:
+            rows = await self._query(_GEOGRAPHY_PROBE)
+            self._geography = bool(rows and rows[0][0])
+            logger.info(
+                "netxms : découpage province/région %s",
+                "utilisé" if self._geography else (
+                    "absent (droits SELECT manquants pour noc_reader ? "
+                    "voir database/netxms_readonly_role.sql)"
+                ),
+            )
+        return self._geography
+
     async def fetch_nodes(self) -> list[Node]:
+        geography = False
         if await self._uses_site_referential():
+            geography = await self._uses_geography()
             sql = _NODES_SQL.format(
                 site_column="s.nomsiteadministratif",
                 latitude_column="s.latitude",
                 longitude_column="s.longitude",
+                province_column=(
+                    "COALESCE(gp.nomprovince, cg.nomprovince)" if geography else "NULL"
+                ),
+                region_column=(
+                    'COALESCE(NULLIF(gr."Nouveau", \'\'), gr.nomregion, cg.region)'
+                    if geography
+                    else "NULL"
+                ),
                 site_join=(
                     "LEFT JOIN donnebase.siteadministratif s "
-                    "ON s.id_siteadministratif = n.siteadmin_id"
+                    "ON s.id_siteadministratif = p.siteadmin_id"
                 ),
+                geography_join=_GEOGRAPHY_JOIN if geography else "",
             )
         else:
             sql = _NODES_SQL.format(
                 site_column="NULL",
                 latitude_column="NULL",
                 longitude_column="NULL",
+                province_column="NULL",
+                region_column="NULL",
                 site_join="",
+                geography_join="",
             )
 
         nodes: list[Node] = []
         rows = await self._query(sql)
         for (
-            node_id, name, primary_name, ip, status, city, site, latitude,
-            longitude, containers, raw_interfaces,
+            node_id, name, primary_name, ip, status, city, site,
+            latitude, longitude, province, region, containers,
         ) in rows:
             # Site : le référentiel de l'agence d'abord, sinon la ville saisie
             # dans NetXMS. Rien d'autre — un site deviné serait pire qu'absent.
@@ -263,13 +314,6 @@ class NetXMSDatabaseClient(SourceClient):
             # n'identifie pas un nom : le nom technique retombe alors sur le
             # nom de l'objet (OUAG-MDENP_ANPTIC-RT01).
             technical = primary_name if primary_name and not _is_ip(primary_name) else name
-            if isinstance(raw_interfaces, str):
-                try:
-                    import json
-
-                    raw_interfaces = json.loads(raw_interfaces)
-                except ValueError:
-                    raw_interfaces = []
             nodes.append(
                 Node(
                     tool=self.name,
@@ -284,18 +328,10 @@ class NetXMSDatabaseClient(SourceClient):
                     # des groupes et ne servent pas de site.
                     groups=tuple(containers or ()),
                     site=site or None,
+                    province=display_locality(province),
+                    region=display_locality(region),
                     latitude=float(latitude) if latitude is not None else None,
                     longitude=float(longitude) if longitude is not None else None,
-                    interfaces=tuple(
-                        NetworkInterface(
-                            tool=self.name,
-                            ref=str(interface["id"]),
-                            name=interface.get("name") or f"Interface {interface['id']}",
-                            state=_OBJECT_STATE.get(interface.get("status"), "unknown"),
-                        )
-                        for interface in (raw_interfaces or [])
-                        if interface.get("id") is not None
-                    ),
                 )
             )
         return nodes
@@ -307,13 +343,17 @@ class NetXMSDatabaseClient(SourceClient):
         ):
             since = epoch_to_dt(created)
             if since is None:
-                continue
+                raise ToolUnavailable(
+                    self.name,
+                    f"alarme {alarm_id} sans date de création valide",
+                )
             acknowledged = state == 1
             alerts.append(
                 Alert(
                     tool=self.name,
                     ref=str(alarm_id),
                     severity=severity("netxms", current_severity),
+                    source_severity=source_severity("netxms", current_severity),
                     message=message or "(sans libellé)",
                     since=since,
                     node_ref=str(node_id) if node_id else None,

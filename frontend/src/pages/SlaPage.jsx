@@ -1,346 +1,316 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Pencil } from "lucide-react";
 
 import Panel from "../components/ui/Panel";
-import Stat, { Meter } from "../components/ui/Stat";
-import { Field, Notice } from "../components/ui/Controls";
+import Stat from "../components/ui/Stat";
+import SlaBreakdown from "../components/domain/SlaBreakdown";
+import { BarChart, LineChart } from "../components/charts";
+import { complianceColor } from "../lib/itop";
+import { Field, Notice, Segmented } from "../components/ui/Controls";
 import { Modal } from "../components/ui/Overlay";
-import { PageHeader, PeriodPicker } from "../components/layout/TopBar";
+import { PageHeader } from "../components/layout/TopBar";
 import { QueryBoundary } from "../components/ui/States";
 import { SeverityBadge } from "../components/ui/Badge";
-import { decimal, duration, monthLabel, num, pct } from "../lib/format";
+import { duration, num, pct } from "../lib/format";
+import { LEVEL } from "../lib/locality";
 import { severityMeta } from "../lib/vocabulary";
 import { errorMessage } from "../api/client";
 import { PERMISSIONS } from "../lib/permissions";
-import {
-  useSla,
-  useSlaSourceTargets,
-  useSlaTargets,
-  useUpdateSlaTarget,
-} from "../hooks/queries";
-import { usePeriodStore } from "../store/ui";
+import { useSlaIncidents, useSlaTargets, useUpdateSlaTarget } from "../hooks/queries";
+import { scopeLabel, useScopeStore } from "../store/scope";
 import { usePermission } from "../hooks/useSession";
 
 /**
- * Engagements de service.
+ * Engagements de service — mesurés sur les INCIDENTS iTop.
  *
- * Chaque indicateur est affiché avec sa CIBLE et son verdict, jamais
- * seul : c'est la présentation du document métier (« KPI | Cible/Seuil |
- * Réel | Statut »), qui est aussi la seule lisible en comité — un
- * pourcentage sans son objectif ne permet à personne de décider quoi que
- * ce soit.
+ * Délai de prise en charge (TTO) et de résolution (TTR) de chaque ticket,
+ * comparés aux objectifs par gravité (`ops_sla_target`, modifiables ici).
+ * Ventilation au choix par région, province, site ou équipement, sur le
+ * périmètre de la barre commune ; un clic sur une ligne y descend.
  *
- * Les objectifs sont modifiables en base (`ops_sla_target`) et non codés
- * en dur : ils sont contractuels et changent au rythme des conventions
- * de service, pas à celui des livraisons logicielles.
+ * Chaque taux est affiché avec le nombre d'incidents qui le fondent : un
+ * « 100 % » sur un seul ticket ne pèse pas comme sur deux cents.
  */
-export default function SlaPage() {
-  const { month, year, previousMonth, nextMonth, goToCurrent } = usePeriodStore();
-  const isCurrent = usePeriodStore((s) => s.isCurrentPeriod());
-  const canEdit = usePermission(PERMISSIONS.MANAGE_SLA_TARGETS);
+const GROUPS = ["region", "province", "site", "node"].map((value) => ({
+  value,
+  label: LEVEL[value].label,
+}));
 
-  const sla = useSla();
+const WINDOWS = [
+  { value: 7, label: "7 j" },
+  { value: 30, label: "30 j" },
+  { value: 90, label: "90 j" },
+  { value: 365, label: "12 mois" },
+];
+
+/** « sur 2 / 278 tickets · médiane 45 j » : une moyenne dit sur quoi elle porte. */
+function delayHint(count, median, total) {
+  if (count == null) return undefined;
+  if (!count) return "aucun ticket daté dans iTop";
+  return `sur ${num(count)}/${num(total)} ticket(s) · médiane ${duration(median)}`;
+}
+
+const dateShort = (iso) => (iso ? new Date(iso).toLocaleDateString("fr-FR") : "—");
+
+export default function SlaPage() {
+  const navigate = useNavigate();
+  const scope = useScopeStore();
+  const canEdit = usePermission(PERMISSIONS.MANAGE_SLA_TARGETS);
+  const [groupBy, setGroupBy] = useState(
+    scope.site ? "node" : scope.province ? "site" : scope.region ? "province" : "region",
+  );
+  const [days, setDays] = useState(30);
+
+  const sla = useSlaIncidents({ groupBy, days });
   const targets = useSlaTargets();
-  const sourceTargets = useSlaSourceTargets();
   const [editing, setEditing] = useState(null);
+  const totals = sla.data?.totals;
+
+  const drill = (row) => {
+    if (groupBy === "node") {
+      if (row.key !== "__none__") navigate(`/equipements/${encodeURIComponent(row.key)}`);
+      return;
+    }
+    if (row.name?.endsWith("non renseignée")) return;
+    if (groupBy === "region") {
+      scope.setPath({ region: row.name });
+      setGroupBy("province");
+    } else if (groupBy === "province") {
+      scope.setPath({ region: scope.region, province: row.name });
+      setGroupBy("site");
+    } else {
+      scope.setPath({ region: scope.region, province: scope.province, site: row.name });
+      setGroupBy("node");
+    }
+  };
+
+  const targetOf = (severity) =>
+    (targets.data ?? []).find((target) => target.severity === severity);
 
   return (
-    <div className="space-y-2.5">
+    <div className="space-y-2">
       <PageHeader
-        title="Engagements de service"
-        subtitle="Respect des délais de prise en compte et de résolution"
+        title="SLA des incidents"
+        subtitle={`Tickets iTop ouverts sur ${WINDOWS.find((w) => w.value === days)?.label ?? `${days} j`}${
+          sla.data ? ` (du ${dateShort(sla.data.start_at)} au ${dateShort(sla.data.end_at)})` : ""
+        } — ${scopeLabel(scope)}`}
         actions={
-          <PeriodPicker
-            month={month}
-            year={year}
-            label={monthLabel(month, year)}
-            onPrevious={previousMonth}
-            onNext={nextMonth}
-            onCurrent={goToCurrent}
-            isCurrent={isCurrent}
-          />
+          <span className="flex items-center gap-2">
+            {sla.isPlaceholderData && (
+              <span className="text-[11px]" style={{ color: "var(--ink-3)" }} role="status">
+                mise à jour…
+              </span>
+            )}
+            <Segmented ariaLabel="Période" options={WINDOWS} value={days} onChange={setDays} />
+          </span>
         }
       />
 
-      <QueryBoundary query={sla} empty={(d) => !d}>
-        {(data) => (
-          <>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              <Stat
-                label="Conformité TTR"
-                value={pct(data.global_compliance_pct, 1)}
-                color={
-                  data.global_compliance_pct >= 95
-                    ? "var(--state-up)"
-                    : data.global_compliance_pct >= 85
-                      ? "var(--sev-medium)"
-                      : "var(--sev-critical)"
-                }
-                target="≥ 95 %"
-              />
-              <Stat
-                label="Engagements non tenus"
-                value={num(data.total_breached, "0")}
-                color={data.total_breached ? "var(--sev-critical)" : "var(--state-up)"}
-              />
-              <Stat
-                label="Résolutions évaluées"
-                value={num(data.resolved_total, "0")}
-                hint="cible TTR connue; alertes non résolues exclues"
-              />
-              <Stat
-                label="Période"
-                value={monthLabel(month, year)}
-                compact
-                hint={isCurrent ? "mois en cours, non clos" : "mois clos"}
-              />
-            </div>
+      {sla.isError && (
+        <Notice tone="error">
+          {sla.error?.response?.data?.detail?.message ?? errorMessage(sla.error)}{" "}
+          {sla.error?.response?.data?.detail?.detail}
+        </Notice>
+      )}
 
-            <Panel
-              title="Engagements déclarés dans iTop"
-              subtitle="Référentiel source, distinct des objectifs de traitement configurés dans le NOC"
-              flush
-            >
-              <QueryBoundary
-                query={sourceTargets}
-                compact
-                emptyMessage="Aucun objectif de service fourni par iTop"
-                emptyHint="Vérifier que le module SLA est installé et que le compte de collecte peut lire les SLT."
-              >
-                {(rows) => (
-                  <table className="tbl">
-                    <thead>
-                      <tr>
-                        <th>Engagement</th>
-                        <th>Service / type de demande</th>
-                        <th>Mesure</th>
-                        <th style={{ textAlign: "right" }}>Objectif</th>
-                        <th>Priorité</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {rows.map((row) => (
-                        <tr key={`${row.tool}:${row.ref}`}>
-                          <td>{row.name || row.ref}</td>
-                          <td>{row.request_type || "—"}</td>
-                          <td>{row.metric || "—"}</td>
-                          <td className="num" style={{ textAlign: "right" }}>
-                            {[row.value, row.unit].filter(Boolean).join(" ") || "—"}
-                          </td>
-                          <td>{row.priority || "—"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </QueryBoundary>
-            </Panel>
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+        <Stat
+          label="Respect des SLA"
+          value={pct(totals?.compliance_pct, 1)}
+          color={complianceColor(totals?.compliance_pct)}
+          target="≥ 95 %"
+          hint={`sur ${num(totals?.evaluated)} incident(s) évalué(s)`}
+          gauge={{ value: totals?.compliance_pct, target: 95, max: 100 }}
+          help="Part des incidents résolus dans leur délai, parmi les incidents évalués : résolus avec un objectif, ou encore ouverts mais déjà hors délai."
+        />
+        <Stat
+          label="SLA dépassés"
+          value={num(totals?.breached)}
+          color={totals?.breached ? "var(--sev-critical)" : "var(--state-up)"}
+          breakdown={[
+            { key: "met", label: "Tenus", value: (totals?.evaluated ?? 0) - (totals?.breached ?? 0), color: "var(--state-up)" },
+            { key: "breached", label: "Dépassés", value: totals?.breached ?? 0, color: "var(--sev-critical)" },
+            { key: "running", label: "En cours", value: totals?.running ?? 0, color: "var(--accent)" },
+          ]}
+          help="Incidents résolus après leur objectif, ou encore ouverts alors que l'objectif est déjà dépassé."
+        />
+        <Stat label="Incidents" value={num(totals?.incidents)} hint={`${num(totals?.resolved)} résolus`} />
+        <Stat
+          label="En cours, dans les délais"
+          value={num(totals?.running)}
+          hint="pas encore évalués"
+          help="Incidents encore ouverts dont l'objectif n'est pas atteint : ils peuvent encore être tenus, ils ne comptent pas dans le taux."
+        />
+        <Stat
+          label="Prise en charge moy."
+          value={duration(totals?.mtto_minutes)}
+          help="TTO : temps entre l'ouverture du ticket et son affectation à un agent dans iTop."
+          hint={delayHint(totals?.tto_count, totals?.median_tto_minutes, totals?.incidents)}
+        />
+        <Stat
+          label="Résolution moy."
+          value={duration(totals?.mttr_minutes)}
+          help="TTR : temps entre l'ouverture du ticket et sa résolution dans iTop."
+          hint={delayHint(totals?.ttr_count, totals?.median_ttr_minutes, totals?.incidents)}
+        />
+      </div>
 
-            {/* --- Tableau des indicateurs, format « comité » --- */}
-            <Panel
-              title="Indicateurs de service"
-              subtitle="Disponibilité du parc comparée aux seuils configurés pour chaque gravité"
-              flush
-            >
-              <table className="tbl">
-                <thead>
-                  <tr>
-                    <th>Indicateur</th>
-                    <th style={{ textAlign: "right", width: 110 }}>Réel</th>
-                    <th style={{ textAlign: "right", width: 110 }}>Cible</th>
-                    <th style={{ width: 140 }}>Écart</th>
-                    <th style={{ width: 120 }}>Statut</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.indicators.length === 0 && (
-                    <tr>
-                      <td colSpan={5} style={{ color: "var(--ink-3)" }}>
-                        Aucun seuil de disponibilité n'est configuré.
+      {sla.data && (
+        <div className="grid grid-cols-12 gap-2 items-start">
+          <Panel
+            title="Évolution du respect des SLA"
+            subtitle="par semaine d'ouverture des tickets · ligne pointillée : objectif 95 %"
+            className="col-span-12 lg:col-span-7"
+          >
+            {(sla.data.weekly ?? []).length < 2 ? (
+              <p className="text-[12px]" style={{ color: "var(--ink-3)" }}>
+                Moins de deux semaines sur la période : choisir 90 j ou 12 mois pour voir une tendance.
+              </p>
+            ) : (
+              <LineChart
+                height={190}
+                labels={sla.data.weekly.map((w) => new Date(w.week).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" }))}
+                yMin={0}
+                yMax={100}
+                targetLine={95}
+                valueFormatter={(value) => pct(value, 1)}
+                series={[
+                  {
+                    label: "Respect des SLA",
+                    data: sla.data.weekly.map((w) => w.compliance_pct),
+                    pointCounts: sla.data.weekly.map((w) => w.evaluated),
+                    color: "var(--accent)",
+                    fill: true,
+                  },
+                ]}
+              />
+            )}
+          </Panel>
+          <Panel
+            title="Délais de résolution"
+            subtitle="rapportés à l'objectif de chaque gravité"
+            className="col-span-12 lg:col-span-5"
+          >
+            <BarChart
+              height={190}
+              horizontal
+              labels={(sla.data.ttr_distribution ?? []).map((b) => b.label)}
+              valueFormatter={(value) => `${num(value)} ticket(s)`}
+              series={[
+                {
+                  label: "Tickets",
+                  data: (sla.data.ttr_distribution ?? []).map((b) => b.count),
+                  colors: (sla.data.ttr_distribution ?? []).map((b) =>
+                    b.key === "le50" || b.key === "le100" ? "var(--state-up)" : "var(--sev-critical)",
+                  ),
+                },
+              ]}
+            />
+            <p className="text-[11px] mt-1" style={{ color: "var(--ink-3)" }}>
+              En vert : résolus dans le délai ; en rouge : hors délai, ou encore ouverts alors que le délai est dépassé.
+            </p>
+          </Panel>
+        </div>
+      )}
+
+      <Panel
+        title="Respect des SLA par"
+        actions={
+          <Segmented ariaLabel="Regroupement" options={GROUPS} value={groupBy} onChange={setGroupBy} />
+        }
+        subtitle="clic sur une ligne pour descendre d'un niveau"
+        flush
+      >
+        <SlaBreakdown query={sla} groupBy={groupBy} onSelect={drill} maxHeight={420} />
+      </Panel>
+
+      <Panel title="Par gravité" subtitle="objectifs de prise en charge (TTO) et de résolution (TTR)" flush>
+        <QueryBoundary query={sla} compact empty={(d) => !d?.by_severity?.length} emptyMessage="Aucun incident sur la période">
+          {(data) => (
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th style={{ width: 100 }}>Gravité</th>
+                  <th style={{ textAlign: "right" }}>Incidents</th>
+                  <th style={{ textAlign: "right" }}>Résolus</th>
+                  <th style={{ textAlign: "right" }}>TTO moyen</th>
+                  <th style={{ textAlign: "right" }}>Objectif TTO</th>
+                  <th style={{ textAlign: "right" }}>TTR moyen</th>
+                  <th style={{ textAlign: "right" }}>Objectif TTR</th>
+                  <th style={{ textAlign: "right" }}>Respect</th>
+                  <th style={{ textAlign: "right" }}>Dépassés</th>
+                  {canEdit && <th style={{ width: 40 }} />}
+                </tr>
+              </thead>
+              <tbody>
+                {data.by_severity.map((row) => {
+                  const goal = data.targets?.[row.severity] ?? {};
+                  return (
+                    <tr key={row.severity} className={`sev-edge sev-edge-${row.severity}`}>
+                      <td>
+                        <SeverityBadge severity={row.severity} />
                       </td>
-                    </tr>
-                  )}
-                  {data.indicators.map((indicator) => {
-                    const met = indicator.status === "met";
-                    // L'écart est ramené à la cible pour que la barre
-                    // compare des choses comparables : 2 ms d'écart sur
-                    // 100 ms et 2 points sur 95 % ne pèsent pas pareil.
-                    const ratio = indicator.target && indicator.value != null
-                      ? Math.min(1, Math.abs(indicator.value / indicator.target))
-                      : 0;
-                    const color = indicator.status == null || indicator.status === "unavailable"
-                      ? "var(--ink-3)"
-                      : met
-                        ? "var(--state-up)"
-                        : "var(--sev-critical)";
-                    return (
-                      <tr key={`${indicator.metric}:${indicator.severity}`}>
+                      <td className="num" style={{ textAlign: "right" }}>{num(row.incidents)}</td>
+                      <td className="num" style={{ textAlign: "right" }}>{num(row.resolved)}</td>
+                      <td
+                        className="num"
+                        style={{
+                          textAlign: "right",
+                          color: row.mtto_minutes != null && goal.tto != null && row.mtto_minutes > goal.tto ? "var(--sev-medium)" : undefined,
+                        }}
+                      >
+                        <span title={delayHint(row.tto_count, row.median_tto_minutes, row.incidents)}>
+                          {duration(row.mtto_minutes)}
+                        </span>
+                      </td>
+                      <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{duration(goal.tto)}</td>
+                      <td
+                        className="num"
+                        style={{
+                          textAlign: "right",
+                          color: row.mttr_minutes != null && goal.ttr != null && row.mttr_minutes > goal.ttr ? "var(--sev-high)" : undefined,
+                        }}
+                      >
+                        <span title={delayHint(row.ttr_count, row.median_ttr_minutes, row.incidents)}>
+                          {duration(row.mttr_minutes)}
+                        </span>
+                      </td>
+                      <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{duration(goal.ttr)}</td>
+                      <td className="num" style={{ textAlign: "right", color: complianceColor(row.compliance_pct) }}>
+                        {pct(row.compliance_pct, 1)}
+                      </td>
+                      <td className="num" style={{ textAlign: "right", color: row.breached ? "var(--sev-critical)" : undefined }}>
+                        {num(row.breached)}
+                      </td>
+                      {canEdit && (
                         <td>
-                          {indicator.metric} — {severityMeta(indicator.severity).label}
-                        </td>
-                        <td
-                          className="num"
-                          style={{
-                            textAlign: "right",
-                            color,
-                          }}
-                        >
-                          {decimal(indicator.value, 2)} {indicator.unit}
-                        </td>
-                        <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>
-                          {decimal(indicator.target, 2)} {indicator.unit}
-                        </td>
-                        <td>
-                          <Meter
-                            value={ratio * 100}
-                            color={color}
-                            height={5}
-                          />
-                        </td>
-                        <td>
-                          <span
-                            className="badge"
-                            style={{
-                              color,
-                              background: `color-mix(in srgb, ${
-                                color
-                              } 14%, transparent)`,
-                            }}
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm"
+                            title={`Modifier les objectifs « ${severityMeta(row.severity).label} »`}
+                            onClick={() =>
+                              setEditing(
+                                targetOf(row.severity) ?? {
+                                  severity: row.severity,
+                                  ttr_target_minutes: goal.ttr ?? "",
+                                  tta_target_minutes: goal.tto ?? "",
+                                },
+                              )
+                            }
                           >
-                            {indicator.status === "unavailable"
-                              ? "Donnée indisponible"
-                              : met
-                                ? "Conforme"
-                                : "Non conforme"}
-                          </span>
+                            <Pencil size={12} />
+                          </button>
                         </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </Panel>
-
-            {/* --- Détail par gravité --- */}
-            <Panel
-              title="Détail par gravité"
-              subtitle="délais de prise en compte (MTTA) et de résolution (MTTR)"
-              flush
-            >
-              <table className="tbl">
-                <thead>
-                  <tr>
-                    <th style={{ width: 100 }}>Gravité</th>
-                    <th style={{ textAlign: "right" }}>Incidents</th>
-                    <th style={{ textAlign: "right" }}>Résolus</th>
-                    <th style={{ textAlign: "right" }}>MTTA réel</th>
-                    <th style={{ textAlign: "right" }}>Cible MTTA</th>
-                    <th style={{ textAlign: "right" }}>MTTR réel</th>
-                    <th style={{ textAlign: "right" }}>Cible MTTR</th>
-                    <th style={{ textAlign: "right" }}>Respect délai</th>
-                    <th style={{ textAlign: "right" }}>Dépassements</th>
-                    {canEdit && <th style={{ width: 40 }} />}
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.by_severity.map((row) => {
-                    const meta = severityMeta(row.severity);
-                    const compliant = row.ttr_compliance_pct == null
-                      ? null
-                      : row.ttr_compliance_pct >= 95;
-                    return (
-                      <tr key={row.severity} className={`sev-edge sev-edge-${row.severity}`}>
-                        <td>
-                          <SeverityBadge severity={row.severity} />
-                        </td>
-                        <td className="num" style={{ textAlign: "right" }}>
-                          {num(row.total_incidents)}
-                        </td>
-                        <td className="num" style={{ textAlign: "right", color: "var(--ink-2)" }}>
-                          {num(row.resolved)}
-                        </td>
-                        <td
-                          className="num"
-                          style={{
-                            textAlign: "right",
-                            color:
-                              (row.avg_mtta_minutes ?? 0) > row.tta_target_minutes
-                                ? "var(--sev-medium)"
-                                : "var(--state-up)",
-                          }}
-                        >
-                          {duration(row.avg_mtta_minutes)}
-                        </td>
-                        <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>
-                          {duration(row.tta_target_minutes)}
-                        </td>
-                        <td
-                          className="num"
-                          style={{
-                            textAlign: "right",
-                            color:
-                              (row.avg_mttr_minutes ?? 0) > row.ttr_target_minutes
-                                ? "var(--sev-high)"
-                                : "var(--state-up)",
-                          }}
-                        >
-                          {duration(row.avg_mttr_minutes)}
-                        </td>
-                        <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>
-                          {duration(row.ttr_target_minutes)}
-                        </td>
-                        <td
-                          className="num"
-                          style={{
-                            textAlign: "right",
-                            color: compliant == null
-                              ? "var(--ink-3)"
-                              : compliant ? "var(--state-up)" : "var(--sev-critical)",
-                          }}
-                        >
-                          {pct(row.ttr_compliance_pct, 1)}
-                        </td>
-                        <td
-                          className="num"
-                          style={{
-                            textAlign: "right",
-                            color: row.breached ? "var(--sev-critical)" : "var(--ink-3)",
-                          }}
-                        >
-                          {num(row.breached, "0")}
-                        </td>
-                        {canEdit && (
-                          <td>
-                            <button
-                              type="button"
-                              className="btn btn-ghost btn-sm"
-                              title={`Modifier les objectifs « ${meta.label} »`}
-                              onClick={() =>
-                                setEditing(
-                                  (targets.data ?? []).find(
-                                    (target) => target.severity === row.severity,
-                                  ) ?? {
-                                    severity: row.severity,
-                                    ttr_target_minutes: row.ttr_target_minutes,
-                                    tta_target_minutes: row.tta_target_minutes,
-                                    availability_target_pct: 99,
-                                  },
-                                )
-                              }
-                            >
-                              <Pencil size={12} />
-                            </button>
-                          </td>
-                        )}
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </Panel>
-          </>
-        )}
-      </QueryBoundary>
+                      )}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </QueryBoundary>
+      </Panel>
 
       <TargetModal target={editing} onClose={() => setEditing(null)} />
     </div>
@@ -376,7 +346,6 @@ function TargetForm({ target, onClose }) {
         payload: {
           ttr_target_minutes: Number(current.ttr_target_minutes),
           tta_target_minutes: Number(current.tta_target_minutes),
-          availability_target_pct: Number(current.availability_target_pct),
         },
       });
       close();
@@ -390,7 +359,7 @@ function TargetForm({ target, onClose }) {
       open
       onClose={close}
       title={`Objectifs — ${severityMeta(target.severity).label}`}
-      subtitle="Ces valeurs servent au calcul de conformité de tous les rapports."
+      subtitle="Ces valeurs servent au calcul du respect des SLA des incidents iTop."
       width={400}
       footer={
         <>
@@ -410,7 +379,7 @@ function TargetForm({ target, onClose }) {
     >
       <div className="space-y-2.5">
         {error && <Notice tone="error">{error}</Notice>}
-        <Field label="Délai de prise en compte (MTTA)" hint="En minutes.">
+        <Field label="Délai de prise en charge (TTO)" hint="En minutes.">
           <input
             className="input"
             type="number"
@@ -421,7 +390,7 @@ function TargetForm({ target, onClose }) {
             }
           />
         </Field>
-        <Field label="Délai de résolution (MTTR)" hint="En minutes.">
+        <Field label="Délai de résolution (TTR)" hint="En minutes.">
           <input
             className="input"
             type="number"
@@ -432,19 +401,11 @@ function TargetForm({ target, onClose }) {
             }
           />
         </Field>
-        <Field label="Disponibilité cible" hint="En pourcentage.">
-          <input
-            className="input"
-            type="number"
-            step="0.1"
-            min={0}
-            max={100}
-            value={current.availability_target_pct}
-            onChange={(event) =>
-              setForm({ ...current, availability_target_pct: event.target.value })
-            }
-          />
-        </Field>
+        <p className="text-xs text-muted">
+          La conformité mesurée ici porte sur les délais de prise en compte et
+          de résolution. La disponibilité réseau n'est pas encore mesurée au
+          niveau requis pour un engagement SLA.
+        </p>
       </div>
     </Modal>
   );

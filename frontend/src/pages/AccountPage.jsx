@@ -175,8 +175,8 @@ export default function AccountPage() {
         <Panel title="Notifications navigateur">
           <p className="text-[12px] mb-2" style={{ color: "var(--ink-2)" }}>
             Recevez les incidents critiques même lorsque l'onglet n'est pas au premier
-            plan. Le backend n'envoie que les gravités {" "}
-            <strong>critique</strong> et <strong>majeure</strong>.
+            plan. Seules les gravités {" "}
+            <strong>critique</strong> et <strong>majeure</strong> sont notifiées.
           </p>
           {pushError && <Notice tone="error">{pushError}</Notice>}
           <div className="flex items-center gap-2 mt-2">

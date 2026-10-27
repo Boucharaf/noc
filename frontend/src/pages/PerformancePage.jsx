@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import NetworkVitals from "../components/domain/NetworkVitals";
+import { FleetStatesChart } from "../components/domain/FleetInsights";
 import Panel from "../components/ui/Panel";
 import { LineChart } from "../components/charts";
 import { FilterSelect, Segmented, Toolbar } from "../components/ui/Controls";
@@ -14,6 +15,7 @@ import {
   useNetworkKpi,
   useNetworkRanking,
   useNetworkSeries,
+  useNodeStates,
   useNodes,
 } from "../hooks/queries";
 
@@ -59,7 +61,8 @@ export default function PerformancePage() {
     ...new Set(allNodes.map((n) => n.node_type).filter(Boolean)),
   ].map((t) => ({ value: t, label: t }));
 
-  const network = useNetworkKpi({ site, organisation, nodeType });
+  const nodeStates = useNodeStates();
+  const network = useNetworkKpi();
   const series = useNetworkSeries({
     metricType: metric,
     hours,
@@ -78,7 +81,7 @@ export default function PerformancePage() {
   });
 
   const meta = metricMeta(metric);
-  const points = series.data ?? [];
+  const points = series.data?.points ?? [];
 
   const formatValue = (value) =>
     metric.startsWith("bandwidth")
@@ -89,7 +92,7 @@ export default function PerformancePage() {
     <div className="space-y-2.5">
       <PageHeader
         title="Performance réseau"
-        subtitle="Courbe et classement sur la fenêtre choisie · tuiles d'état du parc en temps réel"
+        subtitle="Évolution des mesures du réseau"
         actions={
           <Toolbar>
             <FilterSelect
@@ -130,10 +133,12 @@ export default function PerformancePage() {
         }
       />
 
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
+      {/* Colonnes auto-ajustées : le nombre de tuiles dépend des mesures
+          réellement collectées, la rangée ne doit pas rester à moitié vide. */}
+      <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))" }}>
         <NetworkVitals
           data={network.data}
-          expectedNodes={network.data?.nodes_total}
+          expectedNodes={nodeStates.data?.total}
           compact
         />
       </div>
@@ -165,18 +170,17 @@ export default function PerformancePage() {
           <Panel
             title={meta.label}
             subtitle={
-              points.length
-                ? `moyenne de ${points.at(-1)?.nb_nodes ?? 0}/${points.at(-1)?.sampled_nodes ?? 0} équipements mesurés, échantillon priorisé par alertes · ${
-                    hours <= 48 ? "données brutes" : "agrégat horaire"
-                  }`
+              series.data
+                ? `moyenne sur ${series.data.contributing_nodes} équipement(s) mesuré(s)${points.length ? ` · ${hours <= 48 ? "données détaillées" : "moyennes horaires"}` : ""}`
                 : undefined
             }
           >
             <QueryBoundary
               query={series}
               compact
+              empty={(data) => !data?.points?.length}
               emptyMessage="Aucune mesure sur cette fenêtre"
-              emptyHint="Zabbix, Centreon et NetXMS peuvent publier ces séries; iTop fournit la CMDB, pas les métriques."
+              emptyHint="Aucune mesure disponible pour ce périmètre sur cette période."
             >
               <LineChart
                 height={280}
@@ -191,22 +195,9 @@ export default function PerformancePage() {
                   {
                     label: `${meta.label} — moyenne`,
                     data: points.map((point) => point.value),
+                    pointCounts: points.map((point) => point.nb_nodes),
                     color: meta.color,
                     fill: true,
-                  },
-                  {
-                    label: "Meilleur équipement",
-                    data: points.map((point) => point.min),
-                    color: "var(--state-up)",
-                    dashed: true,
-                    width: 1,
-                  },
-                  {
-                    label: "Pire équipement",
-                    data: points.map((point) => point.max),
-                    color: "var(--sev-critical)",
-                    dashed: true,
-                    width: 1,
                   },
                 ]}
               />
@@ -306,6 +297,8 @@ export default function PerformancePage() {
           </Panel>
         </div>
       </div>
+
+      <FleetStatesChart height={200} />
     </div>
   );
 }

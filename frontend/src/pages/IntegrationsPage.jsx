@@ -14,6 +14,7 @@ import {
   useCoverageTrend,
   useHealth,
   useInterop,
+  useMergeReport,
   useNodeStates,
 } from "../hooks/queries";
 
@@ -37,23 +38,35 @@ export default function IntegrationsPage() {
   const trend = useCoverageTrend(60);
   const health = useHealth();
   const nodeStates = useNodeStates();
+  const merge = useMergeReport();
 
   const trendPoints = trend.data ?? [];
   const toolsHealthy = (interop.data?.tools ?? []).filter(
     (tool) => tool.reachable && !tool.stale,
   ).length;
   const toolsTotal = interop.data?.tools?.length ?? 0;
+  const staleStreams = Object.entries(interop.data?.source_data ?? {}).flatMap(
+    ([tool, streams]) =>
+      Object.entries(streams)
+        .filter(([, stream]) => stream.stale || stream.available === false)
+        .map(([collection, stream]) => ({
+          tool,
+          collection,
+          collectedAt: stream.collected_at,
+          available: stream.available,
+        })),
+  );
 
   return (
     <div className="space-y-2.5">
       <PageHeader
         title="Collecte et interopérabilité"
-        subtitle="État des six connecteurs de l'ETL et couverture de supervision"
+        subtitle="État des outils de supervision et couverture du parc"
       />
 
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2">
         <Stat
-          label="Connecteurs actifs"
+          label="Outils actifs"
           value={
             interop.data
               ? `${toolsHealthy}/${toolsTotal}`
@@ -74,26 +87,17 @@ export default function IntegrationsPage() {
               ? `${Math.round(interop.data.collector.interval_s / 60)} min`
               : "—"
           }
-          hint="COLLECT_INTERVAL_S"
         />
         <Stat
-          label="Entrepôt"
-          value={health.data?.checks?.database?.status ?? "—"}
-          color={
-            health.data?.checks?.database?.status === "ok"
-              ? "var(--state-up)"
-              : "var(--sev-critical)"
+          label="Plateforme"
+          value={
+            !health.data
+              ? "—"
+              : health.data.status === "ok"
+                ? "opérationnelle"
+                : "perturbée"
           }
-          hint={health.data?.checks?.database?.detail}
-        />
-        <Stat
-          label="Redis"
-          value={health.data?.checks?.redis?.status ?? "—"}
-          color={
-            health.data?.checks?.redis?.status === "ok"
-              ? "var(--state-up)"
-              : "var(--sev-critical)"
-          }
+          color={health.data?.status === "ok" ? "var(--state-up)" : "var(--sev-critical)"}
         />
         <Stat
           label="Équipements connus"
@@ -101,19 +105,19 @@ export default function IntegrationsPage() {
           to="/equipements"
         />
         <Stat
-          label="Équipements muets"
-          value={num(nodeStates.data?.silent, "0")}
-          color={nodeStates.data?.silent ? "var(--sev-medium)" : "var(--state-up)"}
-          to="/equipements?state=silent"
+          label="État inconnu"
+          value={num((nodeStates.data?.unknown ?? 0) + (nodeStates.data?.silent ?? 0))}
+          color={nodeStates.data?.unknown ? "var(--sev-medium)" : "var(--state-up)"}
+          to="/equipements?state=unknown"
           hint="aucune mesure depuis 6 h"
         />
       </div>
 
-      <Panel title="Connecteurs" flush>
+      <Panel title="Outils de supervision" flush>
         <QueryBoundary
           query={interop}
           empty={(data) => !data?.tools?.length}
-          emptyMessage="Aucun connecteur configuré"
+          emptyMessage="Aucun outil configuré"
         >
           {(data) => (
             <table className="tbl">
@@ -123,7 +127,8 @@ export default function IntegrationsPage() {
                   <th style={{ width: 130 }}>État</th>
                   <th style={{ width: 150 }}>Dernière collecte</th>
                   <th style={{ textAlign: "right", width: 90 }}>Équipements</th>
-                  <th style={{ textAlign: "right", width: 90 }}>Incidents</th>
+                  <th style={{ textAlign: "right", width: 105 }}>Alertes techniques</th>
+                  <th style={{ textAlign: "right", width: 90 }}>Tickets ITSM</th>
                   <th style={{ textAlign: "right", width: 90 }}>Métriques</th>
                   <th style={{ textAlign: "right", width: 110 }}>Inc. ce mois</th>
                   <th className="wrap">Détail</th>
@@ -154,7 +159,10 @@ export default function IntegrationsPage() {
                       {num(tool.nb_nodes, "—")}
                     </td>
                     <td className="num" style={{ textAlign: "right" }}>
-                      {num(tool.nb_incidents, "—")}
+                      {num(tool.nb_technical_alerts, "—")}
+                    </td>
+                    <td className="num" style={{ textAlign: "right" }}>
+                      {num(tool.nb_itsm_tickets, "—")}
                     </td>
                     <td className="num" style={{ textAlign: "right" }}>
                       {num(tool.nb_metrics, "—")}
@@ -169,6 +177,54 @@ export default function IntegrationsPage() {
                 ))}
               </tbody>
             </table>
+          )}
+        </QueryBoundary>
+      </Panel>
+
+      <Panel
+        title="Qualité du rapprochement"
+        subtitle="Les cas ambigus restent séparés ; les états contradictoires ne sont pas masqués."
+      >
+        <QueryBoundary query={merge} compact>
+          {(data) => (
+            <div className="space-y-2 text-[11.5px]">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <Row label="Équipements fusionnés" value={num(data.duplicates_resolved, "0")} />
+                <Row label="Identités confirmées" value={num(data.matched_by_verified_identity, "0")} />
+                <Row label="Correspondances ambiguës" value={num(data.ambiguous_total, "0")} />
+                <Row label="Conflits d'état" value={num(data.state_conflicts?.length, "0")} />
+              </div>
+              {!!data.ambiguities?.length && (
+                <ul className="space-y-1 border-t pt-2" style={{ borderColor: "var(--border)" }}>
+                  {data.ambiguities.slice(0, 5).map((item, index) => (
+                    <li key={`${item.reason}-${item.identity}-${index}`} className="flex gap-2">
+                      <span style={{ color: "var(--sev-medium)" }}>{item.reason}</span>
+                      <span className="truncate" title={item.identity}>{item.identity}</span>
+                      <span style={{ color: "var(--ink-3)" }}>{item.sources}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {!!data.state_conflicts?.length && (
+                <p style={{ color: "var(--sev-medium)" }}>
+                  États non consolidés : {data.state_conflicts.slice(0, 5).map((item) => item.id).join(", ")}
+                </p>
+              )}
+              {!!staleStreams.length && (
+                <ul
+                  className="space-y-1 border-t pt-2"
+                  style={{ borderColor: "var(--border)", color: "var(--sev-medium)" }}
+                >
+                  {staleStreams.map((stream) => (
+                    <li key={`${stream.tool}-${stream.collection}`}>
+                      {toolLabel(stream.tool)} — {stream.collection}: dernier succès{" "}
+                      {stream.collectedAt ? dateTime(stream.collectedAt) : "inconnu"}
+                      {!stream.available && " (aucune donnée antérieure)"}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           )}
         </QueryBoundary>
       </Panel>
@@ -239,7 +295,6 @@ export default function IntegrationsPage() {
               query={trend}
               compact
               emptyMessage="Aucun historique de couverture"
-              emptyHint="fact_supervision_coverage_daily est alimentée par l'ETL à chaque cycle."
             >
               <LineChart
                 height={200}
@@ -305,12 +360,12 @@ export default function IntegrationsPage() {
                           color: row.unmonitored_assets ? "var(--sev-high)" : "var(--ink-3)",
                         }}
                       >
-                        {num(row.unmonitored_assets, "0")}
+                        {num(row.unmonitored_assets)}
                       </td>
                       <td>
                         <div className="flex items-center gap-1.5">
                           <Meter
-                            value={row.coverage_pct ?? 0}
+                            value={row.coverage_pct}
                             color={
                               (row.coverage_pct ?? 0) >= 95
                                 ? "var(--state-up)"

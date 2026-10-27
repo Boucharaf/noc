@@ -24,12 +24,12 @@ Les autres modules restent séparés parce qu'ils ont chacun une contrainte
 propre : authentification, chargement de fichiers, WebSocket, PDF.
 """
 from app.routes.auth import router as auth_router
-from app.routes.field import router as field_router
 from app.routes.health import router as health_router
 from app.routes.live import router as live_router
 from app.routes.notifications import router as notifications_router
 from app.routes.operations import router as operations_router
-from app.routes.report import router as report_router
+from app.routes.report import internal_router, router as report_router
+from app.routes.territory import router as territory_router
 from app.routes.users import router as users_router
 from app.routes.ws import router as ws_router
 
@@ -38,9 +38,10 @@ all_routers = [
     auth_router,
     users_router,
     live_router,
+    territory_router,
     operations_router,
-    field_router,
     report_router,
+    internal_router,
     notifications_router,
     ws_router,
 ]

@@ -138,7 +138,6 @@ class ManualIncident(Base):
     severity = Column(Text, nullable=False, default="medium")
     title = Column(Text, nullable=False)
     description = Column(Text)
-    cause = Column(Text)
     detected_at = Column(DateTime(timezone=True), server_default=func.now())
     resolved_at = Column(DateTime(timezone=True))
     created_by = Column(Integer, ForeignKey("noc_user.id", ondelete="SET NULL"))
@@ -170,17 +169,12 @@ class MaintenanceWindow(Base):
     Les alertes qui y tombent sont marquées et exclues des indicateurs : une
     coupure voulue n'est pas une panne, et la compter fausserait à la fois le
     volume d'incidents et le respect du SLA.
-
-    `site` est obligatoire à la création. `node_keys`, lorsqu'il est fourni,
-    limite la fenêtre à plusieurs équipements de ce site; sans cette liste,
-    la fenêtre couvre le site entier.
     """
 
     __tablename__ = "ops_maintenance_window"
 
     id = Column(Integer, primary_key=True)
     node_key = Column(Text)
-    node_keys = Column(JSONB)
     site = Column(Text)
     reason = Column(Text, nullable=False)
     starts_at = Column(DateTime(timezone=True), nullable=False)
@@ -284,11 +278,11 @@ class KpiDaily(Base):
 
     __tablename__ = "kpi_daily"
 
-    day = Column(Date, primary_key=True)
+    day = Column(Date, nullable=False)
     # NULL = tous sites confondus. Sans cette ligne de total, la somme des
     # sites ne ferait pas le parc : les équipements sans localité connue en
     # seraient absents.
-    site = Column(Text, primary_key=True, nullable=True)
+    site = Column(Text)
     samples = Column(Integer, nullable=False)
     avg_nodes = Column(Float)
     avg_up = Column(Float)
@@ -297,3 +291,8 @@ class KpiDaily(Base):
     avg_alerts = Column(Float)
     avg_critical = Column(Float)
     fleet_availability_pct = Column(Float)
+
+    # PostgreSQL enforces uniqueness through an expression index so NULL can
+    # represent the total row. SQLAlchemy still needs an identity key for ORM
+    # reads; this mapper key does not create a database primary-key constraint.
+    __mapper_args__ = {"primary_key": [day, site]}

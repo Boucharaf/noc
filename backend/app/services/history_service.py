@@ -25,9 +25,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 
-from integrations.base import ToolUnavailable
+from integrations.base import SourceClient, ToolUnavailable
 from integrations.config import build_client
 from integrations.models import METRIC_TYPES
 
@@ -58,6 +59,22 @@ def _client(tool: str):
             raise HistoryUnavailable(tool, "outil non configuré (URL absente)")
         _clients[tool] = client
     return _clients[tool]
+
+
+def serves_history(tool: str) -> bool:
+    """L'outil sait-il fournir des courbes ?
+
+    Les connecteurs qui n'en ont pas (iTop, Nagios, la base NetXMS lue en
+    lecture seule) héritent du `fetch_history` vide de la classe de base.
+    Les interroger ne coûte rien mais ne rend jamais un point : un
+    échantillon tiré parmi eux produirait une courbe vide alors que Zabbix
+    ou Centreon ont des mesures sur d'autres équipements du périmètre.
+    """
+    try:
+        client = _client(tool)
+    except HistoryUnavailable:
+        return False
+    return type(client).fetch_history is not SourceClient.fetch_history
 
 
 async def aclose_all() -> None:
@@ -133,10 +150,14 @@ async def fetch_series(
         logger.exception("Historique %s : exception inattendue", tool)
         raise HistoryUnavailable(tool, f"{type(exc).__name__} : {exc}") from exc
 
-    serialised = [
-        {"at": point.at.astimezone(timezone.utc).isoformat(), "value": point.value}
-        for point in points
-    ]
+    serialised = []
+    for point in points:
+        if not math.isfinite(point.value):
+            raise HistoryUnavailable(tool, "la source a renvoyé une valeur métrique non finie")
+        at = point.at
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        serialised.append({"at": at.astimezone(timezone.utc).isoformat(), "value": point.value})
     await store.set_history(fingerprint, serialised, _cache_ttl(start, end))
     logger.info(
         "Historique %s/%s/%s : %d point(s) lus chez la source",
@@ -194,6 +215,37 @@ async def fetch_node_series(
         "points": [],
         "errors": errors,
     }
+
+
+async def fetch_node_latest(node: dict) -> dict:
+    """Read all latest values through one source request when supported."""
+    order = ("zabbix", "centreon", "netxms", "nagios", "nsp")
+    sources = node.get("sources") or {}
+    errors = []
+    for tool in order:
+        ref = sources.get(tool)
+        if not ref:
+            continue
+        try:
+            points = await _client(tool).fetch_latest(ref)
+        except HistoryUnavailable as exc:
+            errors.append({"tool": tool, "error": exc.detail})
+            continue
+        except ToolUnavailable as exc:
+            errors.append({"tool": tool, "error": str(exc)})
+            continue
+        if points:
+            return {
+                "latest": {
+                    metric: {
+                        "time": point.at.astimezone(timezone.utc).isoformat(),
+                        "value": point.value,
+                    }
+                    for metric, point in points.items()
+                },
+                "errors": errors,
+            }
+    return {"latest": {}, "errors": errors}
 
 
 def resolve_window(period: str | None, start: datetime | None,

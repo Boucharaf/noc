@@ -182,15 +182,6 @@ def refresh(
 
     user_id, jti = int(payload["sub"]), payload["jti"]
 
-    if not session_store.is_refresh_session_valid(jti, user_id):
-        # Signature valide mais jti absent du registre : soit il a déjà
-        # été consommé par une rotation (réutilisation = vol probable),
-        # soit il a été révoqué. Dans les deux cas, on tue TOUTES les
-        # sessions du compte, pas seulement celle-ci.
-        session_store.revoke_all_sessions(user_id)
-        _clear_refresh_cookie(response)
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session invalide ou déjà utilisée.")
-
     user = db.query(User).filter(User.id == user_id, User.is_active.is_(True)).first()
     if not user:
         session_store.revoke_all_sessions(user_id)
@@ -198,7 +189,24 @@ def refresh(
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Compte introuvable ou désactivé.")
 
     new_token, new_jti, new_expire = auth_service.create_refresh_token(user)
-    session_store.rotate_refresh_session(jti, user_id, new_jti, new_expire)
+    rotation = session_store.rotate_refresh_session(
+        jti, user_id, new_jti, new_expire
+    )
+    if rotation == "recently_rotated":
+        # Deux onglets peuvent avoir envoyé le même cookie avant que la
+        # première réponse ne le remplace. Ne pas effacer ce nouveau cookie
+        # ni révoquer toutes les sessions pour ce doublon concurrent.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Session déjà actualisée par une requête concurrente.",
+        )
+    if rotation != "rotated":
+        session_store.revoke_all_sessions(user_id)
+        _clear_refresh_cookie(response)
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            "Session invalide ou déjà utilisée.",
+        )
     _set_refresh_cookie(response, new_token, new_expire)
 
     return TokenResponse(

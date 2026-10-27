@@ -14,10 +14,10 @@ décisions d'exploitation, pas des constats.
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime, time
+from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -26,7 +26,6 @@ from app.db.session import get_db
 from app.dependencies.auth import get_current_user, require_role
 from app.models import User
 from app.services import (
-    alerts_service,
     kpi_service,
     maintenance_service,
     notification_service,
@@ -43,130 +42,46 @@ WRITERS = ("directeur", "chef_noc", "technicien")
 # (« xxcriticalxx »), et elle serait enregistrée telle quelle.
 _SEVERITY_PATTERN = "^(" + "|".join(SEVERITIES) + ")$"
 
-# Clé d'alerte en chemin (`zabbix:1042`). Bornée : toute action sur une clé
-# inconnue crée une ligne d'état, et une clé de plusieurs mégaoctets ne
-# désigne aucune alerte.
-AlertKey = Annotated[str, Path(min_length=3, max_length=300)]
-
-
-def _period_bounds(
-    year: int | None, month: int | None
-) -> tuple[datetime | None, datetime | None]:
-    if year is None and month is None:
-        return None, None
-    if year is None or month is None:
-        raise HTTPException(422, "year et month doivent être fournis ensemble.")
-    start, end = kpi_service.month_bounds(year, month)
-    return (
-        datetime.combine(start, time.min, UTC),
-        datetime.combine(end, time.min, UTC),
-    )
 
 
 # ---------------------------------------------------------------------------
 # Corps de requête
 # ---------------------------------------------------------------------------
-class NoteIn(BaseModel):
-    note: str | None = Field(None, max_length=2000)
-
-
-class AssignIn(BaseModel):
-    assignee_id: int
-    note: str | None = Field(None, max_length=2000)
-
-
-class ResolveIn(BaseModel):
-    # La cause est ce que le NOC apporte de plus précieux : aucun outil de
-    # supervision ne sait qu'une coupure venait d'un groupe électrogène à
-    # sec. Elle n'est pas obligatoire — forcer une saisie produirait des
-    # « autre » à la chaîne, ce qui est pire que rien.
-    cause: str | None = Field(None, max_length=200)
-    note: str | None = Field(None, max_length=2000)
-
-
 class ManualIncidentIn(BaseModel):
     title: str = Field(..., min_length=3, max_length=200)
     severity: str = Field("medium", pattern=_SEVERITY_PATTERN)
     description: str | None = Field(None, max_length=4000)
-    cause: str | None = Field(None, max_length=200)
     node_key: str | None = Field(None, max_length=300)
     node_name: str | None = Field(None, max_length=300)
     site: str | None = Field(None, max_length=150)
 
 
-class MaintenanceIn(BaseModel):
-    reason: str = Field(..., min_length=3, max_length=500)
-    starts_at: datetime
-    ends_at: datetime
-    node_key: str | None = Field(None, max_length=300)
-    node_keys: list[str] = Field(default_factory=list, max_length=2000)
-    site: str = Field(..., min_length=1, max_length=150)
-    suppress_alerts: bool = True
-
-
 class SlaTargetIn(BaseModel):
     tta_target_minutes: int | None = Field(None, ge=1, le=10080)
     ttr_target_minutes: int | None = Field(None, ge=1, le=43200)
-    availability_target_pct: float | None = Field(None, ge=0, le=100)
 
 
-# ---------------------------------------------------------------------------
-# Travail sur une alerte
-# ---------------------------------------------------------------------------
-@router.post("/alerts/{alert_key:path}/acknowledge")
-async def acknowledge(
-    alert_key: AlertKey,
-    body: NoteIn = Body(default=NoteIn()),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(*WRITERS)),
-):
-    return await alerts_service.acknowledge(db, alert_key, current_user.id, body.note)
+def _validate_manual_incident_site(
+    role: str, assigned_site: str | None, requested_site: str
+) -> None:
+    if role != "agent_terrain":
+        return
+    if not assigned_site:
+        raise HTTPException(
+            403,
+            "Aucun site n'est affecté à ce compte agent terrain.",
+        )
+    if requested_site != assigned_site:
+        raise HTTPException(
+            403,
+            "Un agent terrain ne peut signaler un incident que sur son site.",
+        )
 
 
-@router.post("/alerts/{alert_key:path}/assign")
-async def assign(
-    alert_key: AlertKey,
-    body: AssignIn,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(*WRITERS)),
-):
-    assignee = db.get(User, body.assignee_id)
-    if assignee is None or not assignee.is_active:
-        raise HTTPException(404, "Utilisateur destinataire inconnu ou désactivé.")
-    return await alerts_service.assign(
-        db, alert_key, current_user.id, body.assignee_id, body.note
-    )
-
-
-@router.post("/alerts/{alert_key:path}/resolve")
-async def resolve(
-    alert_key: AlertKey,
-    body: ResolveIn = Body(default=ResolveIn()),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(*WRITERS)),
-):
-    """Clôture CÔTÉ NOC.
-
-    Ne ferme rien chez l'outil source : le NOC n'a pas à décider qu'un
-    déclencheur Zabbix doit se taire. Si l'alerte reste active à la source,
-    elle reste visible, marquée comme traitée — masquer une alerte encore
-    active serait dangereux.
-    """
-    return await alerts_service.resolve(
-        db, alert_key, current_user.id, body.cause, body.note
-    )
-
-
-@router.post("/alerts/{alert_key:path}/note")
-async def add_note(
-    alert_key: AlertKey,
-    body: NoteIn,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(*WRITERS, "agent_terrain")),
-):
-    if not body.note:
-        raise HTTPException(400, "Une note vide n'apporte rien au journal.")
-    return await alerts_service.add_note(db, alert_key, current_user.id, body.note)
+# Les alertes des outils sont en LECTURE SEULE dans le NOC : plus
+# d'acquittement, d'affectation, de résolution ni de note. Le traitement et
+# les affectations sont tenus dans iTop (écran Incidents iTop) ; le NOC montre
+# les caractéristiques techniques des alertes, il ne double pas l'ITSM.
 
 
 # ---------------------------------------------------------------------------
@@ -183,18 +98,14 @@ def create_manual_incident(
 ):
     from app.models import ManualIncident
 
-    if current_user.role == "agent_terrain" and current_user.site:
-        if body.site != current_user.site:
-            raise HTTPException(
-                403,
-                "Un agent terrain ne peut signaler un incident que sur son site.",
-            )
+    _validate_manual_incident_site(
+        current_user.role, current_user.site, body.site
+    )
 
     incident = ManualIncident(
         title=body.title,
         severity=body.severity,
         description=body.description,
-        cause=body.cause,
         node_key=body.node_key,
         node_name=body.node_name,
         site=body.site,
@@ -249,41 +160,38 @@ def resolve_manual_incident(
 # ---------------------------------------------------------------------------
 # Maintenance
 # ---------------------------------------------------------------------------
+# Un Annotated et non un même objet Query() partagé : FastAPI lierait alors
+# les quatre paramètres au même nom d'URL (region=… filtrerait aussi province
+# et site).
+Place = Annotated[str | None, Query(max_length=200)]
+
+
 @router.get("/maintenance")
-def list_maintenance(
+async def list_maintenance(
     scope: str = Query("all", pattern="^(all|active|upcoming|past)$"),
-    db: Session = Depends(get_db),
+    region: Place = None,
+    province: Place = None,
+    site: Place = None,
+    search: Place = None,
     current_user: User = Depends(get_current_user),
 ):
-    return maintenance_service.list_windows(db, scope)
+    """Maintenances planifiées, lues dans iTop (changements) et Zabbix.
+    Lecture seule : elles se planifient dans ces outils."""
+    return await maintenance_service.list_windows(scope, region, province, site, search)
 
 
-@router.post("/maintenance", status_code=201)
-async def create_maintenance(
-    body: MaintenanceIn,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("directeur", "chef_noc")),
+@router.get("/interventions")
+async def list_interventions(
+    status: str = Query("all", pattern="^(all|open|closed)$"),
+    region: Place = None,
+    province: Place = None,
+    site: Place = None,
+    search: Place = None,
+    current_user: User = Depends(get_current_user),
 ):
-    return await maintenance_service.create_window(
-        db,
-        user_id=current_user.id,
-        reason=body.reason,
-        starts_at=body.starts_at,
-        ends_at=body.ends_at,
-        node_key=body.node_key,
-        node_keys=body.node_keys,
-        site=body.site,
-        suppress_alerts=body.suppress_alerts,
-    )
-
-
-@router.delete("/maintenance/{window_id}", status_code=204)
-def delete_maintenance(
-    window_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("directeur", "chef_noc")),
-):
-    maintenance_service.delete_window(db, window_id)
+    """Interventions : ordres de travail iTop. Lecture seule : elles
+    s'affectent et se clôturent dans iTop."""
+    return await maintenance_service.list_work_orders(status, region, province, site, search)
 
 
 # ---------------------------------------------------------------------------
@@ -311,33 +219,26 @@ def update_sla_target(
         severity,
         body.tta_target_minutes,
         body.ttr_target_minutes,
-        body.availability_target_pct,
     )
 
 
 @router.get("/sla/compliance")
 def sla_compliance(
     days: int = Query(30, ge=1, le=365),
-    year: int | None = Query(None, ge=2020, le=2100),
-    month: int | None = Query(None, ge=1, le=12),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    start_at, end_at = _period_bounds(year, month)
-    return sla_service.compliance(db, days, start_at, end_at)
+    return sla_service.compliance(db, days)
 
 
 @router.get("/sla/breaches")
 def sla_breaches(
     days: int = Query(30, ge=1, le=365),
     limit: int = Query(50, ge=1, le=500),
-    year: int | None = Query(None, ge=2020, le=2100),
-    month: int | None = Query(None, ge=1, le=12),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    start_at, end_at = _period_bounds(year, month)
-    return sla_service.breaches(db, days, limit, start_at, end_at)
+    return sla_service.breaches(db, days, limit)
 
 
 @router.get("/sla/at-risk")
@@ -359,59 +260,57 @@ async def sla_at_risk(
 @router.get("/kpi/trend")
 def kpi_trend(
     days: int = Query(30, ge=1, le=730),
+    region: str | None = Query(None, max_length=200),
+    province: str | None = Query(None, max_length=200),
     site: str | None = Query(None, max_length=150),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return kpi_service.trend(db, days, site)
+    """Tendance journalière du périmètre (site, province, région ou réseau)."""
+    return kpi_service.trend(db, days, kpi_service.rollup_key(region, province, site))
 
 
 @router.get("/kpi/monthly")
 def kpi_monthly(
     year: int = Query(..., ge=2020, le=2100),
     month: int = Query(..., ge=1, le=12),
+    region: str | None = Query(None, max_length=200),
+    province: str | None = Query(None, max_length=200),
     site: str | None = Query(None, max_length=150),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return kpi_service.monthly_summary(db, year, month, site)
-
-
-@router.get("/kpi/monthly-trend")
-def kpi_monthly_trend(
-    year: int = Query(..., ge=2020, le=2100),
-    month: int = Query(..., ge=1, le=12),
-    months: int = Query(12, ge=1, le=36),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    return kpi_service.monthly_trend(db, year, month, months)
+    return kpi_service.monthly_summary(
+        db, year, month, kpi_service.rollup_key(region, province, site)
+    )
 
 
 @router.get("/kpi/sites")
-def kpi_sites(
+async def kpi_sites(
     days: int = Query(30, ge=1, le=365),
     limit: int = Query(20, ge=1, le=200),
-    year: int | None = Query(None, ge=2020, le=2100),
-    month: int | None = Query(None, ge=1, le=12),
+    sort: str = Query("availability", pattern="^(availability|alerts)$"),
+    region: str | None = Query(None, max_length=200),
+    province: str | None = Query(None, max_length=200),
+    site: str | None = Query(None, max_length=150),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    start_at, end_at = _period_bounds(year, month)
-    return kpi_service.sites_ranking(
-        db,
-        days,
-        limit,
-        start_at.date() if start_at else None,
-        end_at.date() if end_at else None,
-    )
+    """Classement des sites, restreint aux sites du périmètre demandé."""
+    sites = None
+    if region or province or site:
+        from app.services import geo_service
+
+        nodes, _alerts, _incidents = await geo_service.scoped(
+            db, region=region, province=province, site=site
+        )
+        sites = {node["site"] for node in nodes if node.get("site")}
+    return kpi_service.sites_ranking(db, days, limit, sort, sites=sites)
 
 
 @router.get("/kpi/causes")
 def kpi_causes(
     days: int = Query(90, ge=1, le=730),
-    year: int | None = Query(None, ge=2020, le=2100),
-    month: int | None = Query(None, ge=1, le=12),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -420,17 +319,13 @@ def kpi_causes(
     La seule donnée d'analyse dont le NOC est propriétaire : aucun outil de
     supervision ne la connaît.
     """
-    start_at, end_at = _period_bounds(year, month)
-    return kpi_service.causes(db, days, start_at=start_at, end_at=end_at)
+    return kpi_service.causes(db, days)
 
 
 @router.get("/kpi/resolution-times")
 def kpi_resolution_times(
     days: int = Query(30, ge=1, le=365),
-    year: int | None = Query(None, ge=2020, le=2100),
-    month: int | None = Query(None, ge=1, le=12),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    start_at, end_at = _period_bounds(year, month)
-    return kpi_service.resolution_times(db, days, start_at, end_at)
+    return kpi_service.resolution_times(db, days)

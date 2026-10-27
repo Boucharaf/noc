@@ -36,22 +36,53 @@ logger = logging.getLogger(__name__)
 # Redis : perdre le bilan partiel d'une journée sur un redémarrage n'a aucune
 # conséquence — la moyenne du jour sera calculée sur moins d'échantillons, et
 # le collecteur reprend au cycle suivant.
-_ACCUMULATOR: dict[tuple[date, str], dict] = {}
+_ACCUMULATOR: dict[tuple[date, str | None], dict] = {}
 
 
-def observe(day: date, site: str | None, nodes: list, alerts: list) -> None:
+def rollup_key(level: str, name: str) -> str:
+    """Clé d'agrégat d'une région ou d'une province dans la colonne `site`.
+
+    `kpi_daily` n'a qu'une colonne de localité : une région y est rangée sous
+    « @region:<nom> », une province sous « @province:<nom> ». Le préfixe « @ »
+    ne peut pas apparaître dans un nom de site réel, et les classements de
+    sites l'excluent (kpi_service.sites_ranking).
+    """
+    return f"@{level}:{name}"
+
+
+def observe(
+    day: date,
+    site: str | None,
+    nodes: list,
+    alerts: list,
+    maintenance_node_keys: set[str] | None = None,
+    maintenance_sites: set[str] | None = None,
+) -> None:
     """Enregistre l'observation d'un cycle dans l'accumulateur du jour."""
-    key = (day, site or "—")
+    maintenance_node_keys = maintenance_node_keys or set()
+    maintenance_sites = maintenance_sites or set()
+
+    def is_maintenance(node) -> bool:
+        return (
+            node.state == "maintenance"
+            or getattr(node, "id", None) in maintenance_node_keys
+            or bool(node.site and node.site in maintenance_sites)
+        )
+
+    key = (day, site or None)
     bucket = _ACCUMULATOR.setdefault(
         key,
         {"samples": 0, "nodes": 0, "up": 0, "down": 0, "degraded": 0,
-         "alerts": 0, "critical": 0},
+         "maintenance": 0, "alerts": 0, "critical": 0},
     )
     bucket["samples"] += 1
     bucket["nodes"] += len(nodes)
-    bucket["up"] += sum(1 for n in nodes if n.state == "up")
-    bucket["down"] += sum(1 for n in nodes if n.state == "down")
-    bucket["degraded"] += sum(1 for n in nodes if n.state == "degraded")
+    bucket["up"] += sum(1 for n in nodes if not is_maintenance(n) and n.state == "up")
+    bucket["down"] += sum(1 for n in nodes if not is_maintenance(n) and n.state == "down")
+    bucket["degraded"] += sum(
+        1 for n in nodes if not is_maintenance(n) and n.state == "degraded"
+    )
+    bucket["maintenance"] += sum(1 for n in nodes if is_maintenance(n))
     bucket["alerts"] += len(alerts)
     bucket["critical"] += sum(1 for a in alerts if a.severity == "critical")
 
@@ -72,7 +103,7 @@ def _drain(day: date) -> list[dict]:
         rows.append(
             {
                 "day": bucket_day,
-                "site": None if site == "—" else site,
+                "site": site,
                 "samples": counters["samples"],
                 "avg_nodes": round(counters["nodes"] / samples, 2),
                 "avg_up": round(counters["up"] / samples, 2),
@@ -85,9 +116,11 @@ def _drain(day: date) -> list[dict]:
                 # une disponibilité au sens SLA d'un équipement donné — c'est
                 # un indicateur de santé globale, et il est nommé comme tel.
                 "fleet_availability_pct": round(
-                    100.0 * counters["up"] / counters["nodes"], 2
+                    100.0 * counters["up"]
+                    / (counters["nodes"] - counters["maintenance"]),
+                    2,
                 )
-                if counters["nodes"]
+                if counters["nodes"] > counters["maintenance"]
                 else None,
             }
         )
@@ -123,7 +156,7 @@ async def write_rows(rows: list[dict]) -> None:
                     )
                     -- Réécriture plutôt qu'échec : un collecteur redémarré en
                     -- fin de journée doit pouvoir compléter le bilan du jour.
-                    ON CONFLICT (day, site) DO UPDATE SET
+                    ON CONFLICT (day, (COALESCE(site, ''))) DO UPDATE SET
                         samples = EXCLUDED.samples,
                         avg_nodes = EXCLUDED.avg_nodes,
                         avg_up = EXCLUDED.avg_up,

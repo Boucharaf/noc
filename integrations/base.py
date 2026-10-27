@@ -250,6 +250,42 @@ class SourceClient(abc.ABC):
         """
         return []
 
+    async def fetch_latest(self, node_ref: str) -> dict[str, MetricPoint]:
+        """Latest supported measurements, when the source exposes them."""
+        return {}
+
+    async def fetch_maintenance(self) -> list[dict]:
+        """Maintenances planifiées connues de l'outil (en cours, à venir et
+        récentes). Chaque fenêtre :
+
+            {key, tool, kind, ref, title, status, start, end, outage,
+             organisation, agent, team, cis: [{ref, name}]}
+
+        `start`/`end` en ISO 8601 UTC. Le collecteur rattache ensuite `cis`
+        aux équipements du parc (`node_keys`). Vide par défaut.
+        """
+        return []
+
+    async def fetch_work_orders(self) -> list[dict]:
+        """Interventions (ordres de travail) ouvertes ou récentes :
+
+            {key, ref, title, status, start, end, team, agent, description,
+             ticket: {id, ref, title, class}, cis: [{ref, name}]}
+
+        Vide par défaut : seul l'ITSM porte des ordres de travail.
+        """
+        return []
+
+    async def fetch_fleet_latest(self) -> dict[str, dict[str, float]]:
+        """Dernière valeur de chaque mesure, pour TOUS les équipements de
+        l'outil, en un appel groupé : `{ref: {type de métrique: valeur}}`.
+
+        Appelé une fois par cycle de collecte ; alimente les moyennes du parc
+        (latence, pertes, débits, CPU…) sans interroger l'outil équipement
+        par équipement. Vide par défaut : un outil sans mesure n'en a pas.
+        """
+        return {}
+
     # -- utilitaire pour les sous-classes ----------------------------------
     async def _health(self, probe) -> ToolHealth:
         """Enveloppe commune de `check()` : mesure la latence, convertit

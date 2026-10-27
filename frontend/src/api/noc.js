@@ -44,7 +44,6 @@ const get = (url, params) => apiClient.get(url, { params }).then((r) => r.data);
 const post = (url, body) => apiClient.post(url, body).then((r) => r.data);
 const patch = (url, body) => apiClient.patch(url, body).then((r) => r.data);
 const put = (url, body) => apiClient.put(url, body).then((r) => r.data);
-const del = (url, config) => apiClient.delete(url, config).then((r) => r.data);
 
 /**
  * Encodage d'une clé d'alerte ou d'équipement pour une URL.
@@ -89,22 +88,23 @@ export const users = {
 /* Vue d'ensemble — tout vient de l'instantané Redis                    */
 /* ------------------------------------------------------------------ */
 export const overview = {
-  /** Tuiles de tête : parc, alertes, fraîcheur de la collecte. */
-  summary: () => get("/overview"),
+  /**
+   * Tuiles de tête : parc, alertes, incidents iTop, fraîcheur de la
+   * collecte — sur le périmètre (`region`, `province`, `site`, `search`).
+   */
+  summary: (params) => get("/overview", params),
   /** Synthèse par site, du plus dégradé au plus sain. */
-  sites: () => get("/sites"),
-  alertsBySeverity: () => get("/alerts/by-severity"),
-  alertsByTool: () => get("/alerts/by-tool"),
-  hourDistribution: () => get("/alerts/hour-distribution"),
+  sites: (params) => get("/sites", params),
+  alertsBySeverity: (params) => get("/alerts/by-severity", params),
+  alertsByTool: (params) => get("/alerts/by-tool", params),
+  /** Alertes en cours par ancienneté (tranches). */
+  alertAges: (params) => get("/alerts/ages", params),
+  hourDistribution: (params) => get("/alerts/hour-distribution", params),
 };
 
 /** Remplace l'ancien `geo` : le site n'est plus une entité du NOC. */
 export const sites = {
-  list: () => get("/sites"),
-};
-
-export const organisations = {
-  list: () => get("/organisations"),
+  list: (params) => get("/sites", params),
 };
 
 /* ------------------------------------------------------------------ */
@@ -113,25 +113,45 @@ export const organisations = {
 export const alerts = {
   /**
    * @param {object} params
-   *   severity, tool, site, acknowledged, include_maintenance, limit
+   *   severity, kind, tool, site, acknowledged, include_maintenance, limit
    */
   list: (params) => get("/alerts", params),
   get: (alertKey) => get(`/alerts/${key(alertKey)}`),
-
-  acknowledge: (alertKey, note) =>
-    post(`/alerts/${key(alertKey)}/acknowledge`, { note }),
-  assign: (alertKey, assignee_id, note) =>
-    post(`/alerts/${key(alertKey)}/assign`, { assignee_id, note }),
-  /**
-   * Clôture CÔTÉ NOC. Ne ferme rien chez l'outil source : si l'alerte y
-   * reste active, elle reste visible, marquée comme traitée.
-   */
-  resolve: (alertKey, cause, note) =>
-    post(`/alerts/${key(alertKey)}/resolve`, { cause, note }),
-  addNote: (alertKey, note) => post(`/alerts/${key(alertKey)}/note`, { note }),
+  // Lecture seule : le traitement et les affectations sont tenus dans iTop.
 };
 
 /** Incidents signalés à la main, qu'aucune sonde ne voit. */
+/* ------------------------------------------------------------------ */
+/* Territoire — région > province > site > nœud                         */
+/* ------------------------------------------------------------------ */
+export const geo = {
+  /** Arbre des localités du parc réel, pour les sélecteurs en cascade. */
+  options: () => get("/geo/options"),
+  /** Le périmètre et ses subdivisions immédiates, avec leurs indicateurs. */
+  breakdown: (params) => get("/geo/breakdown", params),
+  site: (site) => get(`/geo/sites/${key(site)}`),
+};
+
+/* ------------------------------------------------------------------ */
+/* Incidents — iTop UNIQUEMENT (les alertes viennent des outils)        */
+/* ------------------------------------------------------------------ */
+export const itopIncidents = {
+  /** @param {object} params region, province, site, search, severity, status, limit */
+  list: (params) => get("/incidents", params),
+  /**
+   * ⚠️ INTERROGE iTop (tickets ouverts sur la période, clos ou non), cache de 5 min.
+   * @param {object} params days, region, province, site, search, severity, status, offset, limit
+   */
+  history: (params) => get("/incidents/history", params),
+  /** Ticket iTop + vue des outils sur l'équipement + alertes associées. */
+  get: (incidentKey) => get(`/incidents/${key(incidentKey)}`),
+  /**
+   * ⚠️ INTERROGE iTop (tickets résolus de la période), cache de 5 min.
+   * @param {object} params group_by (region|province|site|node), days, region, province, site
+   */
+  sla: (params) => get("/sla/incidents", params),
+};
+
 export const manualIncidents = {
   create: (payload) => post("/manual-incidents", payload),
   resolve: (id) => post(`/manual-incidents/${id}/resolve`),
@@ -188,13 +208,13 @@ export const incidents = {
 export const nodes = {
   /** @param {object} params state, site, tool, search, sort, limit, offset */
   list: (params) => get("/nodes", params),
-  states: () => get("/nodes/states"),
+  states: (params) => get("/nodes/states", params),
   /**
    * Couverture par outil, et nombre d'équipements vus par UN SEUL outil —
    * autant de points de rupture : si cet outil tombe, on les perd de vue
    * sans que rien ne le signale.
    */
-  coverage: () => get("/nodes/coverage"),
+  coverage: (params) => get("/nodes/coverage", params),
   get: (nodeId) => get(`/nodes/${key(nodeId)}`),
 };
 
@@ -202,10 +222,12 @@ export const nodes = {
 /* Réseau et métriques                                                  */
 /* ------------------------------------------------------------------ */
 export const metrics = {
-  /** Instantané Redis, éventuellement filtré par site, organisation et type. */
+  /** Instantané : lecture Redis, jamais en échec tant que la collecte tourne. */
   snapshot: (params) => get("/network/snapshot", params),
-  down: () => get("/network/down"),
-  top: (limit) => get("/network/top", { limit }),
+  /** Historique court (24 h, un point par cycle de collecte), lu dans Redis. */
+  trend: (params) => get("/trend/live", params),
+  down: (params) => get("/network/down", params),
+  top: (limit, params) => get("/network/top", { limit, ...params }),
 
   /**
    * ⚠️ INTERROGE L'OUTIL SOURCE. Peut répondre 502 si Zabbix ou Centreon
@@ -214,8 +236,8 @@ export const metrics = {
    */
   nodeSeries: (nodeId, { metric, period } = {}) =>
     get(`/nodes/${key(nodeId)}/metrics`, { metric, period }),
-  networkSeries: ({ metric, period, sample, site, organisation, node_type } = {}) =>
-    get("/network/series", { metric, period, sample, site, organisation, node_type }),
+  nodeLatest: (nodeId) => get(`/nodes/${key(nodeId)}/metrics-latest`),
+  networkSeries: (params = {}) => get("/network/series", params),
 };
 
 /* ------------------------------------------------------------------ */
@@ -226,8 +248,7 @@ export const kpi = {
   trend: (params) => get("/kpi/trend", params),
   /** @param {object} params year, month, site */
   monthly: (params) => get("/kpi/monthly", params),
-  /** @param {object} params year, month, months */
-  monthlyTrend: (params) => get("/kpi/monthly-trend", params),
+  /** @param {object} params days, limit, sort (availability | alerts) */
   sites: (params) => get("/kpi/sites", params),
   /** Causes retenues par les exploitants — la seule analyse propre au NOC. */
   causes: (params) => get("/kpi/causes", params),
@@ -238,7 +259,6 @@ export const kpi = {
 /* Engagements de service                                               */
 /* ------------------------------------------------------------------ */
 export const sla = {
-  sourceTargets: () => get("/sla/source-targets"),
   targets: () => get("/sla/targets"),
   updateTarget: (severity, payload) => put(`/sla/targets/${severity}`, payload),
   compliance: (params) => get("/sla/compliance", params),
@@ -252,19 +272,24 @@ export const sla = {
 /* ------------------------------------------------------------------ */
 export const maintenance = {
   /** @param {string} scope all | active | upcoming | past */
-  list: (scope = "all") => get("/maintenance", { scope }),
-  create: (payload) => post("/maintenance", payload),
-  remove: (windowId) => del(`/maintenance/${windowId}`),
+  /** Changements iTop et maintenances Zabbix — lecture seule.
+   * @param {object} params scope (all|active|upcoming|past), region, province, site, search */
+  list: (params) => get("/maintenance", params),
 };
 
 /* ------------------------------------------------------------------ */
 /* Terrain                                                              */
 /* ------------------------------------------------------------------ */
-export const field = {
-  list: (params) => get("/field/interventions", params),
-  get: (id) => get(`/field/interventions/${id}`),
-  create: (payload) => post("/field/interventions", payload),
-  update: (id, payload) => patch(`/field/interventions/${id}`, payload),
+/** Suggestions des barres de recherche, lues dans l'instantané. */
+export const search = {
+  /** @param {object} params q, kinds (liste séparée par des virgules), limit */
+  suggest: (params) => get("/search/suggest", params),
+};
+
+/** Interventions : ordres de travail iTop — lecture seule. */
+export const interventions = {
+  /** @param {object} params status (all|open|closed), region, province, site, search */
+  list: (params) => get("/interventions", params),
 };
 
 /* ------------------------------------------------------------------ */
@@ -286,7 +311,6 @@ export const interop = {
 export const notifications = {
   vapidPublicKey: () => get("/notifications/vapid-public-key"),
   subscribe: (subscription) => post("/notifications/subscribe", subscription),
-  unsubscribe: (endpoint) => del("/notifications/subscribe", { data: { endpoint } }),
   /** Configuration SMTP et destinataires effectifs — Chef NOC. */
   emailStatus: () => get("/notifications/email/status"),
   /**
@@ -319,7 +343,8 @@ export default {
   kpi,
   sla,
   maintenance,
-  field,
+  interventions,
+  search,
   interop,
   notifications,
   report,

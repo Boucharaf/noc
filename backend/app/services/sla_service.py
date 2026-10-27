@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import case, func, select
+from sqlalchemy import and_, case, func, null, select
 from sqlalchemy.orm import Session
 
 from app.core.config import SEVERITIES
@@ -48,7 +48,6 @@ def list_targets(db: Session) -> list[dict]:
             "severity": severity,
             "tta_target_minutes": rows[severity].tta_target_minutes,
             "ttr_target_minutes": rows[severity].ttr_target_minutes,
-            "availability_target_pct": rows[severity].availability_target_pct,
         }
         for severity in SEVERITIES
         if severity in rows
@@ -60,7 +59,6 @@ def update_target(
     severity: str,
     tta_target_minutes: int | None = None,
     ttr_target_minutes: int | None = None,
-    availability_target_pct: float | None = None,
 ) -> dict:
     row = db.execute(
         select(SlaTarget).where(SlaTarget.severity == severity)
@@ -70,7 +68,6 @@ def update_target(
             severity=severity,
             tta_target_minutes=tta_target_minutes or 60,
             ttr_target_minutes=ttr_target_minutes or 480,
-            availability_target_pct=availability_target_pct or 99.0,
         )
         db.add(row)
     else:
@@ -78,15 +75,12 @@ def update_target(
             row.tta_target_minutes = tta_target_minutes
         if ttr_target_minutes is not None:
             row.ttr_target_minutes = ttr_target_minutes
-        if availability_target_pct is not None:
-            row.availability_target_pct = availability_target_pct
     db.commit()
     db.refresh(row)
     return {
         "severity": row.severity,
         "tta_target_minutes": row.tta_target_minutes,
         "ttr_target_minutes": row.ttr_target_minutes,
-        "availability_target_pct": row.availability_target_pct,
     }
 
 
@@ -108,41 +102,23 @@ def compliance(
     dégraderait le taux à cause d'alertes qu'on est peut-être en train de
     traiter dans les délais.
     """
-    if (start_at is None) != (end_at is None):
-        raise ValueError("start_at et end_at doivent être fournis ensemble.")
-    if start_at is None:
-        end_at = datetime.now(timezone.utc)
-        start_at = end_at - timedelta(days=days)
+    since = start_at or (datetime.now(timezone.utc) - timedelta(days=days))
     goals = targets(db)
-    ttr_seconds = func.extract(
-        "epoch", AlertState.resolved_at - AlertState.detected_at
-    )
-    target_seconds = case(
-        *[
-            (AlertState.severity_at_pickup == severity, goal.ttr_target_minutes * 60)
-            for severity, goal in goals.items()
-        ],
-        else_=None,
-    )
-    resolved_with_target = case(
-        (
-            AlertState.resolved_at.isnot(None) & target_seconds.isnot(None),
-            1,
-        ),
-        else_=0,
-    )
-    breached = case(
-        (
-            AlertState.resolved_at.isnot(None) & (ttr_seconds > target_seconds),
-            1,
-        ),
-        else_=0,
-    )
 
-    rows = db.execute(
+    # Dépassements comptés EN BASE, alerte par alerte. Les déduire de la
+    # liste /sla/breaches (plafonnée) ou d'une moyenne par gravité donnait un
+    # taux de respect surestimé dès que les dépassements dépassaient la page.
+    target_s = _ttr_target_case(goals)
+    elapsed = func.extract("epoch", AlertState.resolved_at - AlertState.detected_at)
+
+    query = (
         select(
             AlertState.severity_at_pickup.label("severity"),
             func.count().label("total"),
+            func.count(
+                case((and_(AlertState.resolved_at.isnot(None), target_s.isnot(None)), 1))
+            ).label("resolved_with_target"),
+            func.count(case((elapsed > target_s, 1))).label("breached"),
             func.count(AlertState.acknowledged_at).label("acknowledged"),
             func.count(AlertState.resolved_at).label("resolved"),
             func.avg(
@@ -151,19 +127,19 @@ def compliance(
             func.avg(
                 func.extract("epoch", AlertState.resolved_at - AlertState.detected_at)
             ).label("ttr_s"),
-            func.sum(resolved_with_target).label("resolved_with_target"),
-            func.sum(breached).label("breached"),
         )
-        .where(AlertState.detected_at >= start_at, AlertState.detected_at < end_at)
-        .group_by(AlertState.severity_at_pickup)
-    ).all()
+        .where(AlertState.detected_at >= since)
+    )
+    if end_at is not None:
+        query = query.where(AlertState.detected_at < end_at)
+    rows = db.execute(query.group_by(AlertState.severity_at_pickup)).all()
 
     results = []
     for row in rows:
         severity = row.severity or "unknown"
         goal = goals.get(severity)
-        tta_minutes = round(row.tta_s / 60, 1) if row.tta_s else None
-        ttr_minutes = round(row.ttr_s / 60, 1) if row.ttr_s else None
+        tta_minutes = round(row.tta_s / 60, 1) if row.tta_s is not None else None
+        ttr_minutes = round(row.ttr_s / 60, 1) if row.ttr_s is not None else None
 
         results.append(
             {
@@ -171,8 +147,11 @@ def compliance(
                 "alerts": row.total,
                 "acknowledged": row.acknowledged,
                 "resolved": row.resolved,
-                "resolved_with_target": int(row.resolved_with_target or 0),
-                "breached": int(row.breached or 0),
+                # Seules les alertes RÉSOLUES et dotées d'un objectif entrent
+                # dans le taux : une alerte en cours n'a pas encore de délai.
+                "resolved_with_target": row.resolved_with_target,
+                "breached": row.breached,
+                "ttr_compliance_pct": _rate(row.resolved_with_target, row.breached),
                 "mtta_minutes": tta_minutes,
                 "mttr_minutes": ttr_minutes,
                 "tta_target_minutes": goal.tta_target_minutes if goal else None,
@@ -192,12 +171,38 @@ def compliance(
 
     results.sort(key=lambda r: SEVERITIES.index(r["severity"]) if r["severity"] in SEVERITIES else 99)
     return {
-        "period_days": days,
+        "period_days": (
+            max(1, (end_at - since).days) if end_at is not None else days
+        ),
+        "start_at": since.isoformat() if start_at else None,
+        "end_at": end_at.isoformat() if end_at else None,
         "by_severity": results,
         "handled_total": sum(r["alerts"] for r in results),
         "resolved_total": sum(r["resolved_with_target"] for r in results),
         "breached_total": sum(r["breached"] for r in results),
+        "global_compliance_pct": _rate(
+            sum(r["resolved_with_target"] for r in results),
+            sum(r["breached"] for r in results),
+        ),
     }
+
+
+def _ttr_target_case(goals: dict):
+    """Objectif de résolution de chaque ligne, en secondes (NULL sans objectif)."""
+    whens = [
+        (AlertState.severity_at_pickup == severity, goal.ttr_target_minutes * 60)
+        for severity, goal in goals.items()
+        if goal.ttr_target_minutes is not None
+    ]
+    if not whens:
+        return null()
+    return case(*whens, else_=None)
+
+
+def _rate(evaluated: int, breached: int) -> float | None:
+    if not evaluated:
+        return None
+    return round(100.0 * (evaluated - breached) / evaluated, 1)
 
 
 def breaches(
@@ -213,27 +218,17 @@ def breaches(
     pourcentage, mais les cas précis, avec leur cause quand elle a été
     renseignée.
     """
-    if (start_at is None) != (end_at is None):
-        raise ValueError("start_at et end_at doivent être fournis ensemble.")
-    if start_at is None:
-        end_at = datetime.now(timezone.utc)
-        start_at = end_at - timedelta(days=days)
+    since = start_at or (datetime.now(timezone.utc) - timedelta(days=days))
     goals = targets(db)
     if not goals:
         return []
 
     # L'objectif dépend de la gravité : on construit un CASE qui associe à
     # chaque ligne son seuil, plutôt que de faire une requête par gravité.
-    target_case = case(
-        *[
-            (AlertState.severity_at_pickup == severity, goal.ttr_target_minutes * 60)
-            for severity, goal in goals.items()
-        ],
-        else_=None,
-    )
+    target_case = _ttr_target_case(goals)
     elapsed = func.extract("epoch", AlertState.resolved_at - AlertState.detected_at)
 
-    rows = db.execute(
+    query = (
         select(
             AlertState.alert_key,
             AlertState.node_name,
@@ -247,12 +242,14 @@ def breaches(
         )
         .where(
             AlertState.resolved_at.isnot(None),
-            AlertState.detected_at >= start_at,
-            AlertState.detected_at < end_at,
+            AlertState.detected_at >= since,
             elapsed > target_case,
         )
-        .order_by((elapsed - target_case).desc())
-        .limit(limit)
+    )
+    if end_at is not None:
+        query = query.where(AlertState.detected_at < end_at)
+    rows = db.execute(
+        query.order_by((elapsed - target_case).desc()).limit(limit)
     ).all()
 
     return [

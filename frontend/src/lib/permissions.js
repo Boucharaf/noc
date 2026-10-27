@@ -33,7 +33,7 @@ export const ROLE_DESCRIPTION = Object.freeze({
   technicien:
     "Console d'exploitation : traitement des alertes, acquittement, résolution.",
   agent_terrain:
-    "Terrain : tournées, comptes rendus d'intervention, signalement de pannes.",
+    "Terrain : interventions (ordres de travail iTop), signalement de pannes.",
 });
 
 const ALL = [ROLES.DIRECTEUR, ROLES.CHEF_NOC, ROLES.TECHNICIEN, ROLES.AGENT_TERRAIN];
@@ -43,7 +43,8 @@ export const PERMISSIONS = Object.freeze({
   VIEW_DIRECTION: [ROLES.DIRECTEUR],
   VIEW_SUPERVISION: [ROLES.DIRECTEUR, ROLES.CHEF_NOC],
   VIEW_CONSOLE: [ROLES.CHEF_NOC, ROLES.TECHNICIEN],
-  VIEW_TERRAIN: [ROLES.AGENT_TERRAIN, ROLES.CHEF_NOC, ROLES.DIRECTEUR],
+  // Interventions = ordres de travail iTop, en lecture seule.
+  VIEW_INTERVENTIONS: ALL,
 
   // --- Consultation ---
   // routes/incidents.py::_VIEW_HISTORY — l'agent terrain N'A PAS accès à
@@ -57,19 +58,15 @@ export const PERMISSIONS = Object.freeze({
   VIEW_COVERAGE: ALL,
   VIEW_INTEROP: [ROLES.DIRECTEUR, ROLES.CHEF_NOC, ROLES.TECHNICIEN],
 
-  // --- Actions sur incident ---
-  ACKNOWLEDGE_INCIDENT: [ROLES.CHEF_NOC, ROLES.TECHNICIEN, ROLES.AGENT_TERRAIN], // _ACKNOWLEDGE
-  RESOLVE_INCIDENT: [ROLES.CHEF_NOC, ROLES.TECHNICIEN], // _RESOLVE
-  ASSIGN_INCIDENT: [ROLES.CHEF_NOC], // _ASSIGN — le chef de salle seul répartit
-  ESCALATE_INCIDENT: [ROLES.CHEF_NOC, ROLES.TECHNICIEN], // _ESCALATE
-  COMMENT_INCIDENT: ALL, // get_current_user, aucune restriction de rôle
+  // --- Signalements ---
+  // Plus d'acquittement, d'affectation ni de clôture d'alerte dans le NOC :
+  // ce circuit est tenu dans iTop.
   CREATE_MANUAL_INCIDENT: ALL, // _MANUAL
 
   // --- Maintenance ---
-  MANAGE_MAINTENANCE: [ROLES.DIRECTEUR, ROLES.CHEF_NOC, ROLES.TECHNICIEN], // maintenance.py::_MANAGE
-
-  // --- Terrain ---
-  CREATE_FIELD_INTERVENTION: [ROLES.AGENT_TERRAIN, ROLES.CHEF_NOC, ROLES.DIRECTEUR],
+  // Lecture seule : les maintenances se planifient dans iTop (changements)
+  // ou Zabbix, plus dans le NOC.
+  VIEW_MAINTENANCE: ALL,
 
   // --- Administration ---
   DOWNLOAD_REPORT: [ROLES.DIRECTEUR, ROLES.CHEF_NOC], // report.py::_DOWNLOAD
@@ -90,7 +87,7 @@ const HOME_BY_ROLE = {
   [ROLES.DIRECTEUR]: "/direction",
   [ROLES.CHEF_NOC]: "/supervision",
   [ROLES.TECHNICIEN]: "/console",
-  [ROLES.AGENT_TERRAIN]: "/terrain",
+  [ROLES.AGENT_TERRAIN]: "/interventions",
 };
 
 export function homeRoute(role) {

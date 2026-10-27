@@ -1,45 +1,16 @@
-"""
-Fusion des inventaires de plusieurs outils en un parc unique.
-
-LE PROBLÈME. Un même routeur est connu de Zabbix sous `RTR-OUAGA-01`, de
-Centreon sous `rtr-ouaga-01.anptic.bf`, et d'iTop sous « Routeur Ouagadougou
-principal ». Trois outils, trois identifiants, aucun commun. Affiché tel
-quel, le parc compte trois équipements là où il y en a un — et les
-statistiques par site sont fausses d'un facteur trois.
-
-LA RÈGLE. On ne rapproche que sur des preuves, dans cet ordre de confiance :
-
-  1. **adresse IP identique** — c'est une preuve ; deux outils qui supervisent
-     la même IP supervisent la même machine ;
-  2. **nom identique après normalisation** (minuscules, domaine retiré,
-     séparateurs unifiés) — c'est une forte présomption ;
-  3. rien d'autre. Pas de similarité approximative, pas de distance de
-     Levenshtein. Un rapprochement erroné fusionne deux équipements
-     DIFFÉRENTS et fait disparaître un site entier de la supervision : le
-     coût d'un faux positif est bien supérieur à celui d'un doublon visible.
-
-Les rapprochements retenus sont tracés dans `MergeReport`, que l'écran
-Interopérabilité affiche : l'exploitant doit pouvoir contrôler ce que la
-machine a décidé, et corriger les conventions de nommage à la source.
-"""
+"""Consolidate inventories conservatively and report ambiguous identities."""
 from __future__ import annotations
 
 import ipaddress
-import logging
-import re
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
 
-from integrations.models import Alert, NetworkInterface, Node
-from integrations.normalize import worst
+from integrations.models import Alert, Node
+from integrations.normalize import locality_key, worst
 
-logger = logging.getLogger(__name__)
-
-# Ordre de préséance des outils pour les champs en conflit. La supervision
-# prime sur l'ITSM pour l'ÉTAT (elle mesure, iTop déclare), l'ITSM prime pour
-# l'ORGANISATION et le SITE (c'est son métier, et ses données sont saisies).
-STATE_PRIORITY = ("zabbix", "centreon", "netxms", "nagios", "nsp", "itop")
+# Ordre de préférence pour les seuls champs de contexte métier.
+# Les états techniques ne suivent pas de priorité d'outil.
 REFERENCE_PRIORITY = ("itop", "zabbix", "centreon", "netxms", "nagios", "nsp")
 
 _STATE_RANK = {
@@ -61,36 +32,23 @@ class MergedNode:
     hostname: str                 # nom technique — celui qui a servi au rapprochement
     ip: str | None
     state: str
-    enabled: bool
     site: str | None
     latitude: float | None
     longitude: float | None
     organisation: str | None
     node_type: str | None
-    owner: str | None
-    business_service: str | None
-    criticality: str | None
     groups: list[str] = field(default_factory=list)
-    interfaces: list[NetworkInterface] = field(default_factory=list)
-    depends_on: list[str] = field(default_factory=list)
-    impacted_by: list[str] = field(default_factory=list)
-    source_status: str | None = None
-    last_check_at: datetime | None = None
-    next_check_at: datetime | None = None
-    last_output: str | None = None
-    # Dernière mesure reçue — synonyme de last_check_at, mais nommé
-    # explicitement pour que le frontend puisse l'afficher sans ambiguïté.
-    last_metric_at: datetime | None = None
-    # Heure depuis laquelle l'équipement est en panne (`state == "down"`).
-    # None quand l'état n'est pas "down" ou quand on ne connaît pas le début.
-    # Calculé par cycle.py en comparant avec le snapshot précédent.
-    down_since: datetime | None = None
+    province: str | None = None
+    region: str | None = None
     # Traçabilité : quels outils voient cet équipement, et sous quelle
     # référence. Affiché sur la fiche d'équipement — un exploitant qui doute
     # doit pouvoir remonter à la source en un clic.
     sources: dict[str, str] = field(default_factory=dict)
     alerts: int = 0
     worst_severity: str = "unknown"
+    state_conflict: dict[str, str] = field(default_factory=dict)
+    last_known_states: dict[str, str] = field(default_factory=dict)
+    stale_sources: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -101,40 +59,30 @@ class MergeReport:
     total_merged: int = 0
     matched_by_ip: int = 0
     matched_by_name: int = 0
+    matched_by_verified_identity: int = 0
+    ambiguous_total: int = 0
+    ambiguities: list[dict[str, str]] = field(default_factory=list)
+    state_conflicts: list[dict[str, object]] = field(default_factory=list)
     # Équipements qu'un seul outil connaît : souvent le signe d'un défaut de
     # couverture (supervisé par Zabbix mais absent de la CMDB, ou l'inverse).
     single_source: list[str] = field(default_factory=list)
 
 
 def _normalise_name(name: str) -> str:
-    """Nom réduit à ce qui est comparable.
-
-    On retire le domaine, on unifie les séparateurs et la casse. On ne va PAS
-    plus loin : supprimer les chiffres ou les préfixes rapprocherait
-    « RTR-01 » et « RTR-02 », deux équipements bien distincts.
-
-    Une ADRESSE IP n'est pas un nom : NetXMS, et Zabbix pour les hôtes sans
-    DNS, en mettent une à la place du nom technique. « Retirer le domaine »
-    de 192.168.215.41 donnerait « 192 », et tout le plan d'adressage
-    fusionnerait en un seul équipement. L'IP a sa propre règle, plus haut.
-    """
+    """Normalize case and a terminal DNS dot, preserving the full hostname."""
+    if not isinstance(name, str):
+        return ""
     try:
         ipaddress.ip_address(name.strip())
         return ""
     except ValueError:
         pass
-    base = name.strip().lower().split(".", 1)[0]
-    return re.sub(r"[\s_]+", "-", base).strip("-")
+    return name.strip().rstrip(".").casefold()
 
 
 def _valid_ip(value: str | None) -> str | None:
-    """Adresse IP utilisable comme preuve d'identité.
-
-    Les adresses de bouclage et « 0.0.0.0 » sont écartées : Centreon renseigne
-    127.0.0.1 pour tout hôte supervisé localement, et rapprocher sur cette
-    base fusionnerait l'intégralité du parc en un seul équipement.
-    """
-    if not value:
+    """Return a canonical IP hint; an IP alone is never identity proof."""
+    if not isinstance(value, str) or not value.strip():
         return None
     try:
         address = ipaddress.ip_address(value.strip())
@@ -145,81 +93,97 @@ def _valid_ip(value: str | None) -> str | None:
     return str(address)
 
 
+def _valid_coordinates(
+    latitude: float | None, longitude: float | None
+) -> tuple[float, float] | None:
+    if latitude is None or longitude is None:
+        return None
+    if (
+        not math.isfinite(latitude)
+        or not math.isfinite(longitude)
+        or not -90 <= latitude <= 90
+        or not -180 <= longitude <= 180
+    ):
+        return None
+    return latitude, longitude
+
+
 def merge_nodes(nodes: list[Node]) -> tuple[list[MergedNode], MergeReport]:
-    """Rapproche les équipements vus par plusieurs outils."""
+    """Merge only unique cross-source matches with the same full hostname and IP.
+
+    IPs can be shared by virtual services and hostnames can be reused across
+    domains. Requiring both, preserving the full hostname, and rejecting
+    duplicate identities within a source favors a visible duplicate over a
+    destructive false merge.
+    """
     report = MergeReport(total_raw=len(nodes))
+    by_identity: dict[tuple[str, str], list[Node]] = defaultdict(list)
+    by_ip: dict[str, list[Node]] = defaultdict(list)
+    by_name: dict[str, list[Node]] = defaultdict(list)
 
-    # Chaque équipement brut commence dans son propre groupe, puis les groupes
-    # fusionnent par IP puis par nom. Une union-find serait plus élégante ;
-    # deux dictionnaires suffisent ici et se relisent sans effort.
-    groups: dict[str, list[Node]] = {}
-    by_ip: dict[str, str] = {}
-    by_name: dict[str, str] = {}
-
-    for node in nodes:
+    for node in sorted(nodes, key=lambda item: (item.tool, item.ref)):
+        name = _normalise_name(node.hostname or node.name)
         ip = _valid_ip(node.ip)
-        # Le rapprochement porte sur le nom TECHNIQUE, pas sur le libellé.
-        # Zabbix affiche « noc-backend — Application NOC » là où la CMDB dit
-        # « noc-backend » : sur le libellé, les deux ne se rejoindraient
-        # jamais. Voir integrations/models.py::Node.hostname.
-        name_key = _normalise_name(node.hostname or node.name)
-
-        target = None
-        if ip and ip in by_ip:
-            target = by_ip[ip]
-            report.matched_by_ip += 1
-        elif name_key and name_key in by_name:
-            target = by_name[name_key]
-            report.matched_by_name += 1
-
-        # On ne rapproche que des outils DIFFÉRENTS. Deux objets d'un même
-        # outil sont deux équipements pour lui (même IP dans deux zones NetXMS,
-        # homonymes dans deux groupes Zabbix) : les fondre effacerait la
-        # référence de l'un dans `sources`, et ses alertes deviendraient
-        # orphelines.
-        if target is not None and any(m.tool == node.tool for m in groups[target]):
-            if ip and by_ip.get(ip) == target:
-                report.matched_by_ip -= 1
-            else:
-                report.matched_by_name -= 1
-            target = None
-
-        if target is None:
-            target = node.key()
-            groups[target] = []
-
-        groups[target].append(node)
+        if name:
+            by_name[name].append(node)
         if ip:
-            by_ip.setdefault(ip, target)
-        if name_key:
-            by_name.setdefault(name_key, target)
+            by_ip[ip].append(node)
+        if name and ip:
+            by_identity[(name, ip)].append(node)
 
-    merged = [_fold(group_id, members) for group_id, members in groups.items()]
-    source_to_node = {
-        f"{tool}:{ref}": node.id
-        for node in merged
-        for tool, ref in node.sources.items()
-    }
-    for node in merged:
-        dependencies = {
-            source_to_node[source_key]
-            for member in groups[node.id]
-            for source_key in member.depends_on
-            if source_key in source_to_node and source_to_node[source_key] != node.id
-        }
-        node.depends_on = sorted(dependencies)
-    merged_by_id = {node.id: node for node in merged}
-    for node in merged:
-        for dependency_id in node.depends_on:
-            dependency = merged_by_id.get(dependency_id)
-            if dependency is not None:
-                dependency.impacted_by.append(node.id)
-    for node in merged:
-        node.impacted_by = sorted(set(node.impacted_by))
+    def record_ambiguity(reason: str, members: list[Node], identity: str) -> None:
+        report.ambiguous_total += 1
+        if len(report.ambiguities) < 50:
+            report.ambiguities.append(
+                {
+                    "reason": reason,
+                    "identity": identity,
+                    "sources": ", ".join(sorted({node.tool for node in members})),
+                }
+            )
+
+    for ip, members in by_ip.items():
+        names = {_normalise_name(node.hostname or node.name) for node in members}
+        if len(names) > 1:
+            record_ambiguity("shared_ip_with_different_hostnames", members, ip)
+    for name, members in by_name.items():
+        ips = {_valid_ip(node.ip) for node in members}
+        if len(ips) > 1:
+            record_ambiguity("hostname_with_different_ips", members, name)
+
+    groups: list[list[Node]] = []
+    identity_node_ids: set[int] = set()
+    for (name, ip), members in sorted(by_identity.items()):
+        identity_node_ids.update(id(node) for node in members)
+        source_counts: dict[str, int] = defaultdict(int)
+        for node in members:
+            source_counts[node.tool] += 1
+        if any(count > 1 for count in source_counts.values()):
+            record_ambiguity(
+                "duplicate_identity_within_source",
+                members,
+                f"{name}@{ip}",
+            )
+            groups.extend([[node] for node in members])
+        elif len(source_counts) > 1:
+            groups.append(members)
+            matches = len(members) - 1
+            report.matched_by_verified_identity += matches
+        else:
+            groups.extend([[node] for node in members])
+
+    groups.extend([[node] for node in nodes if id(node) not in identity_node_ids])
+    merged = [_fold(members[0].key(), members) for members in groups]
+    _inherit_locality(merged)
     merged.sort(key=lambda n: (_STATE_RANK.get(n.state, 9), n.name.lower()))
 
     report.total_merged = len(merged)
     report.single_source = [n.name for n in merged if len(n.sources) == 1]
+    report.state_conflicts = [
+        {"id": node.id, "states": node.state_conflict}
+        for node in merged
+        if node.state_conflict
+    ]
     return merged, report
 
 
@@ -231,58 +195,58 @@ def _fold(group_id: str, members: list[Node]) -> MergedNode:
     """
     by_tool = {node.tool: node for node in members}
 
-    # ÉTAT : celui de l'outil de supervision le plus prioritaire qui ait un
-    # avis. iTop est exclu — un référentiel ne mesure rien.
-    state = "unknown"
-    for tool in STATE_PRIORITY:
-        node = by_tool.get(tool)
-        if node is not None and node.state != "unknown":
-            state = node.state
-            break
+    # Conflicting observations must not be hidden behind a fixed tool order.
+    fresh_states = {
+        node.tool: node.state
+        for node in members
+        if node.tool != "itop" and not node.stale and node.state != "unknown"
+    }
+    stale_states = {
+        node.tool: node.state
+        for node in members
+        if node.tool != "itop" and node.stale and node.state != "unknown"
+    }
+    # Le conflit se juge entre observations FRAÎCHES. Un état mémorisé d'un
+    # outil momentanément injoignable n'est pas une observation actuelle : le
+    # laisser contredire un outil qui répond rendrait « inconnu » chaque
+    # équipement couvert par l'outil tombé.
+    observed_states = fresh_states or stale_states
+    distinct_states = set(observed_states.values())
+    state_conflict = observed_states if len(distinct_states) > 1 else {}
+    if len(distinct_states) > 1:
+        state = "unknown"
+    elif fresh_states:
+        state = next(iter(fresh_states.values()))
+    elif stale_states:
+        state = "silent"
+    else:
+        state = "unknown"
 
     # NOM et SITE : la source de référence prime (iTop d'abord). Le nom d'un
     # équipement dans la CMDB est celui que l'organisation a choisi ; celui
     # d'un outil de supervision est souvent un identifiant technique.
     name = None
     site = None
+    province = None
+    region = None
     organisation = None
     node_type = None
-    owner = None
-    business_service = None
-    criticality = None
-    latitude = None
-    longitude = None
+    coordinates = None
     for tool in REFERENCE_PRIORITY:
         node = by_tool.get(tool)
         if node is None:
             continue
         name = name or node.name
         site = site or node.site
-        latitude = latitude if latitude is not None else node.latitude
-        longitude = longitude if longitude is not None else node.longitude
+        province = province or node.province
+        region = region or node.region
+        coordinates = coordinates or _valid_coordinates(node.latitude, node.longitude)
         organisation = organisation or node.organisation
         node_type = node_type or node.node_type
-        owner = owner or node.owner
-        business_service = business_service or node.business_service
-        criticality = criticality or node.criticality
 
+    latitude, longitude = coordinates or (None, None)
     ip = next((_valid_ip(n.ip) for n in members if _valid_ip(n.ip)), None)
     groups = sorted({g for node in members for g in node.groups if g})
-    interfaces = {
-        f"{interface.tool}:{interface.ref}": interface
-        for node in members
-        for interface in node.interfaces
-    }
-    last_check_at = max(
-        (node.last_check_at for node in members if node.last_check_at is not None),
-        default=None,
-    )
-    next_check_at = min(
-        (node.next_check_at for node in members if node.next_check_at is not None),
-        default=None,
-    )
-    last_output = next((node.last_output for node in members if node.last_output), None)
-    source_status = next((node.source_status for node in members if node.source_status), None)
     hostname = next(
         (n.hostname for n in members if n.hostname), members[0].name
     )
@@ -293,27 +257,43 @@ def _fold(group_id: str, members: list[Node]) -> MergedNode:
         hostname=hostname,
         ip=ip,
         state=state,
-        # Keep the node enabled while at least one source still monitors it.
-        enabled=any(node.enabled for node in members),
         site=site,
+        province=province,
+        region=region,
         latitude=latitude,
         longitude=longitude,
         organisation=organisation,
         node_type=node_type,
-        owner=owner,
-        business_service=business_service,
-        criticality=criticality,
         groups=groups,
-        interfaces=sorted(interfaces.values(), key=lambda interface: interface.name.lower()),
-        source_status=source_status,
-        last_check_at=last_check_at,
-        next_check_at=next_check_at,
-        last_output=last_output,
-        # last_metric_at reprend last_check_at : c'est la dernière fois qu'un
-        # outil de supervision a interrogé cet équipement et reçu une réponse.
-        last_metric_at=last_check_at,
         sources={node.tool: node.ref for node in members},
+        state_conflict=state_conflict,
+        last_known_states=stale_states if not fresh_states else {},
+        stale_sources=[node.tool for node in members if node.stale],
     )
+
+
+def _inherit_locality(merged: list[MergedNode]) -> None:
+    """Province et région d'un site connu ailleurs dans le parc.
+
+    Seul le référentiel NetXMS rattache un site à sa province ; un hôte
+    Zabbix rangé dans « Site/Ouagadougou — DGI » ne connaît que le site. Si
+    ce nom de site est rattaché sans ambiguïté à une seule province par une
+    autre source, l'équipement en hérite. Un site rattaché à deux provinces
+    différentes n'est pas tranché : mieux vaut « non renseignée » qu'une
+    région fausse dans les statistiques territoriales.
+    """
+    by_site: dict[str, set[tuple[str | None, str | None]]] = defaultdict(set)
+    for node in merged:
+        if node.site and (node.province or node.region):
+            by_site[locality_key(node.site)].add((node.province, node.region))
+    for node in merged:
+        if not node.site or (node.province and node.region):
+            continue
+        candidates = by_site.get(locality_key(node.site), set())
+        if len(candidates) == 1:
+            province, region = next(iter(candidates))
+            node.province = node.province or province
+            node.region = node.region or region
 
 
 def attach_alerts(
@@ -334,10 +314,19 @@ def attach_alerts(
     # Repli par nom normalisé, pour les outils qui ne donnent pas
     # d'identifiant d'équipement sur leurs alertes (iTop rattache un CI par
     # son nom, Nagios n'a que le nom d'hôte).
-    by_name = {}
+    by_name: dict[str, MergedNode] = {}
+    ambiguous_names: set[str] = set()
     for node in merged:
-        by_name[_normalise_name(node.hostname)] = node
-        by_name.setdefault(_normalise_name(node.name), node)
+        for candidate in (node.hostname, node.name):
+            key = _normalise_name(candidate)
+            if not key or key in ambiguous_names:
+                continue
+            previous = by_name.get(key)
+            if previous is not None and previous.id != node.id:
+                ambiguous_names.add(key)
+                by_name.pop(key)
+            else:
+                by_name[key] = node
 
     severities: dict[str, list[str]] = defaultdict(list)
     orphans: list[Alert] = []
@@ -347,11 +336,14 @@ def attach_alerts(
         if alert.node_ref:
             node = index.get(f"{alert.tool}:{alert.node_ref}")
         if node is None and alert.node_name:
-            node = by_name.get(_normalise_name(alert.node_name))
+            name = _normalise_name(alert.node_name)
+            if name not in ambiguous_names:
+                node = by_name.get(name)
         if node is None:
             orphans.append(alert)
             continue
-        severities[node.id].append(alert.severity)
+        if alert.kind == "technical":
+            severities[node.id].append(alert.severity)
 
     for node in merged:
         found = severities.get(node.id, [])

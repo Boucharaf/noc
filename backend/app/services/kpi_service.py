@@ -26,7 +26,7 @@ compromis assumé de l'architecture — voir ARCHITECTURE.md, §5.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -51,13 +51,38 @@ def previous_month(year: int, month: int) -> tuple[int, int]:
 # ---------------------------------------------------------------------------
 # « Maintenant »
 # ---------------------------------------------------------------------------
-async def live_summary() -> dict:
-    """Ce que montre le mur : l'état du parc à cette seconde."""
-    summary = await live_service.fleet_summary()
-    sites = await live_service.sites_summary()
+async def live_summary(
+    db: Session,
+    region: str | None = None,
+    province: str | None = None,
+    site: str | None = None,
+    search: str | None = None,
+) -> dict:
+    """Ce que montre le mur : l'état du parc à cette seconde, sur le
+    périmètre demandé. Les incidents sont ceux d'iTop uniquement ; les
+    alertes, celles des outils de supervision."""
+    from app.services import geo_service
+
+    nodes, alerts, incidents, _index = await geo_service.snapshot(db)
+    scoped = bool(region or province or site or search)
+    if scoped:
+        nodes = geo_service.scope_nodes(nodes, region, province, site, search)
+        ids = {node["id"] for node in nodes}
+        alerts = [a for a in alerts if a.get("node_key") in ids]
+        incidents = [i for i in incidents if i.get("node_key") in ids]
+    summary = await live_service.fleet_summary(nodes, alerts + incidents)
+    sites = await live_service.sites_summary(nodes, alerts)
 
     return {
         **summary,
+        "scope": {"region": region, "province": province, "site": site, "search": search},
+        "incidents_total": len(incidents),
+        "incidents_critical": sum(1 for i in incidents if i.get("severity") == "critical"),
+        "incidents_high": sum(1 for i in incidents if i.get("severity") == "high"),
+        "incidents_unassigned": sum(
+            1 for i in incidents if not (i.get("details") or {}).get("agent")
+        ),
+        "regions_total": len({geo_service.locality_of(n, "region") for n in nodes}),
         "sites_total": len(sites),
         # Un site est « en souffrance » dès qu'un de ses équipements est en
         # panne. Le seuil est volontairement bas : sur un réseau
@@ -69,13 +94,16 @@ async def live_summary() -> dict:
     }
 
 
-async def alerts_by_severity() -> list[dict]:
+async def alerts_by_severity(records: list[dict] | None = None) -> list[dict]:
     """Répartition des alertes actives par gravité.
 
     Toutes les gravités sont rendues, y compris à zéro : un histogramme dont
     les barres apparaissent et disparaissent au fil des alertes est illisible.
     """
-    alerts = await live_service.get_alerts()
+    alerts = [
+        alert for alert in (await live_service.get_alerts() if records is None else records)
+        if alert.get("kind", "technical") == "technical"
+    ]
     counts = {severity: 0 for severity in SEVERITIES}
     for alert in alerts:
         key = alert.get("severity", "unknown")
@@ -83,14 +111,17 @@ async def alerts_by_severity() -> list[dict]:
     return [{"severity": s, "count": counts[s]} for s in SEVERITIES]
 
 
-async def alerts_by_tool() -> list[dict]:
+async def alerts_by_tool(records: list[dict] | None = None) -> list[dict]:
     """D'où viennent les alertes.
 
     Utile au responsable du NOC : un outil qui produit 90 % des alertes est
     soit le seul à superviser quelque chose d'important, soit mal réglé et en
     train de noyer l'équipe. Les deux méritent d'être vus.
     """
-    alerts = await live_service.get_alerts()
+    alerts = [
+        alert for alert in (await live_service.get_alerts() if records is None else records)
+        if alert.get("kind", "technical") == "technical"
+    ]
     counts: dict[str, int] = {}
     for alert in alerts:
         counts[alert.get("tool", "?")] = counts.get(alert.get("tool", "?"), 0) + 1
@@ -100,7 +131,43 @@ async def alerts_by_tool() -> list[dict]:
     ]
 
 
-async def hour_distribution() -> list[dict]:
+_ALERT_AGE_BUCKETS = (
+    ("lt1h", "Moins d'1 heure", 60),
+    ("lt24h", "1 à 24 heures", 1440),
+    ("lt7d", "1 à 7 jours", 10080),
+    ("lt30d", "7 à 30 jours", 43200),
+    ("gt30d", "Plus de 30 jours", None),
+)
+
+
+async def alert_ages(records: list[dict] | None = None) -> list[dict]:
+    """Depuis combien de temps durent les alertes en cours, par tranche.
+
+    Lecture immédiate : beaucoup d'alertes récentes = incident en cours ;
+    beaucoup d'alertes très anciennes = problèmes laissés sans suite.
+    """
+    alerts = [
+        alert for alert in (await live_service.get_alerts() if records is None else records)
+        if alert.get("kind", "technical") == "technical"
+    ]
+    now = datetime.now(timezone.utc)
+    counts = {key: {"count": 0, "critical": 0} for key, _l, _m in _ALERT_AGE_BUCKETS}
+    for alert in alerts:
+        try:
+            since = datetime.fromisoformat(alert.get("since") or "")
+        except (TypeError, ValueError):
+            continue
+        minutes = (now - since).total_seconds() / 60
+        for key, _label, limit in _ALERT_AGE_BUCKETS:
+            if limit is None or minutes < limit:
+                counts[key]["count"] += 1
+                if alert.get("severity") == "critical":
+                    counts[key]["critical"] += 1
+                break
+    return [{"key": key, "label": label, **counts[key]} for key, label, _m in _ALERT_AGE_BUCKETS]
+
+
+async def hour_distribution(records: list[dict] | None = None) -> list[dict]:
     """Répartition horaire des alertes ouvertes, et part hors heures ouvrées.
 
     Répond à une question de dimensionnement d'astreinte : les pannes
@@ -108,7 +175,10 @@ async def hour_distribution() -> list[dict]:
     ACTIVES uniquement — c'est une photographie, pas une statistique
     annuelle, et l'écran doit le dire.
     """
-    alerts = await live_service.get_alerts()
+    alerts = [
+        alert for alert in (await live_service.get_alerts() if records is None else records)
+        if alert.get("kind", "technical") == "technical"
+    ]
     buckets = {hour: 0 for hour in range(24)}
     start_hour, end_hour = NOC_BUSINESS_HOURS
     off_hours = 0
@@ -141,12 +211,28 @@ async def hour_distribution() -> list[dict]:
 # ---------------------------------------------------------------------------
 # « Depuis » — agrégats journaliers
 # ---------------------------------------------------------------------------
+def rollup_key(
+    region: str | None = None, province: str | None = None, site: str | None = None
+) -> str | None:
+    """Ligne de `kpi_daily` du périmètre : site, sinon province, sinon région,
+    sinon la ligne « tout le réseau » (None)."""
+    from collector.rollup import rollup_key as key
+
+    if site:
+        return site
+    if province:
+        return key("province", province)
+    if region:
+        return key("region", region)
+    return None
+
+
 def trend(
     db: Session,
     days: int = 30,
     site: str | None = None,
-    start_date: date | None = None,
-    end_date: date | None = None,
+    start_at: date | datetime | None = None,
+    end_at: date | datetime | None = None,
 ) -> list[dict]:
     """Évolution jour par jour sur la période demandée.
 
@@ -154,14 +240,13 @@ def trend(
     sites : les équipements dont aucun outil ne connaît la localité
     n'appartiennent à aucun site, et les additionner en oublierait une partie.
     """
-    if (start_date is None) != (end_date is None):
-        raise ValueError("start_date et end_date doivent être fournis ensemble.")
-    query = select(KpiDaily)
-    if start_date is not None and end_date is not None:
-        query = query.where(KpiDaily.day >= start_date, KpiDaily.day < end_date)
-    else:
-        since = date.today() - timedelta(days=days)
-        query = query.where(KpiDaily.day >= since)
+    start = (
+        start_at.date() if isinstance(start_at, datetime) else start_at
+    ) or (date.today() - timedelta(days=days))
+    end = end_at.date() if isinstance(end_at, datetime) else end_at
+    query = select(KpiDaily).where(KpiDaily.day >= start)
+    if end is not None:
+        query = query.where(KpiDaily.day < end)
     query = query.where(
         KpiDaily.site == site if site else KpiDaily.site.is_(None)
     )
@@ -185,6 +270,13 @@ def trend(
         }
         for row in rows
     ]
+
+
+def monthly_trend(
+    db: Session, year: int, month: int, site: str | None = None
+) -> list[dict]:
+    start, end = month_bounds(year, month)
+    return trend(db, site=site, start_at=start, end_at=end)
 
 
 def monthly_summary(db: Session, year: int, month: int, site: str | None = None) -> dict:
@@ -214,12 +306,8 @@ def monthly_summary(db: Session, year: int, month: int, site: str | None = None)
 
     current = aggregate(year, month)
     previous = aggregate(*previous_month(year, month))
-    current_reliable = current["days_with_data"] >= 15
-    previous_reliable = previous["days_with_data"] >= 15
 
     def delta(field: str) -> float | None:
-        if not current_reliable or not previous_reliable:
-            return None
         a, b = current.get(field), previous.get(field)
         if a is None or b is None:
             return None
@@ -238,117 +326,67 @@ def monthly_summary(db: Session, year: int, month: int, site: str | None = None)
         },
         # Un mois dont moins de la moitié des jours ont des données ne doit
         # pas être présenté comme comparable. L'écran l'affiche en grisé.
-        "reliable": current_reliable,
-        "previous_reliable": previous_reliable,
+        "reliable": current["days_with_data"] >= 15,
+        # Même règle pour le mois de référence : un écart calculé contre un
+        # mois lacunaire mesure les trous de collecte, pas l'évolution.
+        "previous_reliable": previous["days_with_data"] >= 15,
     }
-
-
-def monthly_trend(db: Session, year: int, month: int, months: int = 12) -> list[dict]:
-    """Monthly fleet averages and NOC-handled alert counts."""
-    month_index = year * 12 + month - 1 - (months - 1)
-    first_year, first_month_index = divmod(month_index, 12)
-    start = date(first_year, first_month_index + 1, 1)
-    _, end = month_bounds(year, month)
-    start_at = datetime.combine(start, datetime.min.time(), UTC)
-    end_at = datetime.combine(end, datetime.min.time(), UTC)
-
-    daily_rows = db.execute(
-        select(
-            func.date_trunc("month", KpiDaily.day).label("period"),
-            func.avg(KpiDaily.avg_alerts).label("avg_alerts"),
-            func.avg(KpiDaily.fleet_availability_pct).label("availability_pct"),
-        )
-        .where(
-            KpiDaily.site.is_(None),
-            KpiDaily.day >= start,
-            KpiDaily.day < end,
-        )
-        .group_by("period")
-    ).all()
-    handled_rows = db.execute(
-        select(
-            func.date_trunc("month", AlertState.detected_at).label("period"),
-            func.count().label("handled"),
-        )
-        .where(AlertState.detected_at >= start_at, AlertState.detected_at < end_at)
-        .group_by("period")
-    ).all()
-    resolved_rows = db.execute(
-        select(
-            func.date_trunc("month", AlertState.resolved_at).label("period"),
-            func.count().label("resolved"),
-        )
-        .where(AlertState.resolved_at >= start_at, AlertState.resolved_at < end_at)
-        .group_by("period")
-    ).all()
-
-    def keyed(rows: list) -> dict[tuple[int, int], object]:
-        return {(row.period.year, row.period.month): row for row in rows}
-
-    daily = keyed(daily_rows)
-    handled = keyed(handled_rows)
-    resolved = keyed(resolved_rows)
-    output = []
-    for offset in range(months):
-        current_index = first_year * 12 + first_month_index + offset
-        current_year, current_month_index = divmod(current_index, 12)
-        key = current_year, current_month_index + 1
-        daily_row = daily.get(key)
-        output.append(
-            {
-                "year": key[0],
-                "month": key[1],
-                "avg_alerts": (
-                    round(daily_row.avg_alerts, 1)
-                    if daily_row and daily_row.avg_alerts is not None
-                    else None
-                ),
-                "availability_pct": (
-                    round(daily_row.availability_pct, 2)
-                    if daily_row and daily_row.availability_pct is not None
-                    else None
-                ),
-                "handled": handled[key].handled if key in handled else 0,
-                "resolved": resolved[key].resolved if key in resolved else 0,
-            }
-        )
-    return output
 
 
 def sites_ranking(
     db: Session,
     days: int = 30,
     limit: int = 20,
-    start_date: date | None = None,
-    end_date: date | None = None,
+    sort: str = "availability",
+    start_at: date | datetime | None = None,
+    end_at: date | datetime | None = None,
+    sites: set[str] | None = None,
 ) -> list[dict]:
-    """Sites classés par disponibilité moyenne, les moins bons d'abord."""
-    if (start_date is None) != (end_date is None):
-        raise ValueError("start_date et end_date doivent être fournis ensemble.")
-    query = (
+    """Sites classés par disponibilité ou par moyenne d'alertes actives.
+
+    `sites` restreint le classement aux sites du périmètre courant. Les
+    agrégats de région et de province (préfixe « @ ») n'en font jamais partie.
+    """
+    start = (
+        start_at.date() if isinstance(start_at, datetime) else start_at
+    ) or (date.today() - timedelta(days=days))
+    end = end_at.date() if isinstance(end_at, datetime) else end_at
+    avg_availability = func.avg(KpiDaily.fleet_availability_pct)
+    avg_alerts = func.avg(KpiDaily.avg_alerts)
+    ordering = (
+        (avg_alerts.desc().nullslast(), func.avg(KpiDaily.avg_critical).desc().nullslast())
+        if sort == "alerts"
+        else (avg_availability.asc().nullslast(),)
+    )
+    conditions = [
+        KpiDaily.day >= start,
+        KpiDaily.site.isnot(None),
+        ~KpiDaily.site.startswith("@"),
+    ]
+    if sites is not None:
+        conditions.append(KpiDaily.site.in_(sorted(sites) or [""]))
+    if end is not None:
+        conditions.append(KpiDaily.day < end)
+    rows = db.execute(
         select(
             KpiDaily.site,
-            func.avg(KpiDaily.fleet_availability_pct).label("availability"),
-            func.avg(KpiDaily.avg_alerts).label("alerts"),
+            avg_availability.label("availability"),
+            avg_alerts.label("alerts"),
+            func.avg(KpiDaily.avg_critical).label("critical"),
             func.avg(KpiDaily.avg_down).label("down"),
             func.avg(KpiDaily.avg_nodes).label("nodes"),
         )
-        .where(KpiDaily.site.isnot(None))
+        .where(*conditions)
         .group_by(KpiDaily.site)
-        .order_by(func.avg(KpiDaily.fleet_availability_pct).asc().nullslast())
+        .order_by(*ordering, KpiDaily.site.asc())
         .limit(limit)
     )
-    if start_date is not None and end_date is not None:
-        query = query.where(KpiDaily.day >= start_date, KpiDaily.day < end_date)
-    else:
-        since = date.today() - timedelta(days=days)
-        query = query.where(KpiDaily.day >= since)
-    rows = db.execute(query)
     return [
         {
             "site": row.site,
             "availability_pct": round(row.availability, 2) if row.availability is not None else None,
             "avg_alerts": round(row.alerts, 1) if row.alerts is not None else None,
+            "avg_critical": round(row.critical, 1) if row.critical is not None else None,
             "avg_down": round(row.down, 1) if row.down is not None else None,
             "avg_nodes": round(row.nodes, 1) if row.nodes is not None else None,
         }
@@ -373,19 +411,14 @@ def causes(
     venait d'un groupe électrogène à sec. Elle vient de `ops_alert_state`,
     renseignée à la clôture par le technicien.
     """
-    if (start_at is None) != (end_at is None):
-        raise ValueError("start_at et end_at doivent être fournis ensemble.")
-    if start_at is None:
-        end_at = datetime.now(UTC)
-        start_at = end_at - timedelta(days=days)
+    since = start_at or (datetime.now(timezone.utc) - timedelta(days=days))
+    query = select(AlertState.cause, func.count().label("count")).where(
+        AlertState.cause.isnot(None), AlertState.resolved_at >= since
+    )
+    if end_at is not None:
+        query = query.where(AlertState.resolved_at < end_at)
     rows = db.execute(
-        select(AlertState.cause, func.count().label("count"))
-        .where(
-            AlertState.cause.isnot(None),
-            AlertState.resolved_at >= start_at,
-            AlertState.resolved_at < end_at,
-        )
-        .group_by(AlertState.cause)
+        query.group_by(AlertState.cause)
         .order_by(func.count().desc())
         .limit(limit)
     )
@@ -409,49 +442,50 @@ def resolution_times(
     service. Le délai de détection de l'outil est une autre question, et
     elle appartient à l'outil.
     """
-    if (start_at is None) != (end_at is None):
-        raise ValueError("start_at et end_at doivent être fournis ensemble.")
-    if start_at is None:
-        end_at = datetime.now(UTC)
-        start_at = end_at - timedelta(days=days)
+    since = start_at or (datetime.now(timezone.utc) - timedelta(days=days))
 
-    tta = db.execute(
-        select(
-            func.avg(
-                func.extract("epoch", AlertState.acknowledged_at - AlertState.detected_at)
-            )
-        ).where(
-            AlertState.acknowledged_at.isnot(None),
-            AlertState.detected_at.isnot(None),
-            AlertState.acknowledged_at >= start_at,
-            AlertState.acknowledged_at < end_at,
+    tta_query = select(
+        func.avg(
+            func.extract("epoch", AlertState.acknowledged_at - AlertState.detected_at)
         )
-    ).scalar()
+    ).where(
+        AlertState.acknowledged_at.isnot(None),
+        AlertState.detected_at.isnot(None),
+        AlertState.acknowledged_at >= since,
+    )
+    if end_at is not None:
+        tta_query = tta_query.where(AlertState.acknowledged_at < end_at)
+    tta = db.execute(tta_query).scalar()
 
-    ttr = db.execute(
-        select(
-            func.avg(
-                func.extract("epoch", AlertState.resolved_at - AlertState.detected_at)
-            )
-        ).where(
-            AlertState.resolved_at.isnot(None),
-            AlertState.detected_at.isnot(None),
-            AlertState.resolved_at >= start_at,
-            AlertState.resolved_at < end_at,
+    ttr_query = select(
+        func.avg(
+            func.extract("epoch", AlertState.resolved_at - AlertState.detected_at)
         )
-    ).scalar()
+    ).where(
+        AlertState.resolved_at.isnot(None),
+        AlertState.detected_at.isnot(None),
+        AlertState.resolved_at >= since,
+    )
+    if end_at is not None:
+        ttr_query = ttr_query.where(AlertState.resolved_at < end_at)
+    ttr = db.execute(ttr_query).scalar()
 
-    handled = db.execute(
-        select(func.count())
-        .select_from(AlertState)
-        .where(AlertState.resolved_at >= start_at, AlertState.resolved_at < end_at)
-    ).scalar()
+    handled_query = select(func.count()).select_from(AlertState).where(
+        AlertState.resolved_at >= since
+    )
+    if end_at is not None:
+        handled_query = handled_query.where(AlertState.resolved_at < end_at)
+    handled = db.execute(handled_query).scalar()
 
     return {
-        "period_days": days,
+        "period_days": (
+            max(1, (end_at - since).days) if end_at is not None else days
+        ),
         # En minutes : un délai d'astreinte se raisonne en minutes, et
         # afficher 14 400 secondes oblige chacun à diviser de tête.
-        "mtta_minutes": round(tta / 60, 1) if tta else None,
-        "mttr_minutes": round(ttr / 60, 1) if ttr else None,
+        # `is not None` et non une valeur de vérité : un délai moyen nul est
+        # une mesure, pas une absence de mesure.
+        "mtta_minutes": round(tta / 60, 1) if tta is not None else None,
+        "mttr_minutes": round(ttr / 60, 1) if ttr is not None else None,
         "handled_alerts": int(handled or 0),
     }

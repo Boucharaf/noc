@@ -37,12 +37,16 @@ famille différemment.
 |---|---|---|---|
 | **Exemples** | équipements et leur état, alertes actives, disponibilité des outils | courbes de métriques, incidents clos, tickets résolus | comptes et rôles, acquittements, notes d'exploitation, fenêtres de maintenance, incidents signalés à la main, abonnements aux notifications |
 | **Propriétaire** | l'outil source | l'outil source | **le NOC** |
-| **Où ça vit chez nous** | **Redis**, réécrit intégralement toutes les 300 s | **nulle part** — requête à la demande vers la source, cache Redis à TTL long | **PostgreSQL**, petite base |
+| **Où ça vit chez nous** | **Redis**, instantané réécrit toutes les 300 s et dernière collecte complète par flux | **nulle part** — requête à la demande vers la source, cache Redis à TTL long | **PostgreSQL**, petite base |
 | **Perte acceptable ?** | oui : reconstruit au cycle suivant | oui : la source fait foi | **non** : irrécupérable |
 | **Volume** | ~10 à 50 Mo de RAM | 0 | quelques Mo |
 
-Le critère est simple et se tient : **on ne persiste que ce qu'aucun outil
-source ne saurait nous redonner.**
+Le NOC ne conserve pas de série historique source. Redis garde seulement la
+dernière collecte complète par flux pour éviter qu'une panne temporaire d'un
+outil efface les équipements ou alertes encore pertinents ; ces données sont
+marquées périmées jusqu'à la reprise de la collecte. Un cache incomplet,
+mal formé ou sans date de collecte exploitable est rejeté en entier : une
+liste partielle ne doit pas être présentée comme le dernier succès complet.
 
 ## 3. Schéma d'ensemble
 
@@ -142,9 +146,9 @@ lui seul.
 |---|---|---|---|
 | `noc:live:nodes` | string (JSON) | tous les équipements normalisés, fusionnés entre outils | `3 × COLLECT_INTERVAL_S` |
 | `noc:live:alerts` | string (JSON) | alertes actives, tous outils confondus | `3 × COLLECT_INTERVAL_S` |
-| `noc:live:sla-targets` | string (JSON) | objectifs SLT lus chez les outils sources, notamment iTop | `3 × COLLECT_INTERVAL_S` |
 | `noc:live:meta` | string (JSON) | horodatage du cycle, durée, compteurs | `3 × COLLECT_INTERVAL_S` |
 | `noc:tool:<outil>` | string (JSON) | joignabilité, latence, dernier succès, dernière erreur | `3 × COLLECT_INTERVAL_S` |
+| `noc:source:<outil>:nodes|alerts` | string (JSON) | dernière collecte complète de chaque flux pour reprise et affichage périmé | sans expiration |
 | `noc:hist:<outil>:<empreinte>` | string (JSON) | réponse d'historique mise en cache | selon la fenêtre demandée |
 
 **La durée de vie de trois cycles est un choix de sûreté**, pas un réglage
@@ -152,7 +156,10 @@ arbitraire : si le collecteur meurt, les clés expirent au bout de quinze
 minutes et le backend cesse de servir un état périmé — il répond
 explicitement « collecte interrompue » plutôt que d'afficher un parc
 faussement calme. Un instantané muet est un incident, pas une absence
-d'incident.
+d'incident. Les instantanés source distincts servent uniquement de reprise
+après une défaillance d'outil : les objets réutilisés portent `stale=true`,
+les équipements dont aucun état frais n'est disponible passent à `silent`,
+et l'écran d'interopérabilité montre la date de la dernière collecte valide.
 
 ## 5. Ce que l'architecture coûte, et ce qu'elle exige
 

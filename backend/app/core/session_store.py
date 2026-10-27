@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 REFRESH_KEY = "refresh:{jti}"
 USER_SESSIONS_KEY = "refresh_user:{user_id}"
+ROTATED_REFRESH_KEY = "refresh_rotated:{jti}"
 # Instant (en secondes) avant lequel les jetons d'accès d'un compte sont
 # refusés. Sans lui, un jeton d'accès volé resterait valable jusqu'à son
 # expiration, même après une réinitialisation de mot de passe.
@@ -33,6 +34,57 @@ LOCK_KEY = "auth_locked:{scope}:{subject}"
 PIN_MAX_ATTEMPTS = 5
 PIN_LOCK_WINDOW_SECONDS = 15 * 60
 
+_STORE_REFRESH_SCRIPT = """
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+redis.call('SADD', KEYS[2], ARGV[3])
+for _, jti in ipairs(redis.call('SMEMBERS', KEYS[2])) do
+    if redis.call('EXISTS', ARGV[4] .. jti) == 0 then
+        redis.call('SREM', KEYS[2], jti)
+    end
+end
+return 1
+"""
+
+_ROTATE_REFRESH_SCRIPT = """
+local current = redis.call('GET', KEYS[1])
+if not current then
+    if redis.call('EXISTS', KEYS[4]) == 1 then
+        return 1
+    end
+    return 0
+end
+if current ~= ARGV[1] then
+    return 0
+end
+
+redis.call('DEL', KEYS[1])
+redis.call('SREM', KEYS[2], ARGV[2])
+redis.call('SET', KEYS[3], ARGV[1], 'EX', ARGV[3])
+redis.call('SADD', KEYS[2], ARGV[4])
+redis.call('SET', KEYS[4], ARGV[4], 'EX', ARGV[5])
+for _, jti in ipairs(redis.call('SMEMBERS', KEYS[2])) do
+    if redis.call('EXISTS', ARGV[6] .. jti) == 0 then
+        redis.call('SREM', KEYS[2], jti)
+    end
+end
+return 2
+"""
+
+_REVOKE_ONE_SCRIPT = """
+redis.call('DEL', KEYS[1], KEYS[3])
+redis.call('SREM', KEYS[2], ARGV[1])
+return 1
+"""
+
+_REVOKE_ALL_SCRIPT = """
+for _, jti in ipairs(redis.call('SMEMBERS', KEYS[1])) do
+    redis.call('DEL', ARGV[1] .. jti)
+end
+redis.call('DEL', KEYS[1])
+redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
+return 1
+"""
+
 
 def _ttl_seconds(expire_at) -> int:
     from datetime import datetime
@@ -42,8 +94,16 @@ def _ttl_seconds(expire_at) -> int:
 
 def store_refresh_session(user_id: int, jti: str, expire_at) -> None:
     ttl = _ttl_seconds(expire_at)
-    redis_client.set(REFRESH_KEY.format(jti=jti), user_id, ex=ttl)
-    redis_client.sadd(USER_SESSIONS_KEY.format(user_id=user_id), jti)
+    redis_client.eval(
+        _STORE_REFRESH_SCRIPT,
+        2,
+        REFRESH_KEY.format(jti=jti),
+        USER_SESSIONS_KEY.format(user_id=user_id),
+        user_id,
+        ttl,
+        jti,
+        "refresh:",
+    )
 
 
 def is_refresh_session_valid(jti: str, user_id: int) -> bool:
@@ -51,18 +111,38 @@ def is_refresh_session_valid(jti: str, user_id: int) -> bool:
     return stored_user_id is not None and int(stored_user_id) == user_id
 
 
-def rotate_refresh_session(old_jti: str, user_id: int, new_jti: str, new_expire_at) -> None:
-    """Invalide l'ancien jti et enregistre le nouveau. Appelé uniquement
-    après validation de old_jti : un ancien refresh token rejoué après
-    rotation retombera sur is_refresh_session_valid() == False."""
-    redis_client.delete(REFRESH_KEY.format(jti=old_jti))
-    redis_client.srem(USER_SESSIONS_KEY.format(user_id=user_id), old_jti)
-    store_refresh_session(user_id, new_jti, new_expire_at)
+def rotate_refresh_session(
+    old_jti: str, user_id: int, new_jti: str, new_expire_at
+) -> str:
+    """Fait une rotation atomique, en tolérant un bref doublon de requêtes."""
+    result = redis_client.eval(
+        _ROTATE_REFRESH_SCRIPT,
+        4,
+        REFRESH_KEY.format(jti=old_jti),
+        USER_SESSIONS_KEY.format(user_id=user_id),
+        REFRESH_KEY.format(jti=new_jti),
+        ROTATED_REFRESH_KEY.format(jti=old_jti),
+        user_id,
+        old_jti,
+        _ttl_seconds(new_expire_at),
+        new_jti,
+        5,
+        "refresh:",
+    )
+    return {0: "invalid", 1: "recently_rotated", 2: "rotated"}.get(
+        int(result), "invalid"
+    )
 
 
 def revoke_refresh_session(jti: str, user_id: int) -> None:
-    redis_client.delete(REFRESH_KEY.format(jti=jti))
-    redis_client.srem(USER_SESSIONS_KEY.format(user_id=user_id), jti)
+    redis_client.eval(
+        _REVOKE_ONE_SCRIPT,
+        3,
+        REFRESH_KEY.format(jti=jti),
+        USER_SESSIONS_KEY.format(user_id=user_id),
+        ROTATED_REFRESH_KEY.format(jti=jti),
+        jti,
+    )
 
 
 def revoke_all_sessions(user_id: int) -> None:
@@ -73,15 +153,14 @@ def revoke_all_sessions(user_id: int) -> None:
     Les jetons d'accès déjà émis tombent aussi, sans attendre leur
     expiration. La marque n'a pas à survivre au plus long d'entre eux.
     """
-    key = USER_SESSIONS_KEY.format(user_id=user_id)
-    jtis = redis_client.smembers(key)
-    if jtis:
-        redis_client.delete(*(REFRESH_KEY.format(jti=j) for j in jtis))
-    redis_client.delete(key)
-    redis_client.set(
+    redis_client.eval(
+        _REVOKE_ALL_SCRIPT,
+        2,
+        USER_SESSIONS_KEY.format(user_id=user_id),
         ACCESS_REVOKED_KEY.format(user_id=user_id),
+        "refresh:",
         int(time.time()),
-        ex=JWT_EXPIRATION_MINUTES * 60 + 60,
+        JWT_EXPIRATION_MINUTES * 60 + 60,
     )
 
 

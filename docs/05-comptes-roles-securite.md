@@ -27,11 +27,10 @@ Droits réellement appliqués par le backend :
 | Consulter l'état du réseau, les alertes, les équipements, les SLA | ✅ | ✅ | ✅ | ✅ |
 | Acquitter, affecter, résoudre une alerte | ✅ | ✅ | ✅ | — |
 | Ajouter une note à une alerte | ✅ | ✅ | ✅ | ✅ |
-| Signaler / clore un incident manuel | ✅ | ✅ | ✅ | ✅ |
-| Créer / supprimer une fenêtre de maintenance | ✅ | ✅ | — | — |
+| Signaler / clore un incident manuel | ✅ | ✅ | ✅ | ✅* |
+| Consulter les maintenances (planifiées dans iTop / Zabbix) | ✅ | ✅ | ✅ | ✅ |
 | Modifier les cibles SLA | ✅ | ✅ | — | — |
-| Programmer une intervention terrain | ✅ | ✅ | ✅ | — |
-| Faire avancer une intervention, rendre compte | ✅ | ✅ | ✅ | ✅ |
+| Consulter les interventions (ordres de travail iTop) | ✅ | ✅ | ✅ | ✅ |
 | Télécharger le rapport mensuel | ✅ | ✅ | — | — |
 | **Créer un compte, attribuer un rôle, désactiver, réinitialiser un mot de passe ou un PIN** | — | ✅ | — | — |
 | Couper les sessions d'un utilisateur | — | ✅ | — | — |
@@ -39,9 +38,13 @@ Droits réellement appliqués par le backend :
 | **Modifier ses propres identifiants** (identifiant, nom, téléphone, courriel, mot de passe, abonnement aux alertes) | ✅ | ✅ | ✅ | ✅ |
 | Modifier **son propre rôle** | — | — | — | — |
 
-> Quelques écarts existent entre ce tableau et ce que l'interface affiche (par
-> exemple, l'interface propose au technicien de créer une maintenance, que le
-> backend refuse). Ils sont listés au [chapitre 10](10-etat-du-projet.md).
+* Un agent terrain ne peut signaler un incident que sur son site affecté ; la
+  création est refusée si aucun site n'est affecté.
+
+Les permissions du frontend ne sont qu'un contrôle d'affichage. Les routes
+backend restent l'autorité ; les tests de régression couvrent notamment les
+actions terrain et les routes d'exploitation. Toute évolution des droits doit
+mettre à jour les deux côtés.
 
 ## La gestion des comptes
 
@@ -101,8 +104,10 @@ sequenceDiagram
 |---|---|
 | Mots de passe | Empreinte **bcrypt**, **12 caractères minimum** (72 octets au plus). Les comptes créés avant gardent leur mot de passe jusqu'au prochain changement. |
 | Verrouillage | Après **10 échecs** sur un compte depuis une même adresse, **50** sur un compte toutes adresses confondues, ou **30** depuis une adresse tous comptes confondus, la connexion est bloquée **15 minutes** (réglable : `LOGIN_*`). Le changement de mot de passe compte dans les mêmes compteurs. nginx limite en plus `/api/auth/login` et `/api/auth/pin-login` à 30 requêtes par minute par adresse. |
+| Limitation applicative | `RATE_LIMIT_ENABLED` active les quotas Redis middleware sur `/api/*`: limites IP (`RATE_LIMIT_READ_PER_MIN`, `RATE_LIMIT_WRITE_PER_MIN`) et par utilisateur authentifié (`RATE_LIMIT_USER_READ_PER_MIN`, `RATE_LIMIT_USER_WRITE_PER_MIN`). Les erreurs Redis sont journalisées et restent en mode ouvert. `TRUSTED_PROXY_IPS` doit contenir nginx (`NGINX_API_PROXY_IP`, par défaut `172.31.250.4`) pour interpréter `X-Real-IP`. |
+| Routes internes | `INTERNAL_API_KEY` protège les tâches internes, notamment `POST /api/internal/reports/monthly`; l'en-tête attendu est `Authorization: Bearer <clé>`. Sans clé configurée, ces routes répondent 503. |
 | Jeton d'accès | JWT signé avec `SECRET_KEY`, 30 minutes (`ACCESS_TOKEN_EXPIRE_MINUTES`), gardé **en mémoire** par le navigateur, jamais dans le stockage local. **Révoqué immédiatement** quand les sessions du compte sont coupées (mot de passe changé ou réinitialisé, rôle modifié, compte désactivé). |
-| Jeton de rafraîchissement | JWT de 7 jours dans un cookie `httpOnly` limité à `/api/auth`. Chaque utilisation le remplace ; **réutiliser un ancien jeton coupe toutes les sessions du compte** (signe de vol). |
+| Jeton de rafraîchissement | JWT de 7 jours dans un cookie `httpOnly` limité à `/api/auth`. Chaque utilisation le remplace. Un doublon concurrent détecté dans la fenêtre de 5 secondes reçoit HTTP 409 sans effacer le nouveau cookie ; un rejeu hors de cette fenêtre coupe toutes les sessions du compte. |
 | Sessions | Enregistrées dans Redis : c'est ce qui permet de les révoquer. |
 | Connexion par PIN | Réservée aux **agents terrain** (confort sur téléphone). **6 chiffres** pour tout nouveau code (les codes plus courts déjà définis restent acceptés jusqu'à leur remplacement). Deux comptes actifs ne peuvent pas partager un code. Empreinte **HMAC-SHA256** dont la clé est `SECRET_KEY` : changer cette clé oblige à redéfinir les PIN. Après **5 échecs**, l'adresse IP est bloquée **15 minutes**. Le PIN est un facteur faible, jamais disponible pour les autres rôles. |
 | WebSocket | Le jeton est envoyé dans la **première trame**, pas dans l'URL (qui finirait dans les journaux du proxy). Le compte est relu en base à la connexion, et le flux est **fermé à l'expiration du jeton** ; le navigateur se reconnecte avec le jeton rafraîchi. |
@@ -122,10 +127,10 @@ sequenceDiagram
 
 | Couche | Mesure |
 |---|---|
-| Réseau | Le backend n'a **aucun port publié** : seul nginx le joint. La base du NOC et les interfaces des outils de laboratoire sont publiées sur `127.0.0.1` seulement. Redis exige un mot de passe (`REDIS_PASSWORD`). |
+| Réseau | Le backend n'a **aucun port publié** : seul nginx le joint via un réseau privé dédié. La base du NOC et les interfaces des outils de laboratoire sont publiées sur `127.0.0.1` seulement. Redis exige un mot de passe (`REDIS_PASSWORD`). |
 | Passerelle nginx | TLS 1.2/1.3 à suites AEAD, en-têtes `Content-Security-Policy`, `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy` ; version masquée ; limitation de débit sur la connexion. |
-| API | Documentation `/docs` fermée (`API_DOCS_ENABLED`). CORS limité aux origines, méthodes et en-têtes utiles, `*` refusé. Réponses `/api` en `Cache-Control: no-store`. Aucune trace d'exception renvoyée au client (santé, rapports). Paramètres bornés en longueur et énumérations ancrées. |
-| Terrain | Un agent terrain ne lit et ne fait avancer que **ses** interventions. |
+| API | Documentation `/docs` fermée (`API_DOCS_ENABLED`). CORS limité aux origines, méthodes et en-têtes utiles, `*` refusé. Le limiteur générique (100 lectures/minute, 30 écritures/minute par défaut) n'est pas encore branché aux routes ; la connexion a ses compteurs d'échecs applicatifs et une limite nginx dédiée. `X-Real-IP` n'est pris en compte que depuis le proxy nginx de confiance. Réponses `/api` en `Cache-Control: no-store`. Aucune trace d'exception renvoyée au client (santé, rapports). Paramètres bornés en longueur et énumérations ancrées. |
+| Terrain | Les interventions s'affectent et se suivent dans iTop ; le NOC les affiche en lecture seule. |
 | Notifications | Un abonnement push n'est accepté que vers les services de push des navigateurs (`PUSH_ALLOWED_HOSTS`) : le backend ne peut pas être détourné vers le réseau interne. |
 | Connecteurs | Redirections HTTP non suivies (un mot de passe iTop ne part pas vers un autre hôte) ; avertissement au démarrage si `*_VERIFY_SSL=false` sur une URL HTTPS. |
 | Conteneurs | Processus Python sans privilèges, `no-new-privileges` sur les services de la plateforme, dépendances épinglées et auditées (`npm ci` pour le frontend). |

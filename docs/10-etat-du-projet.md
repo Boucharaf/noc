@@ -1,6 +1,6 @@
 # 10. État du projet
 
-> État au **10 septembre 2026**. À tenir à jour à chaque évolution notable :
+> État au **9 octobre 2026**. À tenir à jour à chaque évolution notable :
 > c'est le premier document qu'une équipe qui reprend le projet doit lire pour
 > ne pas tomber dans les mêmes pièges.
 
@@ -8,108 +8,92 @@
 
 | Fonction | Vérification |
 |---|---|
-| **Comptes et rôles** : création réservée au Chef NOC, attribution des rôles, auto-modification des identifiants sans le rôle, garde-fous (auto-rétrogradation, identifiant déjà pris, mot de passe requis), réinitialisation, coupure des sessions | Recette automatisée de 30 contrôles sur l'API |
-| **Alertes par courriel** : abonnés + listes fixes, test depuis l'interface, alerte temps réel reçue une seule fois malgré deux backends, incident manuel grave notifié, gravité moyenne ignorée, contenu échappé, journalisation | Recette de bout en bout avec Mailpit |
-| **NetXMS par la base** : 1 409 équipements, 791 alarmes, sites issus du référentiel de l'agence (1 255 équipements situés), compte de lecture confiné (secrets refusés, écriture impossible) | Sur le dump de production restauré |
-| **Fusion des équipements** : pas de fusion sur une IP prise pour un nom, pas de fusion au sein d'un même outil | Test synthétique et données réelles |
-| **Interface** : les 23 écrans s'affichent sans erreur pour les quatre rôles ; la fiche d'incident s'ouvre | Recette automatisée dans un navigateur (Edge) |
+| **Qualité des données** : normalisation, fusion, erreurs de source et couverture de collecte ; les erreurs d'historique ne sont pas converties en séries vides | Suite backend ciblée : 16 tests réussis dans Docker |
+| **Disponibilité** : les maintenances planifiées sont exclues du dénominateur ; un état inconnu ou muet n'est pas compté disponible | Tests des services temps réel et des agrégats journaliers |
+| **Sessions** : rotation atomique, doublon concurrent, rejeu et révocations | Tests unitaires et vérification des scripts Lua sur un Redis temporaire réel |
+| **Droits terrain et SLA** : signalement limité au site affecté d'un agent terrain ; seuls les objectifs TTA/TTR mesurés sont modifiables | Tests backend ciblés |
+| **Sécurité des tests d'intégration** : refus d'exécuter le script historique sans URL PostgreSQL dédiée terminant par `_test` ou `_tests` | Test du garde-fou ; le script complet n'a pas été exécuté sur une base |
+| **Construction** : configuration Compose, images backend/collecteur, build et lint frontend | Commandes Docker Compose et npm réussies |
+
+Ces contrôles sont des tests automatisés ciblés, pas une recette de bout en
+bout sur les outils de production de l'agence.
 
 ## Limites connues et dette technique
 
-Classées par importance.
+### 1. Recette d'intégration à compléter
 
-### 1. Couche de compatibilité du frontend
+- Le script `backend/tests/test_integration.py` écrit et supprime des données
+  dans un schéma historique (`dim_*`, `fact_*`) ; son garde-fou protège les
+  bases non dédiées, mais le scénario doit être réécrit pour le schéma actuel.
+- Les connecteurs **Nagios et Nokia NSP** n'ont pas été validés sur des
+  instances réelles. Les modes `NAGIOS_MODE` et `NSP_FM_MODE` sont à confirmer
+  avec l'agence.
+- Les tests backend disponibles ne remplacent pas une recette avec les vraies
+  versions des outils, leurs permissions de lecture seule et les données de
+  l'agence.
 
-Les écrans ont été écrits pour l'ancienne API. Des adaptations dans
-`frontend/src/hooks/queries.js` les font fonctionner (voir
-[chapitre 8](08-frontend.md#la-couche-de-compatibilité--à-connaître-absolument)),
-mais :
+### 2. Historique et indicateurs
 
-- certaines données **n'existent plus** et s'affichent vides ou « — » : carte
-  des sites (pas de coordonnées dans l'instantané), agrégat par ministère,
-  région, MTTR par site, date de mise hors service d'un équipement, bande « pire
-  équipement » des courbes ;
-- les **indicateurs réseau** (latence, pertes, CPU, trafic) ne s'affichent que
-  si un outil de mesure (Zabbix, Centreon) est branché ;
-- les **actions** de la fiche d'incident (acquitter, affecter, escalader,
-  commenter, résoudre) passent par une traduction d'arguments qui n'a pas été
-  testée en cliquant ;
-- le **lien profond** vers une alerte (`/incidents?id=…`) attend encore un
-  identifiant numérique ; les courriels pointent vers la liste des incidents.
+- `kpi_daily` se remplit à partir des cycles du collecteur ; il ne reconstitue
+  pas les jours antérieurs à son démarrage. Les anciens agrégats ne sont pas
+  recalculés automatiquement après le changement de règle de maintenance.
+- Si la lecture des fenêtres de maintenance échoue ou dépasse le délai, le
+  collecteur omet l'échantillon journalier concerné et le signale plutôt que
+  de calculer une disponibilité en supposant à tort qu'il n'y a aucune
+  maintenance.
+- Les courbes réseau sont calculées sur un échantillon plafonné à 50
+  équipements. L'API et l'interface indiquent les tailles de population,
+  d'échantillon et de contribution ainsi que les erreurs de sources.
+- Les coordonnées cartographiques et les organisations dépendent des données
+  publiées par les sources. L'agrégat « par ministère » de l'ancienne version
+  n'est plus alimenté ; l'interface peut donc afficher cette section vide.
+- La cible de disponibilité réseau n'est pas un SLA mesuré. Seules les cibles
+  TTA/TTR sont configurables et évaluées.
 
-**Cible** : réécrire chaque écran sur les hooks natifs, puis supprimer la
-couche. Commencer par les écrans d'accueil.
+### 3. Sources figées et notifications
 
-### 2. Écarts de permissions entre interface et backend
+- Le dump NetXMS est une photographie arrêtée au **7 août 2026** : il ne
+  contient pas de nouvelles alertes après cette date. Les 71 alarmes orphelines
+  identifiées lors de l'inspection du dump ne sont pas rattachées à des
+  équipements ou interfaces connus.
+- Une notification sortante échouée est journalisée mais **n'est pas retentée**.
+- Au démarrage du collecteur, les alertes déjà présentes ne sont pas
+  renotifiées : cela évite un envoi massif lors d'une reprise.
 
-L'interface montre des boutons que le backend refuse, ou l'inverse :
-
-| Action | Interface | Backend |
-|---|---|---|
-| Acquitter une alerte | chef NOC, technicien, **agent terrain** | **directeur**, chef NOC, technicien |
-| Créer une maintenance | directeur, chef NOC, **technicien** | directeur, chef NOC |
-| Programmer une intervention | **agent terrain**, chef NOC, directeur | directeur, chef NOC, **technicien** |
-
-Trancher la règle métier voulue, puis aligner `frontend/src/lib/permissions.js`
-et les tuples de rôles des routes.
-
-### 3. Pas de tests automatisés à jour
-
-`backend/tests/test_integration.py` vise les tables de l'ancien entrepôt
-(`dim_*`, `fact_*`) : il ne fonctionne plus. Aucun test frontend, aucune
-intégration continue. Les recettes réalisées lors des dernières évolutions
-(comptes, courriels, écrans) étaient des scripts ponctuels : les transformer en
-tests permanents est la priorité pour sécuriser les évolutions.
-
-### 4. Sécurité avant exposition réseau
+### 4. Déploiement et sécurité opérationnelle
 
 - Le durcissement réseau, API et authentification est décrit au
-  [chapitre 5](05-comptes-roles-securite.md#durcissement-en-place), avec la
-  liste de ce qu'il reste à faire avant une mise en production.
+  [chapitre 5](05-comptes-roles-securite.md#durcissement-en-place). Une
+  recette de production reste nécessaire : certificat de l'agence, secrets
+  propres à l'environnement et exposition réseau limitée.
 - **Identifiants de production exposés** : les commits `2d1131d` et `8fdf1d9`
   de l'historique git contiennent, dans `.env.example`, le mot de passe et le
   jeton d'API du Zabbix de l'agence ainsi que le compte iTop. Ils doivent être
   **changés chez l'agence** ; les retirer de l'historique ne suffit pas, le
   dépôt ayant été publié.
-- La limitation de débit générique (`backend/app/core/rate_limit.py`) reste
-  non branchée : par adresse IP, elle pénaliserait toute une salle derrière le
-  même NAT. La connexion, elle, est protégée (verrouillage applicatif et nginx).
 - Le certificat est auto-signé, émis pour `noc.anptic.bf` et `localhost`.
-- `INTERNAL_API_KEY` est un reste de l'ancienne ETL : aucune route ne l'utilise.
-
-### 5. Données
-
-- Le **dump NetXMS est figé** au 07/08/2026 : aucune alerte nouvelle, donc
-  aucune notification automatique ; l'âge des alertes compte depuis cette date.
-- **71 alarmes NetXMS restent orphelines** (portées par des objets qui ne sont
-  ni des équipements ni des interfaces : services métier, conteneurs).
-- `kpi_daily` est **vide au démarrage** : les tendances, le classement des sites
-  et les taux SLA se remplissent au fil des jours d'exploitation.
-- Les connecteurs **Nagios et NSP** n'ont jamais été testés ; `NAGIOS_MODE` et
-  `NSP_FM_MODE` sont à confirmer auprès de l'agence.
-- Un envoi de notification **échoué n'est pas retenté**.
-
-### 6. Documentation et restes de l'ancienne version
-
-- `frontend/README.md` décrit l'interface au moment de sa réécriture ; il cite
-  des fonctions (ministères, régions) qui n'ont plus de source.
-- `database/inspect_netxms_schema.py` et `database/netxms_inspect.sql` sont des
-  outils d'inspection de l'ancienne approche, sans usage actuel.
-- Certains commentaires du code parlent encore de `dim_user`, `fact_incident`
-  ou du « veilleur » : ce sont des références à l'ancienne architecture.
+- Le composant de limitation générique de l'API existe, mais ses dépendances
+  ne sont pas branchées aux routes : les quotas configurés ne protègent donc
+  pas encore les appels API. La connexion reste protégée par ses compteurs
+  d'échecs et par la limitation nginx dédiée. `X-Real-IP` n'est pris en
+  compte que depuis l'adresse nginx autorisée sur le réseau privé dédié.
+- `INTERNAL_API_KEY` et certains scripts d'inspection de l'ancien schéma
+  demeurent dans le dépôt ; ils ne font pas partie du chemin actif de collecte.
 
 ## Prochaines étapes suggérées
 
-1. **Déployer sur la machine virtuelle de test de l'agence**, idéalement avec
-   des comptes en lecture seule sur les vrais outils plutôt que le dump.
-2. **Fermer les ports internes** et brancher la limitation de débit.
-3. **Aligner les permissions** interface / backend (point 2).
-4. **Écrire les tests** : comptes et droits, notifications, connecteurs (sur
-   des réponses enregistrées), fusion.
-5. **Réécrire les écrans d'accueil** sur l'API native, en commençant par la
-   salle de supervision et la console.
-6. **Rétablir la carte** : source explicite de coordonnées (le référentiel de
-   sites de l'agence en contient : `donnebase.siteadministratif` a une latitude
-   et une longitude).
-7. **Agrégat par ministère / organisation** côté backend (le référentiel de
-   l'agence porte un champ `Ministère`, iTop porte l'organisation).
+1. **Réécrire le test d'intégration historique** avec les modèles et routes
+   actuels, puis l'exécuter exclusivement sur une base dédiée.
+2. **Faire une recette sur la VM de test de l'agence**, avec comptes sources
+   en lecture seule et vérification de la fraîcheur, de la couverture et des
+   erreurs de chaque connecteur.
+3. **Valider Nagios et Nokia NSP** sur les versions réellement exploitées et
+   confirmer leurs modes de connexion.
+4. **Brancher et tester la limitation générique de débit** sur les routes
+   pertinentes, en tenant compte des opérateurs partageant une même adresse
+   IP.
+5. **Compléter les données géographiques et d'organisation** dans les outils
+   sources ; décider si un agrégat par organisation doit remplacer l'ancien
+   classement par ministère.
+6. **Définir une politique de reprise des notifications échouées**, sans
+   compromettre la déduplication actuelle.

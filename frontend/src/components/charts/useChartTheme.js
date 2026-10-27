@@ -31,3 +31,33 @@ export function useChartTheme() {
     };
   }, [theme]);
 }
+
+/**
+ * Couleur utilisable sur un canvas.
+ *
+ * Les couleurs du vocabulaire sont des variables CSS (`var(--sev-info)`) :
+ * passées telles quelles à Chart.js, elles sont refusées par le canvas, qui
+ * retombe sur le NOIR — courbes et aires noires sur fond sombre. On les
+ * résout ici en valeur réelle, avec une opacité facultative.
+ */
+export function canvasColor(color, alpha = 1) {
+  if (!color) return color;
+  let value = color;
+  const match = /^var\((--[^),\s]+)\)$/.exec(String(color).trim());
+  if (match && typeof document !== "undefined") {
+    value = getComputedStyle(document.documentElement).getPropertyValue(match[1]).trim() || "#7a8699";
+  }
+  if (alpha >= 1) return value;
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(value);
+  if (hex) {
+    const digits = hex[1].length === 3 ? hex[1].replace(/./g, "$&$&") : hex[1];
+    const [r, g, b] = [0, 2, 4].map((i) => parseInt(digits.slice(i, i + 2), 16));
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+  const rgb = /^rgba?\(([^)]+)\)$/i.exec(value);
+  if (rgb) {
+    const [r, g, b] = rgb[1].split(",").map((part) => part.trim());
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+  return value;
+}

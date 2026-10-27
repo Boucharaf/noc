@@ -76,3 +76,24 @@ BEGIN
             ON donnebase.siteadministratif TO noc_reader;
     END IF;
 END $$;
+
+-- Découpage administratif (site -> ville -> commune -> province -> région),
+-- pour la ventilation par région et province. Noms et clés uniquement : ni
+-- les géométries, ni les données de population ne sont lues.
+DO $$
+BEGIN
+    IF to_regclass('donnebase.siteadministratif') IS NOT NULL
+       AND to_regclass('donnebase.ville') IS NOT NULL
+       AND to_regclass('donnebase.limitecommune') IS NOT NULL
+       AND to_regclass('donnebase.limiteprovince') IS NOT NULL
+       AND to_regclass('donnebase.limiteregion') IS NOT NULL THEN
+        GRANT USAGE ON SCHEMA donnebase TO noc_reader;
+        GRANT SELECT (id_ville) ON donnebase.siteadministratif TO noc_reader;
+        GRANT SELECT (id_ville, id_commune, nomville) ON donnebase.ville TO noc_reader;
+        GRANT SELECT (id_lcommune, id_lprovince) ON donnebase.limitecommune TO noc_reader;
+        GRANT SELECT (id_lprovince, id_lregion, nomprovince)
+            ON donnebase.limiteprovince TO noc_reader;
+        GRANT SELECT (id_lregion, nomregion, "Nouveau")
+            ON donnebase.limiteregion TO noc_reader;
+    END IF;
+END $$;

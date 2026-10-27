@@ -2,10 +2,11 @@ import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { PlusCircle } from "lucide-react";
 
-import IncidentDrawer from "../components/domain/IncidentDrawer";
+import AlertDrawer from "../components/domain/AlertDrawer";
 import IncidentTable from "../components/domain/IncidentTable";
 import ManualIncidentModal from "../components/domain/ManualIncidentModal";
 import NetworkVitals from "../components/domain/NetworkVitals";
+import { DashboardSummary } from "../components/domain/FleetInsights";
 import Panel from "../components/ui/Panel";
 import Stat from "../components/ui/Stat";
 import { QueryBoundary, SkeletonRows } from "../components/ui/States";
@@ -22,7 +23,7 @@ import {
   useNodesDown,
   useOpenAlerts,
 } from "../hooks/queries";
-import { useCurrentUser, usePermission } from "../hooks/useSession";
+import { usePermission } from "../hooks/useSession";
 
 /**
  * Console d'exploitation — NIVEAU 3 du document métier
@@ -41,14 +42,14 @@ import { useCurrentUser, usePermission } from "../hooks/useSession";
  * exactement l'ordre de traitement, calculé par PostgreSQL.
  */
 export default function ConsoleView() {
-  const user = useCurrentUser();
   const canCreateManual = usePermission(PERMISSIONS.CREATE_MANUAL_INCIDENT);
 
   const [queue, setQueue] = useState("todo");
   const [selectedId, setSelectedId] = useState(null);
   const [manualOpen, setManualOpen] = useState(false);
 
-  const alertsQuery = useOpenAlerts({ limit: 150 });
+  // Toutes les alertes techniques, acquittées ou non : les files se filtrent ici.
+  const alertsQuery = useOpenAlerts({ limit: 150, acknowledged: undefined, kind: "technical" });
   const summary = useAlertSummary();
   const nodeStates = useNodeStates();
   const nodesDown = useNodesDown();
@@ -62,16 +63,14 @@ export default function ConsoleView() {
 
   const buckets = useMemo(() => {
     const list = alerts ?? [];
+    // Plus de file « à moi » : les affectations sont tenues dans iTop. Les
+    // files se lisent sur ce que disent les OUTILS.
     return {
-      // « À traiter » = non acquitté OU non affecté. Un incident acquitté
-      // mais laissé sans titulaire reste du travail en attente : le
-      // masquer parce que quelqu'un a cliqué « acquitter » est la façon
-      // la plus simple de perdre un ticket.
-      todo: list.filter((a) => a.status === "open" || !a.assigned_to_user_id),
-      mine: list.filter((a) => a.assigned_to_user_id === user?.id),
+      todo: list.filter((a) => !a.acknowledged),
+      severe: list.filter((a) => a.severity === "critical" || a.severity === "high"),
       all: list,
     };
-  }, [alerts, user?.id]);
+  }, [alerts]);
 
   const rows = buckets[queue] ?? [];
 
@@ -81,22 +80,6 @@ export default function ConsoleView() {
       if (counts[alert.severity] !== undefined) counts[alert.severity] += 1;
     }
     return counts;
-  }, [alerts]);
-
-  // Plus ancienne alerte non acquittée — calculé depuis la liste chargée.
-  // useAlertSummary retourne toujours null pour ce champ (voir commentaire
-  // dans le hook). On le calcule ici directement sur la liste triée.
-  const oldestUnacknowledgedAt = useMemo(() => {
-    const unacked = (alerts ?? []).filter(
-      (a) => a.status === "open" && !a.acknowledged,
-    );
-    if (unacked.length === 0) return null;
-    // La liste est déjà triée gravité puis date croissante par le backend.
-    // On cherche la plus ancienne date de détection parmi les non-acquittées.
-    return unacked.reduce((oldest, a) => {
-      if (!a.detected_at) return oldest;
-      return oldest === null || a.detected_at < oldest ? a.detected_at : oldest;
-    }, null);
   }, [alerts]);
 
   return (
@@ -113,19 +96,20 @@ export default function ConsoleView() {
         }
       />
 
+      <DashboardSummary />
+
       {/* --- Compteurs de tension --- */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
         <Stat
           label="À traiter"
           value={num(buckets.todo.length, "0")}
           color={buckets.todo.length ? "var(--sev-high)" : "var(--state-up)"}
-          hint="non acquittés ou non affectés"
+          hint="non acquittées dans l'outil source"
         />
         <Stat
-          label="Mes incidents"
-          value={num(buckets.mine.length, "0")}
-          color={buckets.mine.length ? "var(--ink)" : "var(--ink-3)"}
-          hint="qui me sont affectés"
+          label="Sites touchés"
+          value={num(summary.data?.localities_affected)}
+          hint="au moins un équipement en panne"
         />
         <Stat
           label="Critiques"
@@ -140,16 +124,20 @@ export default function ConsoleView() {
         />
         <Stat
           label="Plus ancien non acq."
-          value={oldestUnacknowledgedAt ? ageFrom(oldestUnacknowledgedAt) : "—"}
-          color={oldestUnacknowledgedAt ? "var(--sev-medium)" : "var(--state-up)"}
+          value={
+            summary.data?.oldest_unacknowledged_at
+              ? ageFrom(summary.data.oldest_unacknowledged_at)
+              : "—"
+          }
+          color={summary.data?.oldest_unacknowledged_at ? "var(--sev-medium)" : "var(--state-up)"}
           hint="tension réelle de la salle"
         />
         <Stat
           label="Équipements HS"
-          value={num(nodeStates.data?.down, "0")}
+          value={num(nodeStates.data?.down)}
           color={nodeStates.data?.down ? "var(--state-down)" : "var(--state-up)"}
           to="/equipements?state=down"
-          hint={`${num(nodeStates.data?.degraded, "0")} dégradés`}
+          hint={`${num(nodeStates.data?.degraded)} perturbés`}
         />
       </div>
 
@@ -167,9 +155,9 @@ export default function ConsoleView() {
                 value={queue}
                 onChange={setQueue}
                 options={[
-                  { value: "todo", label: `À traiter (${buckets.todo.length})` },
-                  { value: "mine", label: `À moi (${buckets.mine.length})` },
-                  { value: "all", label: `Tout (${buckets.all.length})` },
+                  { value: "todo", label: `Non acquittées (${buckets.todo.length})` },
+                  { value: "severe", label: `Critiques/majeures (${buckets.severe.length})` },
+                  { value: "all", label: `Toutes (${buckets.all.length})` },
                 ]}
               />
             }
@@ -186,15 +174,15 @@ export default function ConsoleView() {
                 skeleton={<SkeletonRows rows={8} columns={6} />}
                 empty={() => rows.length === 0}
                 emptyMessage={
-                  queue === "mine"
-                    ? "Aucun incident ne vous est affecté."
+                  queue === "severe"
+                    ? "Aucune alerte critique ou majeure."
                     : queue === "todo"
-                      ? "File vide — tout est acquitté et affecté."
+                      ? "Toutes les alertes sont acquittées dans les outils."
                       : "Aucune alerte ouverte."
                 }
                 emptyHint={
                   queue === "all"
-                    ? "Le réseau est nominal, ou la collecte ETL ne remonte plus rien : vérifiez l'écran Collecte ETL."
+                    ? "Le réseau est normal, ou les outils ne remontent plus rien : vérifiez l'écran Collecte."
                     : undefined
                 }
               >
@@ -297,8 +285,8 @@ export default function ConsoleView() {
         </div>
       </div>
 
-      <IncidentDrawer
-        incidentId={selectedId}
+      <AlertDrawer
+        alertKey={selectedId}
         open={Boolean(selectedId)}
         onClose={() => setSelectedId(null)}
       />

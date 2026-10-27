@@ -1,6 +1,7 @@
 import { useCallback, useRef } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
+import ScopeBar from "./ScopeBar";
 import ErrorBoundary from "../ui/ErrorBoundary";
 import SideNav from "./SideNav";
 import TopBar from "./TopBar";
@@ -23,6 +24,24 @@ import { useRealtime } from "../../hooks/useRealtime";
  *    tableau de 200 lignes ; c'est toute la différence entre une console
  *    de supervision et un site web.
  */
+// Écrans qui suivent le périmètre (recherche + localité). Les écrans
+// d'administration (comptes, collecte) n'en ont pas l'usage. Maintenances et
+// interventions le suivent : sans la barre, un filtre choisi ailleurs s'y
+// appliquerait sans qu'on le voie.
+const SCOPED_ROUTES = [
+  "/maintenances",
+  "/interventions",
+  "/direction",
+  "/supervision",
+  "/console",
+  "/territoire",
+  "/incidents",
+  "/alertes",
+  "/equipements",
+  "/performance",
+  "/sla",
+];
+
 export default function AppShell() {
   const role = useAuthStore((s) => s.user?.role);
   const location = useLocation();
@@ -77,13 +96,13 @@ export default function AppShell() {
         health={health.data}
         toolsHealthy={interop.data?.tools_healthy ?? 0}
         toolsTotal={interop.data?.tools_total ?? 0}
-        canSeeIncidents={hasPermission(role, PERMISSIONS.VIEW_INCIDENTS)}
       />
       <div className="flex-1 flex min-h-0">
         <div className="hidden md:flex">
           <SideNav role={role} toolsDown={toolsDown} />
         </div>
         <div className="flex-1 flex flex-col min-w-0 min-h-0">
+          {SCOPED_ROUTES.some((prefix) => location.pathname.startsWith(prefix)) && <ScopeBar />}
           <main className="flex-1 min-h-0 overflow-y-auto p-2.5">
             {/* La frontière entoure UNIQUEMENT le contenu de page : si un
                 écran plante, la barre d'état, le ticker et la navigation
@@ -114,7 +133,7 @@ function MobileNav({ role }) {
     // afficherait un écran interdit alors qu'il a le sien.
     { to: homeRoute(role), label: "Accueil" },
     { to: "/equipements", label: "Parc" },
-    { to: "/carte", label: "Carte" },
+    { to: "/territoire", label: "Territoire" },
     { to: "/compte", label: "Compte" },
   ];
 

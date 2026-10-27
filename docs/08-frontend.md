@@ -29,7 +29,7 @@ conteneur `frontend`, lui-même derrière la passerelle `nginx`.
 | `hooks/useRealtime.js` | WebSocket : authentification, chien de garde, reconnexion |
 | `hooks/useSession.js` | Restauration et maintien de la session |
 | `store/auth.js` | Jeton (en mémoire) et utilisateur courant |
-| `store/ui.js` | Thème, rafraîchissement automatique, période sélectionnée |
+| `store/ui.js` | Thème, rafraîchissement automatique (réglé dans « Mon compte »), période sélectionnée |
 | `lib/permissions.js` | Rôles, libellés, permissions d'affichage, écran d'accueil par rôle |
 | `lib/vocabulary.js` | Libellés et couleurs : gravités, états, outils, statuts |
 | `lib/format.js` | Formatage des nombres, dates, durées |
@@ -46,14 +46,13 @@ conteneur `frontend`, lui-même derrière la passerelle `nginx`.
 | `/direction` | `DirectionView.jsx` | directeur |
 | `/supervision` | `SupervisionView.jsx` | directeur, chef NOC |
 | `/console` | `ConsoleView.jsx` | chef NOC, technicien |
-| `/terrain` | `TerrainView.jsx` | agent terrain, chef NOC, directeur |
+| `/interventions` | `InterventionsPage.jsx` | tous (ordres de travail iTop, lecture seule ; `/terrain` y redirige) |
 | `/incidents` | `IncidentsPage.jsx` | directeur, chef NOC, technicien |
 | `/equipements`, `/equipements/:id` | `NodesPage.jsx`, `NodeDetailPage.jsx` | tous |
-| `/carte` | `MapPage.jsx` | tous |
 | `/performance` | `PerformancePage.jsx` | tous |
 | `/sla` | `SlaPage.jsx` | tous |
 | `/integrations` | `IntegrationsPage.jsx` | directeur, chef NOC, technicien |
-| `/maintenances` | `MaintenancePage.jsx` | directeur, chef NOC, technicien |
+| `/maintenances` | `MaintenancePage.jsx` | tous (changements iTop et maintenances Zabbix, lecture seule) |
 | `/rapports` | `ReportsPage.jsx` | directeur, chef NOC |
 | `/utilisateurs` | `UsersPage.jsx` | chef NOC |
 | `/compte` | `AccountPage.jsx` | tous |

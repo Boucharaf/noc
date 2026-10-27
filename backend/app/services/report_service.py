@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import UTC, datetime, time
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
@@ -44,26 +44,28 @@ def month_label(month: int, year: int) -> str:
 def collect_report_data(db: Session, month: int, year: int) -> dict:
     """Rassemble les données du rapport depuis les services du dashboard."""
     monthly = kpi_service.monthly_summary(db, year, month)
-    start_date, end_date = kpi_service.month_bounds(year, month)
-    start_at = datetime.combine(start_date, time.min, UTC)
-    end_at = datetime.combine(end_date, time.min, UTC)
+    period_start, period_end = kpi_service.month_bounds(year, month)
+    start_at = datetime.combine(period_start, datetime.min.time(), tzinfo=timezone.utc)
+    end_at = datetime.combine(period_end, datetime.min.time(), tzinfo=timezone.utc)
 
     return {
         "organisation": REPORT_ORGANISATION,
-        "generated_at": datetime.now(UTC),
+        "generated_at": datetime.now(timezone.utc),
         "period": month_label(month, year),
         "month": month,
         "year": year,
         "monthly": monthly,
-        "trend": kpi_service.trend(
-            db, start_date=start_date, end_date=end_date
-        ),
+        "trend": kpi_service.monthly_trend(db, year, month),
         "sites": kpi_service.sites_ranking(
-            db, limit=15, start_date=start_date, end_date=end_date
+            db, limit=15, start_at=period_start, end_at=period_end
         ),
         "causes": kpi_service.causes(db, start_at=start_at, end_at=end_at),
-        "resolution": kpi_service.resolution_times(db, start_at=start_at, end_at=end_at),
-        "sla": sla_service.compliance(db, start_at=start_at, end_at=end_at),
+        "resolution": kpi_service.resolution_times(
+            db, start_at=start_at, end_at=end_at
+        ),
+        "sla": sla_service.compliance(
+            db, start_at=start_at, end_at=end_at
+        ),
         "breaches": sla_service.breaches(
             db, limit=15, start_at=start_at, end_at=end_at
         ),

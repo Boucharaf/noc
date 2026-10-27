@@ -11,8 +11,8 @@ implémente quatre méthodes :
 | Méthode | Appelée par | Rôle |
 |---|---|---|
 | `check()` | collecteur, à chaque cycle | L'outil répond-il ? En combien de temps ? Quelle version ? Ne lève jamais : une panne se raconte par un `ToolHealth(reachable=False, error=…)`. |
-| `fetch_nodes()` | collecteur | L'inventaire enrichi des équipements (`list[Node]`) : CMDB, interfaces et fraîcheur des contrôles quand la source les expose |
-| `fetch_alerts()` | collecteur | Les alertes **actives uniquement** (`list[Alert]`), avec acquittement, statut source et maintenance quand disponibles |
+| `fetch_nodes()` | collecteur | L'inventaire des équipements (`list[Node]`) |
+| `fetch_alerts()` | collecteur | Les alertes **actives uniquement** (`list[Alert]`) |
 | `fetch_history(node, métrique, début, fin)` | backend, à la demande | Une courbe. Vide par défaut (iTop, par exemple, ne mesure rien). |
 
 La classe de base fournit le client HTTP, la mesure de latence et un
@@ -29,15 +29,17 @@ vocabulaire unique défini dans `integrations/models.py` et
 
 | Outil | Valeur brute → gravité |
 |---|---|
-| Zabbix (0–5) | 5 → critical, 4 → high, 3 → medium, 2 → low, 1 → info, 0 → unknown |
+| Zabbix (0–5) | 5 → critical, 4 → high, 3 → medium, 2 → medium, 1 → info, 0 → unknown |
 | Centreon service | CRITICAL → critical, WARNING → medium, UNKNOWN → unknown |
 | Centreon hôte | DOWN → critical, UNREACHABLE → high |
 | iTop (priorité) | 1 → critical, 2 → high, 3 → medium, 4 → low |
-| NetXMS (0–4) | 4 → critical, 3 → high, 2 → medium, 1 → low, 0 → info |
+| NetXMS (0–4) | 4 → critical, 3 → high, 2 → medium, 1 → medium, 0 → info |
 | Nagios, NSP | libellés textuels (critical, major, minor, warning…) |
 
 Une valeur inconnue devient `unknown`, jamais `info` : une alerte dont on n'a
 pas su lire la gravité ne doit pas disparaître de l'écran.
+`WARNING` est normalisé à `medium` dans Zabbix, Centreon et NetXMS : un seuil
+à examiner ne doit pas être assimilé à une panne critique.
 
 **États d'équipement** : `down` (hors service), `degraded` (dégradé),
 `silent` (muet : l'outil ne dit plus rien), `maintenance`, `up` (nominal),
@@ -51,36 +53,52 @@ pas su lire la gravité ne doit pas disparaître de l'écran.
 - **Authentification** : jeton d'API permanent (`ZABBIX_API_TOKEN`, préféré)
   ou identifiant/mot de passe.
 - **Alertes** : `problem.get` (seulement les problèmes actifs).
+- **Limites explicites** : si l'API atteint 5 000 problèmes ou points
+  historiques, la collecte signale un résultat potentiellement tronqué au
+  lieu de le présenter comme complet.
 - **Historique** : `history.get` pour les valeurs brutes récentes,
   `trend.get` au-delà (moyennes horaires).
+- **Disques** : seules les clés `vfs.fs.size` en mode `pused` ou `pfree` sont
+  converties en pourcentage utilisé; `pfree` est inversé. Les valeurs en
+  octets ne sont pas présentées comme un pourcentage.
 - **Site** : déduit des groupes d'hôtes nommés `Site/<nom>` ou
   `Localité/<nom>` — convention à respecter côté Zabbix.
-- **Interfaces** : identifiant, type, adresse, port et disponibilité Zabbix.
-- **Acquittement** : dernier auteur, commentaire et échéance de suppression en maintenance, si le compte API a les droits correspondants.
 
 ### Centreon 22.10 — `integrations/centreon.py`
 
-- **API** : REST v2 sous `/centreon/api/latest`, endpoint unifié
-  `/monitoring/resources` (hôtes et services en un appel).
+- **API** : REST v2 sous `/centreon/api/latest`, endpoint
+  `/monitoring/resources`. L'inventaire ne retient que les hôtes; les
+  services sont des contrôles, rattachés à leur hôte dans les alertes.
 - **Authentification** : jeton de session, renouvelé automatiquement dès qu'un
   appel répond 401.
-- **Contrôles** : sortie plugin, dernier/prochain contrôle et statut source quand l'API les fournit.
-- **Relations** : un service est relié à son hôte parent; la fiche hôte montre les services dont il peut affecter le contrôle.
-- **Alertes** : auteur/commentaire d'acquittement et état de période de maintenance quand présents dans la réponse.
+- **Limites explicites** : la pagination est suivie jusqu'au total annoncé;
+  au-delà de 20 000 ressources, la collecte échoue visiblement plutôt que de
+  publier un inventaire tronqué.
 
 ### iTop 3.2 — `integrations/itop.py`
 
 - **API** : REST/JSON sur `/webservices/rest.php`.
-- **Rôle** : CMDB (organisation, emplacement et criticité des équipements) et
-  tickets (`ITOP_TICKET_CLASSES`, par défaut `Incident,UserRequest`) avec
-  agent, équipe et service métier quand le modèle les expose. Ne mesure rien.
-- **Contrats** : les SLT iTop sont collectés avec l'instantané et visibles
-  séparément des objectifs SLA de traitement configurés dans le NOC. Les
-  champs de ticket enrichis ont un repli pour les modèles personnalisés.
+- **Rôle** : CMDB (organisation, responsable, emplacement des équipements) et
+  tickets (`ITOP_TICKET_CLASSES`, par défaut `Incident,UserRequest`). Les
+  tickets sont classés comme `itsm_ticket` et ne sont pas comptés comme des
+  alertes techniques ni diffusés comme de nouvelles alertes. iTop ne mesure
+  rien. La supervision et son bandeau n'affichent que les alertes techniques;
+  la page Incidents permet de filtrer les alertes techniques, tickets iTop et
+  incidents manuels par catégorie.
 - **Priorité dans la fusion** : iTop fait foi pour le **nom**, le **site** et
   l'**organisation** d'un équipement.
 - **Compte de service** : il lui faut plusieurs profils iTop, pas seulement
   « REST Services User » (voir [tools/README.md](../tools/README.md)).
+- **Classes optionnelles** : les classes absentes selon les modules activés
+  sont omises mais signalées dans la santé de l'intégration. Les autres
+  erreurs d'accès ne sont pas converties en inventaires ou tickets vides.
+- **SLT** : une erreur de lecture des objectifs remonte au consommateur au
+  lieu d'être convertie en liste vide. Les indicateurs SLA ne doivent pas
+  présenter ces objectifs comme récupérés. La lecture des objectifs n'est
+  pas encore reliée au calcul SLA du backend; celui-ci ne consomme donc pas
+  les objectifs iTop.
+- **Rattachement** : les identifiants numériques iTop sont utilisés pour
+  faire correspondre `id` et `functionalci_id`, pas les clés OQL `Classe::id`.
 
 ### NetXMS 5.0 — deux connecteurs, un seul réglage
 
@@ -89,13 +107,18 @@ l'URL** dans `NETXMS_API_URL` (`integrations/config.py`) :
 
 | URL | Connecteur | Quand l'utiliser |
 |---|---|---|
-| `https://…` | `netxms.py` — API Web (`netxms-websvc`) | L'agence fournit un compte NetXMS |
-| `postgresql://…` | `netxms_db.py` — base PostgreSQL, **lecture seule** | L'agence fournit un compte de lecture sur la base, ou en local avec le dump |
+| `https://…` | `netxms.py` — API Web (`netxms-websvc`) | Après validation des endpoints sur la version déployée |
+| `postgresql://…` | `netxms_db.py` — base PostgreSQL, **lecture seule** | Préféré si l'agence accorde un compte dédié en lecture seule |
 
-Les deux produisent les mêmes équipements et alertes normalisés : passer de
-l'un à l'autre ne change que cette variable. La lecture PostgreSQL complète
-aussi l'inventaire des interfaces à partir de la relation
-`interfaces.node_id`.
+Les deux produisent exactement les mêmes équipements et alertes : passer de
+l'un à l'autre ne change que cette variable.
+
+Le connecteur API emploie des endpoints de la Legacy Web API dont le
+comportement n'a pas été confirmé sur l'instance de production. Quand l'accès
+à la base est accordé, le compte `noc_reader` et les requêtes en lecture
+seule de `netxms_db.py` sont donc le chemin de production recommandé. Ne
+basculer sur l'API qu'après validation de `/objects`, `/alarms` et des DCI
+sur la version réellement exploitée.
 
 Particularités du connecteur base (`netxms_db.py`) :
 
@@ -104,9 +127,6 @@ Particularités du connecteur base (`netxms_db.py`) :
   repli sur la ville de l'objet. La présence du référentiel est détectée : le
   connecteur fonctionne aussi sur une base NetXMS standard.
 - **Alarmes d'interface** : rattachées à leur équipement via `interfaces.node_id`.
-- **Interfaces** : inventaire, nom et état remontés depuis `interfaces` et
-  `object_properties`; le compte de lecture reste limité aux colonnes déjà
-  accordées.
 - **Garanties** : chaque connexion est ouverte en lecture seule, avec un délai
   de garde ; aucune colonne secrète (communautés SNMP, secrets d'agent) n'est
   lue.
@@ -115,39 +135,102 @@ Particularités du connecteur base (`netxms_db.py`) :
 
 ### Nagios et Nokia NSP — `nagios.py`, `nsp.py`
 
-Écrits, jamais testés sur une instance réelle (aucune n'est disponible en
-local). Chacun a plusieurs modes d'accès à confirmer auprès de l'agence :
+Nagios est validé sur le laboratoire local (Nagios Core 4.5.12, profil
+`nagios`, mode `statusjson`). Attention aux codes d'état : les CGI JSON
+emploient des masques de bits (hôte 2 UP, 4 DOWN, 8 UNREACHABLE ; service
+2 OK, 4 WARNING, 8 UNKNOWN, 16 CRITICAL), pas les codes de retour des sondes.
+`objectjson.cgi` plante sur un alias accentué : le connecteur publie alors
+l'état sans adresses ni groupes et le signale. NSP n'a pas d'instance locale.
+Chacun a plusieurs modes d'accès à confirmer auprès de l'agence :
 `NAGIOS_MODE` (`statusjson`, `livestatus`, `xi`) et `NSP_FM_MODE` (`yang`,
 `classic`). Tant qu'ils valent `unknown`, le connecteur se déclare « non
 configuré » en nommant la variable à renseigner.
 
+Nagios XI n'est pas encore implémenté : le mode `xi` renvoie une erreur
+explicite et ne se déclare pas sain avec des listes vides. Les modes
+`statusjson` et `livestatus` restent distincts.
+Le mode NSP `classic` ne fournit pas d'inventaire; cette couverture partielle
+est signalée dans l'état de l'intégration, même si ses alarmes sont collectées.
+
+## Alertes et incidents : deux choses différentes
+
+- Une **alerte** est un signal technique d'un outil de supervision (Zabbix,
+  Centreon, NetXMS, Nagios, NSP). Écran « Alertes outils ».
+- Un **incident** est un ticket **iTop**, et seulement iTop (classes
+  `ITOP_TICKET_CLASSES`). Écran « Incidents iTop ». Le NOC ne fabrique pas
+  d'incident à partir d'une alerte ; la fiche d'un incident montre, à côté du
+  ticket, l'état de l'équipement concerné vu par chaque outil et ses alertes
+  en cours (rattachement par référence, puis par nom technique quand le CI
+  iTop n'a pas d'IP commune avec l'hôte supervisé).
+- Les **SLA** se mesurent sur les incidents iTop : délai de prise en charge
+  (assignation − ouverture) et de résolution (résolution − ouverture),
+  comparés aux objectifs par gravité. Les tickets résolus restent chez iTop
+  et y sont lus à la demande (`fetch_incident_history`, cache de 5 min). Un
+  incident ouvert qui a déjà dépassé son objectif compte comme non tenu.
+- iTop enregistre ses dates dans le fuseau de sa configuration
+  (`timezone` de `config-itop.php`, « Europe/Paris » par défaut) :
+  `ITOP_TIMEZONE` doit lui être identique, sinon tous les délais sont décalés.
+
+## Région, province, site, nœud
+
+Chaque équipement porte son site, sa province et sa région (17 régions du
+nouveau découpage), lus chez les sources et jamais devinés :
+
+- **NetXMS (base)** : référentiel de l'agence, site administratif → ville →
+  commune → province → région ; à défaut de site, la ville de l'objet quand
+  elle ne désigne qu'une seule province. Le compte `noc_reader` doit avoir les
+  droits du bloc « Découpage administratif » de
+  `database/netxms_readonly_role.sql`.
+- **Zabbix, Centreon, Nagios** : groupes d'hôtes `Site/…`, `Province/…`,
+  `Region/…` (ou `Région/…`).
+- **Héritage** : un équipement dont seul le site est connu hérite de la
+  province et de la région d'un autre équipement du même site, si ce site
+  n'est rattaché qu'à une seule province.
+
+Les équipements sans localité sont comptés sous « Région non renseignée »,
+visibles et classés en dernier. Toutes les routes de lecture acceptent le même
+périmètre (`region`, `province`, `site`, `search`), appliqué par
+`backend/app/services/geo_service.py` ; l'écran Territoire désagrège du pays
+jusqu'au nœud, et la position d'un site est le barycentre de ses équipements
+situés.
+
+## Interpréter les agrégats
+
+- La disponibilité instantanée et les agrégats journaliers excluent les
+  équipements en maintenance planifiée du dénominateur. Un état inconnu,
+  muet, dégradé ou en panne n'est jamais assimilé à « disponible ».
+- Une courbe réseau interroge un échantillon stable, sélectionné par hachage
+  de l'identifiant, de la métrique et de la période, plafonné à 50 équipements
+  par requête. La réponse et l'écran indiquent la taille du parc, la taille de
+  l'échantillon, les équipements contributeurs et les erreurs rencontrées :
+  cette moyenne n'est pas présentée comme une mesure exhaustive.
+- Pour ne pas surpondérer une sonde qui publie plus souvent, chaque
+  équipement est d'abord moyenné par minute, puis les moyennes des
+  équipements sont agrégées. Chaque point précise combien d'équipements ont
+  contribué à cette minute; les horodatages sont conservés en UTC.
+- Les agrégats journaliers excluent les fenêtres de maintenance planifiée. Si
+  la lecture des fenêtres échoue ou dépasse son délai, le collecteur omet
+  l'échantillon KPI et journalise le problème plutôt que de supposer qu'aucune
+  maintenance n'existe. Cette règle s'applique aux nouveaux échantillons ; les
+  agrégats historiques ne sont pas recalculés rétroactivement.
+
 ## La fusion des équipements
 
-Un même routeur peut être connu de Zabbix, de NetXMS et d'iTop sous trois noms
-différents. Le collecteur les rapproche (`collector/merge.py`) **uniquement sur
-des preuves** :
+L'identifiant source reste toujours le couple `(outil, référence)`. En
+l'absence d'une correspondance CMDB validée, le collecteur fusionne
+automatiquement uniquement si le nom technique complet (casse ignorée, point
+DNS final retiré) **et** l'adresse IP normalisée sont identiques entre outils,
+et que cette identité n'apparaît qu'une fois par outil. Il ne retire pas les
+suffixes DNS et ne fusionne ni sur l'IP seule ni sur le nom seul. Les collisions
+et équipements aux informations incomplètes restent séparés et sont exposés
+dans le rapport d'interopérabilité.
 
-1. **Même adresse IP** — preuve (les adresses de bouclage et `0.0.0.0` sont
-   ignorées) ;
-2. **Même nom technique après normalisation** — minuscules, domaine retiré,
-   séparateurs unifiés. Une adresse IP écrite à la place d'un nom n'est
-   **jamais** comparée comme un nom ;
-3. **rien d'autre** : aucune ressemblance approximative. Fusionner deux
-   équipements différents ferait disparaître un site entier de la supervision.
-
-Deux objets d'un **même** outil ne sont jamais fusionnés : pour cet outil, ce
-sont deux équipements distincts.
-
-Quand les outils ne sont pas d'accord :
-
-| Champ | Qui l'emporte |
-|---|---|
-| État (hors service, nominal…) | Zabbix, puis Centreon, NetXMS, Nagios, NSP — un outil qui **mesure** |
-| Nom, site, organisation | iTop, puis Zabbix, Centreon, NetXMS… — un outil de **référence** |
-
-Le résultat du rapprochement (combien par IP, combien par nom, équipements vus
-par un seul outil) est affiché sur l'écran **Collecte ETL** : l'exploitant peut
-contrôler ce que la machine a décidé.
+Les états techniques ne suivent pas de priorité d'outil arbitraire : iTop
+n'est pas une source de mesure. Si plusieurs sources supervisant un même
+équipement fournissent des états différents, l'état consolidé devient
+`unknown` et les états de chaque source sont rendus dans `state_conflicts`.
+Le nom, le site et l'organisation restent du contexte CMDB priorisé depuis
+iTop, puis les sources de supervision.
 
 ## Les trois façons d'alimenter la plateforme en local
 
@@ -193,7 +276,7 @@ Deux règles de sécurité :
 | **Charge constante et connue** | Une série de requêtes par outil toutes les `COLLECT_INTERVAL_S` secondes (300 par défaut), quel que soit le nombre d'utilisateurs connectés. Les courbes à la demande sont mises en cache. |
 | **Lecture seule** | Aucun connecteur n'écrit chez un outil. Pour NetXMS par la base, le compte `noc_reader` est en lecture seule **imposée par le serveur**. |
 | **Droits minimaux** | `netxms_readonly_role.sql` n'accorde que les colonnes lues, jamais les secrets. Pour Zabbix : un jeton d'API révocable ; pour iTop : un compte de service dédié. |
-| **Pas de copie des données** | Rien n'est recopié en base ; l'état courant expire de lui-même en 15 minutes si la collecte s'arrête. |
+| **Pas de copie brute des données** | L'inventaire et les alertes courantes résident dans l'instantané Redis, qui expire après trois cycles si la collecte s'arrête. PostgreSQL conserve les opérations du NOC et des agrégats KPI journaliers, pas une copie des données brutes des outils. |
 | **Robustesse** | Délais de garde, disjoncteur, cycle borné : un outil lent ne peut pas être submergé par le NOC. |
 
 ## Ajouter un nouvel outil

@@ -1,50 +1,82 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Maximize2, X } from "lucide-react";
 
-import { Donut } from "../components/charts";
-import { SeverityBadge } from "../components/ui/Badge";
+import { Badge, SeverityBadge } from "../components/ui/Badge";
 import { ageFrom, ellipsis, num, pct } from "../lib/format";
-import { availabilityColor, nodeStateMeta, severityMeta } from "../lib/vocabulary";
+import { slaStatusMeta } from "../lib/itop";
+import { availabilityColor, severityMeta } from "../lib/vocabulary";
 import { useClock } from "../hooks/useClock";
 import { useRealtime } from "../hooks/useRealtime";
-import {
-  useAlertSummary,
-  useNetworkKpi,
-  useNodeStates,
-  useNodesDown,
-  useOpenAlerts,
-} from "../hooks/queries";
+import TerritoryMap from "../components/domain/TerritoryMap";
+import { useGeoBreakdown, useItopIncidents, useNetworkKpi } from "../hooks/queries";
 
 /**
- * Mode mur d'écrans.
+ * Mode mur d'écrans — le résumé des INCIDENTS iTop.
  *
- * Destiné à un écran de 55 pouces lu à trois mètres, sans souris. Tout y
- * est plus grand, il n'y a aucun contrôle de navigation, et le contenu
- * se limite à ce qu'on doit voir sans lire : combien d'alertes, de
- * quelle gravité, depuis combien de temps, et quels équipements sont
- * tombés.
+ * Un raccourci pour l'exploitant qui n'a pas le temps de parcourir le
+ * NOC : un coup d'œil doit suffire à savoir combien d'incidents sont
+ * ouverts, lesquels sont graves, lesquels dépassent leur engagement ou
+ * n'ont personne, et où ils se trouvent. Les alertes des outils n'y
+ * figurent pas : elles ont leur écran, et un mur qui mélange signaux
+ * techniques et tickets ne se lit plus à trois mètres.
  *
- * Aucune interaction n'est proposée à dessein — un écran mural n'a pas
- * d'opérateur devant lui. La seule sortie est la touche Échap, indiquée
- * en clair, parce qu'un écran sans issue visible finit par être quitté
- * en fermant l'onglet.
+ * Toujours sur tout le réseau, quel que soit le périmètre choisi dans le
+ * NOC : un écran de salle ne doit pas rester filtré sur une province parce
+ * que quelqu'un l'a consultée la veille.
+ *
+ * Aucune interaction à dessein — un écran mural n'a pas d'opérateur devant
+ * lui. La seule sortie est la touche Échap, indiquée en clair.
  */
+const ROWS = 12;
+
+function HeadlineKpi({ label, value, color, emphasis = false }) {
+  return (
+    <div
+      className="flex-1 min-w-0 flex flex-col justify-center px-4 border-l"
+      style={{ borderColor: "var(--border)" }}
+    >
+      <span
+        className={`num font-bold leading-none ${emphasis ? "blink-critical" : ""}`}
+        style={{ fontSize: 34, color: color ?? "var(--ink)" }}
+      >
+        {value}
+      </span>
+      <span
+        className="text-[12px] uppercase tracking-[0.08em] mt-1 whitespace-nowrap"
+        style={{ color: "var(--ink-3)" }}
+      >
+        {label}
+      </span>
+    </div>
+  );
+}
+
 export default function WallboardPage() {
   const navigate = useNavigate();
   const now = useClock();
-
-  // Le mur d'écrans vit hors de la coque : il doit donc ouvrir son propre
-  // flux temps réel, sinon il n'afficherait une nouvelle alerte qu'au
-  // prochain sondage — jusqu'à vingt secondes de retard sur un écran dont
-  // c'est justement la seule raison d'être.
   const { status: realtimeStatus } = useRealtime();
 
-  const summary = useAlertSummary();
-  const alerts = useOpenAlerts({ limit: 14 });
-  const nodeStates = useNodeStates();
-  const nodesDown = useNodesDown();
-  const network = useNetworkKpi({ hours: 24 });
+  const incidents = useItopIncidents({ limit: ROWS }, { global: true });
+  const network = useNetworkKpi();
+  // Tout le réseau, quel que soit le périmètre choisi dans le NOC.
+  const geo = useGeoBreakdown({});
+
+  // Alarme visuelle : un incident critique de plus qu'au rafraîchissement
+  // précédent fait clignoter le cadre du mur pendant une minute — sur un
+  // écran que personne ne fixe, c'est ce qui attire l'œil.
+  const [alarm, setAlarm] = useState(false);
+  const previousCritical = useRef(null);
+  const critical = incidents.data?.by_severity?.critical;
+  useEffect(() => {
+    if (critical == null) return undefined;
+    const before = previousCritical.current;
+    previousCritical.current = critical;
+    if (before == null || critical <= before) return undefined;
+    setAlarm(true);
+    const timer = setTimeout(() => setAlarm(false), 60_000);
+    return () => clearTimeout(timer);
+  }, [critical]);
 
   const [fullscreenAvailable] = useState(
     () => typeof document !== "undefined" && document.fullscreenEnabled,
@@ -58,98 +90,124 @@ export default function WallboardPage() {
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [navigate]);
 
-  const s = summary.data;
-  const states = nodeStates.data;
-
-  const severities = [
-    { key: "critical", value: s?.critical ?? 0 },
-    { key: "high", value: s?.high ?? 0 },
-    { key: "medium", value: s?.medium ?? 0 },
-    { key: "low", value: s?.low ?? 0 },
-  ];
+  const d = incidents.data;
+  const bySeverity = d?.by_severity ?? {};
+  const regions = (d?.network_by_region ?? []).slice(0, 14);
+  // Échelle des barres sur les seules régions connues : les tickets sans
+  // localité, souvent majoritaires, écraseraient toutes les autres barres.
+  const regionMax = Math.max(
+    1,
+    ...regions.filter((row) => !row.region.endsWith("non renseignée")).map((row) => row.count),
+  );
+  const live = realtimeStatus === "live";
 
   return (
     <div
-      className="wallboard fixed inset-0 z-50 flex flex-col overflow-hidden"
+      className={`wallboard fixed inset-0 z-50 flex flex-col overflow-hidden ${alarm ? "wall-alarm" : ""}`}
       style={{ background: "var(--page)" }}
     >
-      {/* --- Bandeau --- */}
+      {/* --- Bandeau : identité, chiffres clés, heure --- */}
       <header
-        className="flex items-center gap-4 px-4 border-b shrink-0"
-        style={{ height: 60, borderColor: "var(--border)", background: "var(--surface)" }}
+        className="flex items-stretch border-b shrink-0"
+        style={{ height: 88, borderColor: "var(--border)", background: "var(--surface)" }}
       >
-        <span className="live-dot" style={{ width: 9, height: 9 }} />
-        <h1 className="text-[22px] font-semibold tracking-tight">NOC RESINA</h1>
-        <span className="text-[14px]" style={{ color: "var(--ink-3)" }}>
-          Supervision du réseau de l'administration
-        </span>
-        <span
-          className="text-[13px] flex items-center gap-1.5"
-          style={{
-            color:
-              realtimeStatus === "live" ? "var(--state-up)" : "var(--sev-critical)",
-          }}
-          title="État du flux temps réel"
-        >
+        <div className="flex flex-col justify-center px-4 shrink-0">
+          <div className="flex items-center gap-2.5">
+            <span className="live-dot" style={{ width: 10, height: 10 }} />
+            <h1 className="text-[24px] font-semibold tracking-tight">NOC RESINA</h1>
+          </div>
+          <span className="text-[13px]" style={{ color: "var(--ink-3)" }}>
+            Incidents iTop · tout le réseau
+          </span>
+        </div>
+
+        <HeadlineKpi label="Incidents ouverts" value={num(d?.total, "0")} />
+        <HeadlineKpi
+          label="SLA dépassé"
+          value={num(d?.sla_breached, "0")}
+          color={d?.sla_breached ? "var(--sev-critical)" : "var(--state-up)"}
+        />
+        <HeadlineKpi
+          label="Non affectés"
+          value={num(d?.unassigned, "0")}
+          color={d?.unassigned ? "var(--sev-high)" : "var(--state-up)"}
+        />
+        <HeadlineKpi
+          label="Nouveaux (1 h)"
+          value={num(d?.opened_last_hour, "0")}
+          color={d?.opened_last_hour ? "var(--sev-medium)" : undefined}
+        />
+        <HeadlineKpi
+          label="Disponibilité du parc"
+          value={pct(network.data?.availability_pct, 1)}
+          color={availabilityColor(network.data?.availability_pct)}
+        />
+
+        <div className="flex items-center gap-3 pl-4 pr-3 border-l shrink-0" style={{ borderColor: "var(--border)" }}>
+          <div className="flex flex-col items-end">
+            <time className="num text-[30px] leading-none tracking-tight">
+              {now.toLocaleTimeString("fr-FR", { hour12: false })}
+            </time>
+            <span className="text-[13px] capitalize mt-1" style={{ color: "var(--ink-3)" }}>
+              {now.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" })}
+            </span>
+          </div>
           <span
-            className={realtimeStatus === "live" ? "live-dot" : "dot"}
-            style={{
-              background:
-                realtimeStatus === "live" ? "var(--state-up)" : "var(--sev-critical)",
-              width: 8,
-              height: 8,
-            }}
-          />
-          {realtimeStatus === "live" ? "flux actif" : "flux coupé"}
-        </span>
-
-        <time className="num ml-auto text-[26px] tracking-tight">
-          {now.toLocaleTimeString("fr-FR", { hour12: false })}
-        </time>
-        <span className="text-[14px] capitalize" style={{ color: "var(--ink-3)" }}>
-          {now.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" })}
-        </span>
-
-        {fullscreenAvailable && (
-          <button
-            type="button"
-            className="btn btn-ghost"
-            onClick={() => document.documentElement.requestFullscreen?.()}
-            title="Plein écran"
+            className="text-[12px] flex items-center gap-1.5"
+            style={{ color: live ? "var(--state-up)" : "var(--sev-critical)" }}
+            title="État du flux temps réel"
           >
-            <Maximize2 size={16} />
+            <span
+              className={live ? "live-dot" : "dot"}
+              style={{
+                background: live ? "var(--state-up)" : "var(--sev-critical)",
+                width: 8,
+                height: 8,
+              }}
+            />
+            {live ? "direct" : "flux coupé"}
+          </span>
+          {fullscreenAvailable && (
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => document.documentElement.requestFullscreen?.()}
+              title="Plein écran"
+            >
+              <Maximize2 size={16} />
+            </button>
+          )}
+          <button type="button" className="btn btn-ghost" onClick={() => navigate(-1)} title="Quitter (Échap)">
+            <X size={16} />
           </button>
-        )}
-        <button type="button" className="btn btn-ghost" onClick={() => navigate(-1)} title="Quitter (Échap)">
-          <X size={16} />
-        </button>
+        </div>
       </header>
 
       <div className="flex-1 min-h-0 grid grid-cols-12 gap-3 p-3">
-        {/* --- Compteurs de gravité --- */}
-        <div className="col-span-3 flex flex-col gap-3 min-h-0">
-          {severities.map((entry) => {
-            const meta = severityMeta(entry.key);
-            const critical = entry.key === "critical" && entry.value > 0;
+        {/* --- Gravité des incidents --- */}
+        <div className="col-span-2 flex flex-col gap-3 min-h-0">
+          {["critical", "high", "medium", "low"].map((key) => {
+            const meta = severityMeta(key);
+            const value = bySeverity[key] ?? 0;
             return (
               <div
-                key={entry.key}
+                key={key}
                 className="panel flex-1 flex flex-col items-center justify-center"
                 style={{
-                  borderColor: entry.value ? meta.color : "var(--border)",
-                  background: entry.value
+                  borderColor: value ? meta.color : "var(--border)",
+                  background: value
                     ? `color-mix(in srgb, ${meta.color} 9%, var(--surface))`
                     : "var(--surface)",
                 }}
               >
                 <span
-                  className={`num font-bold leading-none ${critical ? "blink-critical" : ""}`}
-                  style={{ fontSize: 62, color: entry.value ? meta.color : "var(--ink-3)" }}
+                  className={`num font-bold leading-none ${key === "critical" && value ? "blink-critical" : ""}`}
+                  style={{ fontSize: 60, color: value ? meta.color : "var(--ink-3)" }}
                 >
-                  {num(entry.value, "0")}
+                  {num(value, "0")}
                 </span>
                 <span
-                  className="text-[15px] font-semibold uppercase tracking-[0.1em] mt-1"
+                  className="text-[14px] font-semibold uppercase tracking-[0.1em] mt-1"
                   style={{ color: "var(--ink-2)" }}
                 >
                   {meta.label}
@@ -159,91 +217,117 @@ export default function WallboardPage() {
           })}
         </div>
 
-        {/* --- Alertes --- */}
-        <div className="col-span-6 panel min-h-0 flex flex-col">
+        {/* --- Incidents prioritaires --- */}
+        <div className="col-span-7 panel min-h-0 flex flex-col">
           <header className="panel-head">
-            <h2 className="panel-title">Alertes en cours</h2>
-            <span className="ml-auto num text-[15px]" style={{ color: "var(--ink-2)" }}>
-              {num(s?.total_open, "0")} ouvertes · {num(s?.unacknowledged, "0")} non acquittées
+            <h2 className="panel-title">Incidents prioritaires</h2>
+            <span className="ml-auto text-[14px]" style={{ color: "var(--ink-3)" }}>
+              par gravité, puis du plus récent
             </span>
           </header>
           <div className="flex-1 overflow-hidden">
-            <table className="tbl">
+            <table className="tbl" style={{ tableLayout: "fixed", width: "100%" }}>
               <tbody>
-                {(alerts.data ?? []).map((alert) => (
-                  <tr key={alert.id} className={`sev-edge sev-edge-${alert.severity}`}>
-                    <td style={{ width: 96 }}>
-                      <SeverityBadge severity={alert.severity} short />
-                    </td>
-                    <td style={{ width: 90 }} className="num">
-                      <span
-                        style={{
-                          color:
-                            (alert.age_minutes ?? 0) > 240
-                              ? "var(--sev-medium)"
-                              : "var(--ink-2)",
-                        }}
-                      >
-                        {ageFrom(alert.detected_at)}
-                      </span>
-                    </td>
-                    <td style={{ width: 210 }} className="font-medium">
-                      {alert.node_name}
-                    </td>
-                    <td style={{ width: 150, color: "var(--ink-3)" }}>{alert.locality}</td>
-                    <td style={{ color: "var(--ink-2)" }}>
-                      {ellipsis(alert.description, 62)}
-                    </td>
-                  </tr>
-                ))}
-                {(alerts.data ?? []).length === 0 && (
+                {(d?.incidents ?? []).map((row) => {
+                  const sla = slaStatusMeta(row.sla?.ttr_status);
+                  return (
+                    <tr key={row.key} className={`sev-edge sev-edge-${row.severity}`}>
+                      <td style={{ width: 92 }}>
+                        <SeverityBadge severity={row.severity} short />
+                      </td>
+                      <td className="min-w-0">
+                        <span className="block text-[16px] font-medium truncate" title={row.title}>
+                          {row.title}
+                        </span>
+                        <span className="block text-[13px] truncate" style={{ color: "var(--ink-3)" }}>
+                          <span className="num">{row.ref}</span>
+                          {" · "}
+                          {row.node_name ?? "équipement non identifié"}
+                          {row.site || row.province
+                            ? ` · ${[row.site, row.province].filter(Boolean).join(", ")}`
+                            : ""}
+                        </span>
+                      </td>
+                      <td style={{ width: 150 }} className="text-[14px] truncate">
+                        {row.agent ? (
+                          <span style={{ color: "var(--ink-2)" }}>{ellipsis(row.agent, 18)}</span>
+                        ) : (
+                          <span style={{ color: "var(--sev-high)" }}>non affecté</span>
+                        )}
+                      </td>
+                      <td style={{ width: 96 }} className="num text-[15px] text-right">
+                        {ageFrom(row.opened_at)}
+                      </td>
+                      <td style={{ width: 132 }} className="text-right">
+                        <Badge color={sla.color}>{sla.label}</Badge>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {d && d.incidents.length === 0 && (
                   <tr>
-                    <td colSpan={5} className="text-center" style={{ height: 120, color: "var(--state-up)" }}>
-                      <span style={{ fontSize: 22 }}>Aucune alerte ouverte</span>
+                    <td className="text-center" style={{ height: 160, color: "var(--state-up)" }}>
+                      <span style={{ fontSize: 24 }}>Aucun incident iTop ouvert</span>
                     </td>
                   </tr>
                 )}
               </tbody>
             </table>
           </div>
+          {d && d.total > d.incidents.length && (
+            <footer
+              className="px-3 py-1.5 border-t text-[13px]"
+              style={{ borderColor: "var(--border)", color: "var(--ink-3)" }}
+            >
+              + {num(d.total - d.incidents.length)} autre(s) incident(s) ouvert(s)
+            </footer>
+          )}
         </div>
 
-        {/* --- Parc et réseau --- */}
+        {/* --- Où sont les incidents --- */}
         <div className="col-span-3 flex flex-col gap-3 min-h-0">
-          <div className="panel p-3 flex items-center gap-3">
-            <Donut
-              size={128}
-              thickness={15}
-              centerValue={num(states?.total, "0")}
-              centerLabel="équip."
-              segments={[
-                { key: "down", label: "HS", value: states?.down ?? 0, color: "var(--state-down)" },
-                {
-                  key: "degraded",
-                  label: "Dégradés",
-                  value: states?.degraded ?? 0,
-                  color: "var(--state-degraded)",
-                },
-                { key: "silent", label: "Muets", value: states?.silent ?? 0, color: "var(--state-silent)" },
-                {
-                  key: "maintenance",
-                  label: "Maintenance",
-                  value: states?.maintenance ?? 0,
-                  color: "var(--state-maintenance)",
-                },
-                { key: "up", label: "Nominaux", value: states?.up ?? 0, color: "var(--state-up)" },
-              ]}
+          <div className="panel overflow-hidden shrink-0">
+            <header className="panel-head">
+              <h2 className="panel-title">Carte des incidents</h2>
+            </header>
+            <TerritoryMap
+              level="region"
+              rows={geo.data?.rows}
+              height={250}
+              defaultMetric="incidents"
+              controls={false}
             />
-            <ul className="flex-1 space-y-1">
-              {["down", "degraded", "silent", "up"].map((state) => {
-                const meta = nodeStateMeta(state);
+          </div>
+          <div className="panel min-h-0 flex flex-col flex-1">
+            <header className="panel-head">
+              <h2 className="panel-title">Par région</h2>
+            </header>
+            <ul className="flex-1 overflow-hidden px-3 py-2 space-y-2">
+              {regions.map((row) => {
+                const unknown = row.region.endsWith("non renseignée");
                 return (
-                  <li key={state} className="flex items-center gap-2 text-[14px]">
-                    <span className="dot" style={{ background: meta.color, width: 9, height: 9 }} />
-                    <span className="flex-1" style={{ color: "var(--ink-2)" }}>
-                      {meta.label}
-                    </span>
-                    <span className="num font-semibold">{num(states?.[state], "0")}</span>
+                  <li key={row.region}>
+                    <div className="flex items-baseline gap-2 text-[15px]">
+                      <span
+                        className="flex-1 truncate"
+                        style={{
+                          color: unknown ? "var(--ink-3)" : "var(--ink-2)",
+                          fontStyle: unknown ? "italic" : undefined,
+                        }}
+                      >
+                        {unknown ? "Sans localité" : row.region}
+                      </span>
+                      <span className="num font-semibold">{num(row.count)}</span>
+                    </div>
+                    <div className="h-[5px] rounded-full mt-1" style={{ background: "var(--surface-inset)" }}>
+                      <div
+                        className="h-full rounded-full"
+                        style={{
+                          width: `${Math.min(100, (100 * row.count) / regionMax)}%`,
+                          background: unknown ? "var(--ink-3)" : "var(--accent)",
+                        }}
+                      />
+                    </div>
                   </li>
                 );
               })}
@@ -252,44 +336,11 @@ export default function WallboardPage() {
 
           <div className="panel p-3">
             <div className="text-[13px] uppercase tracking-[0.08em]" style={{ color: "var(--ink-3)" }}>
-              Disponibilité 24 h
+              Plus ancien ticket ouvert
             </div>
-            <div
-              className="num font-bold leading-none mt-1"
-              style={{
-                fontSize: 44,
-                color: availabilityColor(network.data?.availability_pct),
-              }}
-            >
-              {pct(network.data?.availability_pct, 2)}
+            <div className="num font-bold leading-none mt-1" style={{ fontSize: 38, color: "var(--sev-medium)" }}>
+              {ageFrom(d?.oldest_opened_at)}
             </div>
-          </div>
-
-          <div className="panel min-h-0 flex flex-col flex-1">
-            <header className="panel-head">
-              <h2 className="panel-title">Équipements hors service</h2>
-            </header>
-            <ul className="flex-1 overflow-hidden divide-y" style={{ borderColor: "var(--border)" }}>
-              {(nodesDown.data ?? []).slice(0, 8).map((node) => (
-                <li key={node.node_id} className="px-3 py-2 flex items-center gap-2">
-                  <span className="dot" style={{ background: "var(--state-down)", width: 9, height: 9 }} />
-                  <span className="flex-1 min-w-0">
-                    <span className="block text-[15px] font-medium truncate">{node.node_name}</span>
-                    <span className="block text-[12px]" style={{ color: "var(--ink-3)" }}>
-                      {node.locality}
-                    </span>
-                  </span>
-                  <span className="num text-[14px]" style={{ color: "var(--sev-critical)" }}>
-                    {node.since ? ageFrom(node.since) : "—"}
-                  </span>
-                </li>
-              ))}
-              {(nodesDown.data ?? []).length === 0 && (
-                <li className="px-3 py-6 text-center text-[16px]" style={{ color: "var(--state-up)" }}>
-                  Parc nominal
-                </li>
-              )}
-            </ul>
           </div>
         </div>
       </div>
@@ -299,14 +350,12 @@ export default function WallboardPage() {
         style={{ borderColor: "var(--border)", color: "var(--ink-3)" }}
       >
         <span>Échap pour quitter le mode mur</span>
-        {s?.oldest_unacknowledged_at && (
-          <span className="ml-auto">
-            Plus ancienne non acquittée :{" "}
-            <span className="num" style={{ color: "var(--sev-medium)" }}>
-              {ageFrom(s.oldest_unacknowledged_at)}
-            </span>
+        {d?.stale && (
+          <span style={{ color: "var(--sev-critical)" }}>
+            Données iTop non rafraîchies depuis {Math.round((d.snapshot_age_s ?? 0) / 60)} min
           </span>
         )}
+        <span className="ml-auto">Source : iTop · alertes des outils dans le NOC (« Alertes outils »)</span>
       </footer>
     </div>
   );

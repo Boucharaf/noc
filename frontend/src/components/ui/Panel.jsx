@@ -35,11 +35,14 @@ export default function Panel({
         )}
         <h2 className="panel-title">{title}</h2>
         {subtitle && (
-          <span className="text-[11px] truncate" style={{ color: "var(--ink-3)" }}>
+          <span
+            className="min-w-0 text-[11px] leading-tight"
+            style={{ color: "var(--ink-3)", overflowWrap: "anywhere" }}
+          >
             {subtitle}
           </span>
         )}
-        <div className="ml-auto flex items-center gap-1.5">
+        <div className="ml-auto flex max-w-full flex-wrap items-center gap-1.5">
           {actions}
           {to && (
             <Link to={to} className="btn btn-ghost btn-sm">

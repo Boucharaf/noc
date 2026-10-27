@@ -23,14 +23,11 @@ sur l'instance de l'agence.
 """
 from __future__ import annotations
 
-import logging
 import os
 
 from .base import SourceClient, ToolUnavailable
 from .models import Alert, Node, ToolHealth
-from .normalize import iso_to_dt, severity
-
-logger = logging.getLogger(__name__)
+from .normalize import epoch_to_dt, iso_to_dt, severity, source_severity
 
 
 class NSPClient(SourceClient):
@@ -41,6 +38,7 @@ class NSPClient(SourceClient):
         super().__init__(base_url, user, password, verify_ssl, timeout_s)
         self.mode = os.getenv("NSP_FM_MODE", "unknown").strip().lower()
         self._token: str | None = None
+        self.collection_warnings: list[str] = []
 
     def _unconfigured(self) -> ToolUnavailable:
         return ToolUnavailable(
@@ -96,39 +94,41 @@ class NSPClient(SourceClient):
     async def fetch_nodes(self) -> list[Node]:
         if self.mode != "yang":
             # L'API historique n'expose pas d'inventaire exploitable : en mode
-            # classique, NSP ne fournit que des alarmes. Les équipements
-            # apparaîtront par leurs alarmes, ce qui est incomplet mais
-            # honnête — plutôt qu'un inventaire reconstitué au jugé.
+            # classique, NSP ne fournit que des alarmes. Signaler la limite
+            # évite de présenter l'intégration comme une couverture complète.
+            self.collection_warnings.append(
+                "mode NSP classic : inventaire des équipements non disponible"
+            )
             return []
         body = await self._get(
             "/restconf/data/nsp-equipment:network/network-element"
         )
-        elements = (
-            body.get("nsp-equipment:network-element")
-            or body.get("network-element")
-            or []
-        )
-        return [
-            Node(
-                tool=self.name,
-                ref=str(ne.get("ne-id") or ne.get("id")),
-                name=ne.get("ne-name") or ne.get("name") or "(sans nom)",
-                ip=ne.get("ip-address"),
-                state={"in-service": "up", "out-of-service": "down"}.get(
-                    str(ne.get("communication-state", "")).lower(), "unknown"
-                ),
-                node_type=ne.get("ne-type"),
+        nodes = []
+        for ne in _records(body, "network-element"):
+            ref = _field(ne, "ne-id", "neId", "id")
+            if ref is None:
+                raise ToolUnavailable(self.name, "équipement NSP sans identifiant")
+            name = _field(ne, "ne-name", "neName", "name") or "(sans nom)"
+            nodes.append(
+                Node(
+                    tool=self.name,
+                    ref=str(ref),
+                    name=name,
+                    hostname=name,
+                    ip=_field(ne, "ip-address", "ipAddress", "management-ip"),
+                    state=_ne_state(ne),
+                    node_type=_field(ne, "ne-type", "neType", "product"),
+                )
             )
-            for ne in elements
-        ]
+        return nodes
 
     async def fetch_alerts(self) -> list[Alert]:
         if self.mode == "yang":
             body = await self._get("/restconf/data/nsp-fault:alarms/alarm-list")
-            raw = body.get("nsp-fault:alarm-list") or body.get("alarm-list") or []
+            raw = _records(body, "alarm-list", "alarm")
         elif self.mode == "classic":
             body = await self._get("/nbi-fm/api/v1/fm/alarms")
-            raw = (body.get("response") or {}).get("data") or body.get("data") or []
+            raw = _records(body, "alarms", "alarm")
         else:
             raise self._unconfigured()
 
@@ -136,36 +136,115 @@ class NSPClient(SourceClient):
         for alarm in raw:
             # NSP conserve les alarmes acquittées ET terminées dans la même
             # liste : seules celles qui ne sont pas effacées sont actives.
-            if str(alarm.get("severity", "")).lower() == "cleared":
+            raw_severity = str(_field(alarm, "severity", "perceivedSeverity") or "").lower()
+            if raw_severity == "cleared" or _field(alarm, "is-cleared", "isCleared") is True:
                 continue
+            # L'identifiant d'une alarme NSP est son FDN ; `alarm-id` n'existe
+            # que sur certaines versions.
+            ref = _field(alarm, "alarm-fdn", "alarmFdn", "fdn", "alarm-id", "alarmId", "id")
+            if ref is None:
+                raise ToolUnavailable(self.name, "alarme NSP sans identifiant")
+            since = _when(
+                _field(
+                    alarm,
+                    "first-time-detected", "firstTimeDetected",
+                    "last-time-detected", "lastTimeDetected", "timeStamp",
+                )
+            )
+            if since is None:
+                raise ToolUnavailable(
+                    self.name, f"alarme {ref} sans date de détection valide"
+                )
+            ne_id = _field(alarm, "ne-id", "neId")
             alerts.append(
                 Alert(
                     tool=self.name,
-                    ref=str(alarm.get("alarm-id") or alarm.get("id")),
-                    severity=severity("nsp", alarm.get("severity")),
-                    message=alarm.get("additional-text")
-                    or alarm.get("alarm-name")
+                    ref=str(ref),
+                    severity=severity("nsp", raw_severity),
+                    source_severity=source_severity("nsp", raw_severity),
+                    message=_field(
+                        alarm, "additional-text", "additionalText", "alarm-name", "alarmName"
+                    )
                     or "(sans libellé)",
-                    since=iso_to_dt(
-                        alarm.get("first-time-detected") or alarm.get("timeStamp")
+                    since=since,
+                    node_ref=str(ne_id) if ne_id not in (None, "") else None,
+                    node_name=_field(alarm, "ne-name", "neName"),
+                    acknowledged=_truthy(
+                        _field(alarm, "acknowledged", "isAcknowledged", "acknowledgement-state")
                     ),
-                    node_ref=str(alarm.get("ne-id") or "") or None,
-                    node_name=alarm.get("ne-name"),
-                    acknowledged=bool(alarm.get("acknowledged")),
-                    acknowledged_at=iso_to_dt(alarm.get("acknowledged-time")),
-                    acknowledged_by=(
-                        alarm.get("acknowledged-user")
-                        or alarm.get("acknowledged-by")
+                    acknowledged_at=_when(
+                        _field(alarm, "acknowledged-time", "acknowledgedTime")
                     ),
-                    acknowledgement_note=(
-                        alarm.get("acknowledgement-comment")
-                        or alarm.get("acknowledgement-text")
-                    ),
-                    is_maintenance=bool(alarm.get("in-maintenance")),
-                    last_change_at=iso_to_dt(
-                        alarm.get("last-state-change-time") or alarm.get("last-change-time")
-                    ),
-                    source_status=str(alarm.get("state")) if alarm.get("state") is not None else None,
                 )
             )
-        return [a for a in alerts if a.since is not None]
+        return alerts
+
+
+def _records(body, *keys: str) -> list[dict]:
+    """Liste d'enregistrements, quel que soit l'emballage de la réponse.
+
+    RESTCONF préfixe la racine par le module (`nsp-fault:alarm-list`) et
+    enveloppe la liste dans un conteneur (`{"alarm": [...]}`) ; l'API
+    historique la place sous `response.data`. Itérer directement sur un
+    conteneur parcourrait ses CLÉS, d'où cette normalisation.
+    """
+    value = body
+    for _ in range(4):
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if not isinstance(value, dict):
+            return []
+        for wrapper in ("response", "data"):
+            if wrapper in value and not any(k in value for k in keys):
+                value = value[wrapper]
+                break
+        else:
+            found = None
+            for key, item in value.items():
+                if key.split(":", 1)[-1] in keys:
+                    found = item
+                    break
+            if found is None:
+                return []
+            value = found
+    return []
+
+
+def _field(record: dict, *names: str):
+    """Premier champ présent, avec ou sans préfixe de module YANG."""
+    unprefixed = {key.split(":", 1)[-1]: value for key, value in record.items()}
+    for name in names:
+        value = unprefixed.get(name)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _when(value):
+    """Horodatage NSP : ISO 8601 (RESTCONF) ou millisecondes UNIX (NBI)."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) or str(value).isdigit():
+        return epoch_to_dt(int(value) // 1000 if int(value) > 10**11 else int(value))
+    return iso_to_dt(value)
+
+
+def _truthy(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes", "acknowledged")
+    return bool(value)
+
+
+def _ne_state(ne: dict) -> str:
+    for name in ("communication-state", "communicationState", "operational-state", "operState"):
+        raw = _field(ne, name)
+        if raw is None:
+            continue
+        state = str(raw).strip().lower()
+        if state in ("up", "reachable", "in-service", "enabled", "available"):
+            return "up"
+        if state in ("down", "unreachable", "out-of-service", "disabled", "failed"):
+            return "down"
+        if state in ("degraded", "partially-reachable"):
+            return "degraded"
+    return "unknown"

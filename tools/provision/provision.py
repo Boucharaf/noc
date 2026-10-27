@@ -99,15 +99,42 @@ LAB_HOSTS = [
         "http_path": "/",
         "site": "Laboratoire",
     },
-    {
-        "name": "outil-netxms",
-        "dns": "netxms-server",
-        "role": "Supervision NetXMS — serveur et API Legacy Web",
-        "http_port": 8080,
-        "http_path": "/netxms-websvc/",
-        "site": "Laboratoire",
-    },
 ]
+
+
+# ---------------------------------------------------------------------------
+# Le réseau de laboratoire (tools/netdevice, profil compose « netlab »)
+# ---------------------------------------------------------------------------
+# Des conteneurs qui tiennent le rôle d'équipements de site : vrai agent SNMP,
+# vrai trafic, latence et pertes appliquées au lien. Supervisés en SNMP
+# (interfaces, débits, CPU, mémoire) et en ICMP (latence, pertes), ils
+# alimentent les panneaux réseau du NOC.
+#
+# Localité : groupes « Site/… », « Province/… », « Region/… » — la convention
+# lue par integrations/normalize.py::locality_from_groups —, avec les noms
+# du découpage qu'utilise le NOC (17 régions). Coordonnées : celles de la
+# ville, posées dans l'inventaire de l'hôte.
+NET_DEVICES = [
+    {"name": "LAB-OUAGA-CORE-RT01", "dns": "lab-ouaga-core-rt01", "role": "Routeur de cœur",
+     "site": "Laboratoire NOC Ouagadougou", "province": "Kadiogo", "region": "Kadiogo",
+     "lat": 12.3714, "lon": -1.5197},
+    {"name": "LAB-OUAGA-DIST-SW01", "dns": "lab-ouaga-dist-sw01", "role": "Commutateur de distribution",
+     "site": "Laboratoire NOC Ouagadougou", "province": "Kadiogo", "region": "Kadiogo",
+     "lat": 12.3719, "lon": -1.5189},
+    {"name": "LAB-BOBO-RT01", "dns": "lab-bobo-rt01", "role": "Routeur de site (fibre)",
+     "site": "Laboratoire Bobo-Dioulasso", "province": "Houet", "region": "Guiriko",
+     "lat": 11.1771, "lon": -4.2979},
+    {"name": "LAB-MANGA-RT01", "dns": "lab-manga-rt01", "role": "Routeur de site (faisceau hertzien)",
+     "site": "Laboratoire Manga", "province": "Zoundweogo", "region": "Nazinon",
+     "lat": 11.6636, "lon": -1.0731},
+    {"name": "LAB-OUAHIGOUYA-VSAT01", "dns": "lab-ouahigouya-vsat01", "role": "Terminal VSAT",
+     "site": "Laboratoire Ouahigouya", "province": "Yatenga", "region": "Yaadga",
+     "lat": 13.5828, "lon": -2.4216},
+    {"name": "LAB-DEDOUGOU-RT01", "dns": "lab-dedougou-rt01", "role": "Routeur de site (lien instable)",
+     "site": "Laboratoire Dédougou", "province": "Mouhoun", "region": "Bankui",
+     "lat": 12.4634, "lon": -3.4608},
+]
+NET_GROUP = "RESINA — Réseau de laboratoire"
 
 
 class Http:
@@ -227,6 +254,85 @@ class Zabbix:
 
         for host in LAB_HOSTS:
             self._ensure_host(host, [site_group, lab_group], icmp_template, http_template)
+
+        self._network_devices(icmp_template)
+
+    def _network_devices(self, icmp_tpl):
+        """Équipements du réseau de laboratoire, supervisés en SNMP + ICMP.
+
+        « Linux by SNMP » (livré avec Zabbix 7.0) découvre les interfaces
+        (IF-MIB, compteurs 64 bits → débits en bit/s), le CPU et la mémoire
+        (HOST-RESOURCES), et embarque déjà les sondes ICMP (latence, pertes) :
+        lui ajouter « ICMP Ping » est refusé (clé icmpping en double).
+        """
+        snmp_tpl = self.template_id("Linux by SNMP")
+        if not snmp_tpl:
+            log.warning("Zabbix : modèle « Linux by SNMP » introuvable — équipements sans SNMP")
+        net_group = self.ensure_group(NET_GROUP)
+        for device in NET_DEVICES:
+            groups = [
+                net_group,
+                self.ensure_group(f"Site/{device['site']}"),
+                self.ensure_group(f"Province/{device['province']}"),
+                self.ensure_group(f"Region/{device['region']}"),
+            ]
+            existing = self._call(
+                "host.get", {"filter": {"host": [device["name"]]}, "output": ["hostid"]}
+            )
+            if existing:
+                log.info("Zabbix : équipement « %s » déjà présent", device["name"])
+                continue
+            log.info("Zabbix : création de l'équipement « %s » (%s)", device["name"], device["dns"])
+            created = self._call(
+                "host.create",
+                {
+                    "host": device["name"],
+                    "name": f"{device['name']} — {device['role']}",
+                    # Interface SNMPv2c en mode DNS (voir _ensure_host : `ip`
+                    # vide mais présent). La communauté passe par une macro,
+                    # comme en production.
+                    "interfaces": [
+                        {
+                            "type": 2,
+                            "main": 1,
+                            "useip": 0,
+                            "ip": "",
+                            "dns": device["dns"],
+                            "port": "161",
+                            "details": {
+                                "version": 2,
+                                "bulk": 1,
+                                "community": "{$SNMP_COMMUNITY}",
+                            },
+                        }
+                    ],
+                    "macros": [{"macro": "{$SNMP_COMMUNITY}", "value": "public"}],
+                    "groups": [{"groupid": g} for g in groups],
+                    "templates": [{"templateid": t} for t in ((snmp_tpl,) if snmp_tpl else (icmp_tpl,)) if t],
+                    "inventory_mode": 0,  # manuel
+                    "inventory": {
+                        "location": device["site"],
+                        "location_lat": str(device["lat"]),
+                        "location_lon": str(device["lon"]),
+                        "type": device["role"],
+                    },
+                },
+            )
+            self._discover_now(created["hostids"][0])
+
+    def _discover_now(self, hostid: str):
+        """Lance tout de suite les règles de découverte (interfaces…).
+
+        Par défaut le gabarit ne découvre qu'une fois par heure : sans ce
+        coup de pouce, les débits n'apparaîtraient qu'une heure après le
+        provisionnement.
+        """
+        rules = self._call("discoveryrule.get", {"hostids": [hostid], "output": ["itemid"]})
+        if rules:
+            self._call(
+                "task.create",
+                [{"type": 6, "request": {"itemid": rule["itemid"]}} for rule in rules],
+            )
 
     def _repoint_server_agent(self):
         hosts = self._call(
@@ -425,84 +531,6 @@ class ITop:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  NetXMS
-# ═══════════════════════════════════════════════════════════════════════
-class NetXMS:
-    """Provisionnement via l'API Legacy Web (netxms-websvc).
-
-    Contrairement à Centreon, cette API accepte la création d'objets depuis
-    l'extérieur (POST /objects) : pas besoin d'un script embarqué dans le
-    conteneur.
-
-    ⚠️ `OBJECT_NODE` et `OBJECT_CONTAINER` reprennent l'énumération publique
-    de NetXMS (nxcldefs.h) telle que documentée par ses développeurs pour les
-    scripts NXSL ; seule la valeur ZONE=6 de cette même énumération est
-    confirmée par un exemple d'appel HTTP réel (rapport de bogue de
-    l'éditeur, NX-2596). NODE=2 et CONTAINER=5 suivent la même énumération
-    mais n'ont pas été vérifiés par un appel HTTP équivalent — à confirmer si
-    la création échoue avec un code inattendu.
-    """
-
-    OBJECT_NODE = 2
-    OBJECT_CONTAINER = 5
-    SERVICE_ROOT = 2  # id fixe de l'objet « Infrastructure Services »
-
-    def __init__(self, url: str, user: str, password: str):
-        self.api = url.rstrip("/")
-        body = Http.post_json(f"{self.api}/sessions", {"login": user, "password": password})
-        self.session = body["sessionHandle"]
-
-    def _call(self, method: str, path: str, payload: dict | None = None):
-        headers = {"Session-Id": self.session}
-        url = f"{self.api}{path}"
-        if method == "GET":
-            return Http.get(url, headers)
-        return Http.post_json(url, payload or {}, headers)
-
-    def _find(self, object_class: str, name: str):
-        objects = self._call("GET", f"/objects?class={object_class}")
-        if isinstance(objects, dict):
-            objects = objects.get("objects", objects.get("object", []))
-        for obj in objects or []:
-            if obj.get("objectName") == name or obj.get("name") == name:
-                return obj.get("objectId") or obj.get("id")
-        return None
-
-    def ensure_container(self, name: str, parent_id: int) -> int:
-        found = self._find("container", name)
-        if found:
-            return found
-        log.info("NetXMS : création du conteneur « %s »", name)
-        created = self._call(
-            "POST", "/objects",
-            {"objectType": self.OBJECT_CONTAINER, "name": name, "parentId": parent_id},
-        )
-        return created.get("objectId") or created.get("id")
-
-    def ensure_node(self, host: dict, parent_id: int):
-        if self._find("node", host["name"]):
-            log.info("NetXMS : nœud « %s » déjà présent", host["name"])
-            return
-        log.info("NetXMS : création du nœud « %s » (%s)", host["name"], host["dns"])
-        self._call(
-            "POST", "/objects",
-            {
-                "objectType": self.OBJECT_NODE,
-                "name": host["name"],
-                "parentId": parent_id,
-                "primaryHostName": host["dns"],
-            },
-        )
-
-    def run(self):
-        # Convention identique aux trois autres outils : un conteneur
-        # « Site/<nom> » porte la localité lue par integrations/netxms.py.
-        site_container = self.ensure_container("Site/Laboratoire", self.SERVICE_ROOT)
-        for host in LAB_HOSTS:
-            self.ensure_node(host, site_container)
-
-
-# ═══════════════════════════════════════════════════════════════════════
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -527,7 +555,7 @@ def main() -> int:
         password = os.getenv(f"{tool.upper()}_API_PASSWORD", "")
         try:
             log.info("─── %s ───", tool)
-            {"zabbix": Zabbix, "centreon": Centreon, "itop": ITop, "netxms": NetXMS}[tool](
+            {"zabbix": Zabbix, "centreon": Centreon, "itop": ITop}[tool](
                 url, user, password
             ).run()
         except Exception as exc:  # noqa: BLE001 — un outil en échec ne doit

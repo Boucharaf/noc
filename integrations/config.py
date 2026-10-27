@@ -117,6 +117,7 @@ def build_client(name: str):
         return ITopClient(
             config.url, config.user, config.password, config.verify_ssl,
             config.timeout_s, classes, event_field,
+            os.getenv("ITOP_TIMEZONE", "Europe/Paris").strip(),
         )
     if name == "netxms":
         # DEUX ACCÈS, choisis par la forme de l'URL — le même interrupteur

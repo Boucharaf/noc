@@ -7,16 +7,11 @@ import { BarChart } from "../components/charts";
 import { Notice } from "../components/ui/Controls";
 import { PageHeader, PeriodPicker } from "../components/layout/TopBar";
 import { QueryBoundary } from "../components/ui/States";
-import { MONTHS_FR_SHORT, duration, monthLabel, num, pct } from "../lib/format";
+import { MONTHS_FR_SHORT, decimal, duration, monthLabel, num, pct } from "../lib/format";
 import { errorMessage } from "../api/client";
 import { report } from "../api/noc";
 import { saveBlob } from "../lib/download";
-import {
-  useKpiMonthlyTrend,
-  useKpiSummary,
-  useResolutionTimes,
-  useSla,
-} from "../hooks/queries";
+import { useKpiSummary, useKpiTrend, useSla } from "../hooks/queries";
 import { usePeriodStore } from "../store/ui";
 
 /**
@@ -37,8 +32,8 @@ export default function ReportsPage() {
 
   const summary = useKpiSummary();
   const sla = useSla();
-  const resolution = useResolutionTimes({ month, year });
-  const trend = useKpiMonthlyTrend({ months: 12, month, year });
+  // 12 MOIS, soit ~365 lignes journalières regroupées ci-dessous par mois.
+  const trend = useKpiTrend(365);
 
   const [error, setError] = useState(null);
   const [downloading, setDownloading] = useState(null);
@@ -57,7 +52,7 @@ export default function ReportsPage() {
   };
 
   const kpi = summary.data?.kpi;
-  const trendData = trend.data ?? [];
+  const trendData = monthlyAverages(trend.data ?? []);
 
   return (
     <div className="space-y-2.5">
@@ -88,7 +83,7 @@ export default function ReportsPage() {
           <FileText size={34} strokeWidth={1.3} style={{ color: "var(--ink-3)" }} />
           <div className="min-w-0 flex-1">
             <p className="text-[12.5px]" style={{ color: "var(--ink-2)" }}>
-              Synthèse de la disponibilité, des alertes, des causes, du respect des
+              Synthèse de la disponibilité, des incidents, des causes, du respect des
               engagements de service et des sites les plus affectés. Les fenêtres de
               maintenance planifiée sont exclues de tous les calculs.
             </p>
@@ -122,16 +117,11 @@ export default function ReportsPage() {
       </Panel>
 
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-        <Stat
-          label="Disponibilité"
-          value={pct(kpi?.network_availability_pct, 2)}
-          target={`≥ ${pct(sla.data?.availability_target_pct, 1)}`}
-          hint="seuil le plus exigeant parmi les gravités"
-        />
-        <Stat label="Alertes actives (moy.)" value={num(kpi?.total_incidents)} />
-        <Stat label="Résolues par le NOC" value={num(resolution.data?.handled_alerts)} />
-        <Stat label="Alertes critiques (moy.)" value={num(kpi?.critical)} target="≤ 5" />
-        <Stat label="MTTR" value={duration(resolution.data?.mttr_minutes)} target="≤ 4 h" />
+        <Stat label="Disponibilité" value={pct(kpi?.network_availability_pct, 2)} target="≥ 99 %" />
+        <Stat label="Alertes actives (moy.)" value={decimal(kpi?.avg_active_alerts, 1)} />
+        <Stat label="Résolus" value={num(kpi?.resolved)} />
+        <Stat label="Critiques actives (moy.)" value={decimal(kpi?.avg_active_critical, 1)} />
+        <Stat label="MTTR" value={duration(kpi?.avg_mttr_minutes)} target="≤ 4 h" />
         <Stat
           label="Conformité SLA"
           value={pct(sla.data?.global_compliance_pct, 1)}
@@ -139,10 +129,7 @@ export default function ReportsPage() {
         />
       </div>
 
-      <Panel
-        title="Historique sur 12 mois"
-        subtitle={`jusqu'à ${monthLabel(month, year)} · alertes suivies et résolues par le NOC`}
-      >
+      <Panel title="Historique sur 12 mois" subtitle="ce que couvrent les rapports disponibles">
         <QueryBoundary query={trend} compact emptyMessage="Aucun historique">
           <BarChart
             height={210}
@@ -150,28 +137,49 @@ export default function ReportsPage() {
             legend
             series={[
               {
-                label: "Alertes prises en charge",
-                data: trendData.map((point) => point.handled),
+                label: "Alertes actives (moy.)",
+                data: trendData.map((point) => point.avg_alerts),
                 color: "var(--sev-high)",
               },
               {
-                label: "Résolus",
-                data: trendData.map((point) => point.resolved),
-                color: "var(--state-up)",
+                label: "Critiques actives (moy.)",
+                data: trendData.map((point) => point.avg_critical),
+                color: "var(--sev-critical)",
               },
             ]}
           />
         </QueryBoundary>
       </Panel>
 
-      <Panel title="Génération automatique">
-        <p className="text-[12px]" style={{ color: "var(--ink-2)" }}>
-          Un rapport est également produit sans intervention le 1<sup>er</sup> de chaque
-          mois à 02 h 30, par la tâche planifiée de l'ETL qui appelle{" "}
-          <code className="mono-xs">POST /api/internal/reports/monthly</code>. Le mois
-          généré est celui qui vient de s'achever.
-        </p>
-      </Panel>
     </div>
   );
+}
+
+/**
+ * Moyennes mensuelles à partir des agrégats JOURNALIERS de /kpi/trend.
+ *
+ * Seuls les jours effectivement collectés comptent : un mois de dix jours de
+ * données n'est pas divisé par trente.
+ */
+function monthlyAverages(days) {
+  const months = new Map();
+  for (const row of days) {
+    if (!row.day) continue;
+    const [year, month] = row.day.split("-").map(Number);
+    const key = `${year}-${month}`;
+    const bucket = months.get(key) ?? { year, month, alerts: [], critical: [] };
+    if (row.alerts != null) bucket.alerts.push(row.alerts);
+    if (row.critical != null) bucket.critical.push(row.critical);
+    months.set(key, bucket);
+  }
+  const mean = (values) =>
+    values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+  return [...months.values()]
+    .sort((a, b) => a.year - b.year || a.month - b.month)
+    .map((bucket) => ({
+      year: bucket.year,
+      month: bucket.month,
+      avg_alerts: mean(bucket.alerts),
+      avg_critical: mean(bucket.critical),
+    }));
 }

@@ -14,13 +14,13 @@ Chaque rôle atterrit sur **son** tableau de bord après connexion. Les
 
 | Rôle | Écran d'accueil | Ce qu'il y trouve |
 |---|---|---|
-| **Directeur** | `/direction` | Niveau 1 — disponibilité globale, SLA, MTTR/MTTA, incidents critiques, tendance 6 mois, Top 10 sites, ministères, causes, carte, couverture, rapports PDF/DOCX. **Aucune action d'exploitation** : un directeur qui acquitte une alerte court-circuite la file du technicien |
-| **Chef NOC** | `/supervision` | Niveau 2 — état du réseau, courbe agrégée avec bande « pire équipement », répartition du parc, **charge par intervenant** (ligne « non affecté » en tête), **santé de la collecte ETL**, maintenances en cours, sites les plus touchés |
+| **Directeur** | `/direction` | Niveau 1 — disponibilité globale (KPI), conformité TTA/TTR, incidents critiques, tendance, Top sites, causes, carte, couverture et rapports PDF/DOCX. Écran de pilotage sans boutons d'exploitation ; les droits d'action du rôle restent contrôlés par le backend |
+| **Chef NOC** | `/supervision` | Niveau 2 — état du réseau, courbe agrégée sur un échantillon indiqué, répartition du parc, **charge par intervenant** (dont les alertes non affectées), **santé de la collecte ETL**, maintenances en cours et sites les plus touchés |
 | **Technicien** | `/console` | Niveau 3 — file de traitement en pleine largeur (À traiter / À moi / Tout), équipements hors service, constantes réseau, répartition des alertes. Tout se traite dans un tiroir sans quitter la file |
 | **Agent terrain** | `/terrain` | Tournée du jour, changement d'état (je pars → sur site → compte rendu), relevé GPS, signalement de panne. Pensé pour un téléphone tenu d'une main |
 
 **Écrans transverses** : `/incidents`, `/equipements` + `/equipements/:id`
-(niveau 4), `/carte`, `/performance`, `/sla`, `/integrations`,
+(niveau 4), `/performance`, `/sla`, `/integrations`,
 `/maintenances`, `/rapports`, `/utilisateurs`, `/compte`, `/mur`.
 
 ### Une contrainte d'API à connaître
@@ -54,11 +54,12 @@ MTTR qui danse d'un pixel à chaque rafraîchissement est illisible en
 vision périphérique, et la vision périphérique est le mode de lecture
 normal d'un mur d'écrans.
 
-**4. Rien ne bouge sans raison.** Les seules animations permanentes sont
-le point « live » et le ticker d'alertes ; les deux portent une
-information (le flux temps réel est vivant). Le clignotement est réservé
-aux critiques **non acquittés** : dès que quelqu'un prend la main, la
-ligne cesse de réclamer l'attention de toute la salle.
+**4. Rien ne bouge sans raison.** Le bandeau d'alertes reste fixe et
+résume toutes les alertes non acquittées par gravité : une liste qui
+défile détourne l'attention sans permettre de comparer les alertes. Le
+clignotement est réservé aux critiques **non acquittés** : dès que
+quelqu'un prend la main, la ligne cesse de réclamer l'attention de toute
+la salle.
 `prefers-reduced-motion` coupe tout.
 
 ### Trois règles d'affichage tenues partout
@@ -218,18 +219,27 @@ EOF
 
 ## 8. Points d'attention connus
 
-**La carte peut être vide.** `dim_locality.latitude` n'est renseignée que
-par `etl/scripts/discover_geography.py`. Tant qu'il n'a pas tourné, aucun
-site n'a de coordonnées. La carte annonce alors explicitement le nombre de
-sites non localisés plutôt que d'afficher un fond vide.
+**La carte n'affiche que les sites dont les équipements fournissent des
+coordonnées valides.** Le connecteur NetXMS par base peut les lire depuis
+l'inventaire ; si aucune source ne les fournit, la carte annonce le nombre
+de sites non localisés plutôt que d'inventer leur position. Le panneau
+« Top 10 » classe les sites par moyenne d'alertes actives quotidiennes sur
+les 30 derniers jours ; `kpi_daily` ne conserve pas l'historique des
+incidents résolus.
 
-**Le classement par ministère peut être vide.** Même cause :
-`dim_ministry` n'est peuplée que par ce script.
+**Le classement par ministère n'est pas alimenté.** Le référentiel
+`dim_ministry` de l'ancien entrepôt a été supprimé ; l'API ne fournit pas
+d'agrégat ministériel. Les équipements peuvent toutefois porter une
+organisation provenant des outils sources. Aucun ministère ou organisation
+n'est déduit à partir du seul nom de site.
 
 **Certaines métriques sont absentes selon les outils.** Les tuiles
 affichent « non collectée » et non « 0 ». Les onglets de télémétrie d'un
 équipement ne montrent que les séries réellement reçues sur 7 jours.
 
-**Le taux de couverture vaudra ~100 %** tant qu'un inventaire théorique
-complet (CMDB iTop) n'alimentera pas `dim_node` : le parc de référence et
-le parc supervisé sont aujourd'hui le même ensemble. L'écran le signale.
+**La couverture est calculée sur le parc déjà découvert par les sources
+branchées.** Sans inventaire indépendant et complet (par exemple une CMDB),
+elle ne permet pas de détecter un équipement absent de toutes les sources ;
+le taux d'équipements supervisés peut donc sembler proche de 100 %. Le
+pourcentage d'équipements vus par une seule source reste un indicateur de
+fragilité, pas une mesure de couverture par rapport au parc théorique.

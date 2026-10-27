@@ -7,26 +7,21 @@ faibles privilèges pourrait appeler ces routes directement en HTTP.
 """
 import hmac
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.core import session_store
-from app.core.config import (
-    INTERNAL_API_KEY,
-    RATE_LIMIT_USER_READ_PER_MIN,
-    RATE_LIMIT_USER_WRITE_PER_MIN,
-)
-from app.core.rate_limit import enforce_rate_limit, request_scope
+from app.core.config import INTERNAL_API_KEY
 from app.db.session import get_db
 from app.models import User
 from app.services.auth_service import decode_access_token
 
 bearer_scheme = HTTPBearer(auto_error=True)
+internal_bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def get_current_user(
-    request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> User:
@@ -51,10 +46,6 @@ def get_current_user(
     if session_store.is_access_token_revoked(user.id, payload.get("iat")):
         raise HTTPException(status_code=401, detail="Session révoquée, reconnexion nécessaire.")
 
-    scope = request_scope(request)
-    limit = RATE_LIMIT_USER_READ_PER_MIN if scope == "read" else RATE_LIMIT_USER_WRITE_PER_MIN
-    enforce_rate_limit(scope, limit, "user", str(user.id))
-
     return user
 
 
@@ -73,7 +64,7 @@ def require_role(*allowed_roles: str):
 
 
 def require_internal_key(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    credentials: HTTPAuthorizationCredentials | None = Depends(internal_bearer_scheme),
 ) -> None:
     """Garde des routes /api/internal/*, appelées par l'ETL.
 
@@ -88,5 +79,7 @@ def require_internal_key(
         )
     # Comparaison à temps constant : `!=` s'arrête au premier caractère
     # différent, et la durée de la réponse renseignerait sur la clé.
-    if not hmac.compare_digest(credentials.credentials.encode(), INTERNAL_API_KEY.encode()):
+    if credentials is None or not hmac.compare_digest(
+        credentials.credentials.encode(), INTERNAL_API_KEY.encode()
+    ):
         raise HTTPException(status_code=401, detail="Clé interne invalide.")

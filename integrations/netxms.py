@@ -15,14 +15,11 @@ l'instance réelle — les noms de DCI sont libres dans NetXMS.
 """
 from __future__ import annotations
 
-import logging
 from datetime import datetime
 
 from .base import SourceClient, ToolUnavailable
 from .models import Alert, MetricPoint, Node, ToolHealth
-from .normalize import epoch_to_dt, severity
-
-logger = logging.getLogger(__name__)
+from .normalize import epoch_to_dt, severity, source_severity
 
 # Classes d'objets NetXMS retenues à l'inventaire. NetXMS modélise aussi les
 # conteneurs, les sous-réseaux et les grappes : les remonter comme des
@@ -68,47 +65,79 @@ class NetXMSClient(SourceClient):
 
         return await self._health(probe)
 
-    async def _get_all(self, path: str, params: dict, collection: str) -> list[dict]:
-        objects: list[dict] = []
-        seen_ids: set[str] = set()
-
-        for page in range(_MAX_PAGES):
-            body = await self._get(
-                path,
-                {**params, "offset": page * _PAGE_SIZE, "limit": _PAGE_SIZE},
-            )
-            rows = body if isinstance(body, list) else (body.get(collection) or [])
-            if not rows:
-                return objects
-
-            added = 0
-            for item in rows:
-                object_id = str(item.get("objectId") or item.get("id") or "")
-                if object_id and object_id in seen_ids:
-                    continue
-                if object_id:
-                    seen_ids.add(object_id)
-                objects.append(item)
-                added += 1
-
-            if len(rows) < _PAGE_SIZE:
-                return objects
-            if not added:
-                logger.warning("NetXMS : pagination arrêtée, page répétée à l'offset %d", page * _PAGE_SIZE)
-                return objects
-
-        logger.warning("NetXMS : pagination interrompue après %d pages", _MAX_PAGES)
-        return objects
-
     async def fetch_nodes(self) -> list[Node]:
+        objects = []
+        seen_ids: set[str] = set()
+        offset = 0
+        for _ in range(_MAX_PAGES):
+            previous_ids = seen_ids.copy()
+            body = await self._get(
+                "/objects",
+                {"class": "Node", "offset": offset, "limit": _PAGE_SIZE},
+            )
+            if isinstance(body, list):
+                page = body
+                total = None
+            elif isinstance(body, dict):
+                page = body.get("objects", [])
+                total = body.get("totalCount", body.get("total"))
+                if isinstance(page, dict):
+                    page = list(page.values())
+            else:
+                raise ToolUnavailable(
+                    self.name, "réponse /objects invalide : liste ou objet attendu"
+                )
+            if not isinstance(page, list):
+                raise ToolUnavailable(self.name, "réponse /objects invalide : objects")
+            objects.extend(page)
+            for obj in page:
+                ref = obj.get("objectId") or obj.get("id")
+                if ref is not None:
+                    seen_ids.add(str(ref))
+            if total is not None:
+                try:
+                    expected_total = int(total)
+                except (TypeError, ValueError) as exc:
+                    raise ToolUnavailable(
+                        self.name, "réponse /objects avec total invalide"
+                    ) from exc
+                if len(objects) >= expected_total:
+                    break
+                if len(page) < _PAGE_SIZE:
+                    raise ToolUnavailable(
+                        self.name,
+                        f"pagination /objects incomplète : {len(objects)} objet(s) "
+                        f"reçu(s) sur {expected_total} annoncés",
+                    )
+            elif len(page) < _PAGE_SIZE:
+                break
+            new_page_ids = {
+                str(obj.get("objectId") or obj.get("id"))
+                for obj in page
+                if obj.get("objectId") is not None or obj.get("id") is not None
+            } - previous_ids
+            if not page or not new_page_ids:
+                raise ToolUnavailable(
+                    self.name, "pagination /objects répétée; inventaire incomplet"
+                )
+            offset += len(page)
+        else:
+            raise ToolUnavailable(
+                self.name,
+                f"pagination /objects interrompue après {_MAX_PAGES} pages",
+            )
+
         nodes: list[Node] = []
-        for obj in await self._get_all("/objects", {"class": "Node"}, "objects"):
+        for obj in objects:
             if obj.get("objectClass") and obj["objectClass"] not in _NODE_CLASSES:
                 continue
+            ref = obj.get("objectId") or obj.get("id")
+            if ref is None:
+                raise ToolUnavailable(self.name, "équipement NetXMS sans identifiant")
             nodes.append(
                 Node(
                     tool=self.name,
-                    ref=str(obj.get("objectId") or obj.get("id")),
+                    ref=str(ref),
                     name=obj.get("objectName") or obj.get("name") or "(sans nom)",
                     hostname=obj.get("objectName") or obj.get("name") or "",
                     ip=obj.get("primaryIP") or obj.get("ipAddress"),
@@ -128,71 +157,76 @@ class NetXMSClient(SourceClient):
             state = alarm.get("state", 0)
             if state not in (0, 1):
                 continue
+            since = epoch_to_dt(alarm.get("creationTime"))
+            if since is None:
+                raise ToolUnavailable(
+                    self.name,
+                    f"alarme {alarm.get('id') or alarm.get('alarmId')} "
+                    "sans date de création valide",
+                )
+            ref = alarm.get("id") or alarm.get("alarmId")
+            if ref is None:
+                raise ToolUnavailable(self.name, "alarme NetXMS sans identifiant")
             alerts.append(
                 Alert(
                     tool=self.name,
-                    ref=str(alarm.get("id") or alarm.get("alarmId")),
+                    ref=str(ref),
                     severity=severity("netxms", alarm.get("currentSeverity", alarm.get("severity"))),
+                    source_severity=source_severity(
+                        "netxms", alarm.get("currentSeverity", alarm.get("severity"))
+                    ),
                     message=alarm.get("message") or "(sans libellé)",
-                    since=epoch_to_dt(alarm.get("creationTime")),
+                    since=since,
                     node_ref=str(alarm.get("sourceObjectId") or "") or None,
                     node_name=alarm.get("sourceObjectName"),
                     acknowledged=state == 1,
                     acknowledged_at=epoch_to_dt(alarm.get("ackTime")),
-                    acknowledged_by=(
-                        alarm.get("acknowledgedBy")
-                        or alarm.get("acknowledgingUser")
-                    ),
-                    acknowledgement_note=(
-                        alarm.get("acknowledgementComment")
-                        or alarm.get("acknowledgementMessage")
-                    ),
-                    is_maintenance=bool(alarm.get("inMaintenance")),
-                    last_change_at=epoch_to_dt(alarm.get("lastStateChangeTime")),
-                    source_status=str(alarm.get("state")) if alarm.get("state") is not None else None,
                 )
             )
-        return [a for a in alerts if a.since is not None]
+        return alerts
 
     async def fetch_history(
         self, node_ref: str, metric_type: str, start: datetime, end: datetime
     ) -> list[MetricPoint]:
-        try:
-            dcis = await self._get(f"/objects/{node_ref}/dcis")
-            items = dcis.get("dcis", dcis) if isinstance(dcis, dict) else dcis
-            
-            dci_id = None
-            for item in items:
-                name = str(item.get("name") or item.get("description") or "").lower()
-                # Mapping empirique pour les métriques personnalisées
-                if metric_type == "rssi" and "rssi" in name:
-                    dci_id = item.get("id")
-                    break
-                if metric_type == "temp_cpu" and ("temp" in name or "température" in name):
-                    dci_id = item.get("id")
-                    break
-                if metric_type == "dci_custom":
-                    dci_id = item.get("id")
-                    break
+        dcis = await self._get(f"/objects/{node_ref}/dcis")
+        items = dcis.get("dcis", dcis) if isinstance(dcis, dict) else dcis
 
-            if not dci_id:
-                return []
+        dci_id = None
+        for item in items:
+            name = str(item.get("name") or item.get("description") or "").lower()
+            # Mapping empirique pour les métriques personnalisées
+            if metric_type == "rssi" and "rssi" in name:
+                dci_id = item.get("id")
+                break
+            if metric_type == "temp_cpu" and ("temp" in name or "température" in name):
+                dci_id = item.get("id")
+                break
+            # `dci_custom` ne désigne aucune DCI précise : prendre la première
+            # de la liste afficherait une mesure quelconque, d'unité inconnue,
+            # sous un libellé qui laisse croire à un indicateur choisi.
 
-            start_ts = int(start.timestamp())
-            end_ts = int(end.timestamp())
-            # Point final Legacy Web API
-            data = await self._get(f"/dci/{dci_id}/values", {"start": start_ts, "end": end_ts})
-            values = data.get("values", data) if isinstance(data, dict) else data
-            
-            points: list[MetricPoint] = []
-            for v in values:
-                at = epoch_to_dt(v.get("timestamp"))
-                if at is not None:
-                    try:
-                        points.append(MetricPoint(at=at, value=float(v.get("value", 0))))
-                    except (ValueError, TypeError):
-                        pass
-            return points
-        except Exception as exc:
-            logger.info("NetXMS : échec lecture historique DCI (%s)", exc)
+        if not dci_id:
             return []
+
+        start_ts = int(start.timestamp())
+        end_ts = int(end.timestamp())
+        data = await self._get(
+            f"/dci/{dci_id}/values", {"start": start_ts, "end": end_ts}
+        )
+        values = data.get("values", data) if isinstance(data, dict) else data
+
+        points: list[MetricPoint] = []
+        for value in values:
+            at = epoch_to_dt(value.get("timestamp"))
+            if at is None:
+                raise ToolUnavailable(
+                    self.name, f"valeur DCI {dci_id} sans horodatage valide"
+                )
+            try:
+                number = float(value["value"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ToolUnavailable(
+                    self.name, f"valeur invalide dans la DCI {dci_id}"
+                ) from exc
+            points.append(MetricPoint(at=at, value=number))
+        return points

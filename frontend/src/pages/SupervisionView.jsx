@@ -2,10 +2,11 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { PlusCircle } from "lucide-react";
 
-import IncidentDrawer from "../components/domain/IncidentDrawer";
+import AlertDrawer from "../components/domain/AlertDrawer";
 import IncidentTable from "../components/domain/IncidentTable";
 import ManualIncidentModal from "../components/domain/ManualIncidentModal";
 import NetworkVitals from "../components/domain/NetworkVitals";
+import { DashboardSummary, FleetStatesChart } from "../components/domain/FleetInsights";
 import Panel from "../components/ui/Panel";
 import { StackedBar } from "../components/ui/Stat";
 import { Donut, LineChart } from "../components/charts";
@@ -28,7 +29,6 @@ import {
   useNodeStates,
   useNodes,
   useOpenAlerts,
-  useWorkload,
 } from "../hooks/queries";
 import { usePermission } from "../hooks/useSession";
 
@@ -57,6 +57,7 @@ const DAY_MS = 86_400_000;
 
 /** État d'un outil, dans le vocabulaire de ToolStateBadge. */
 function toolState(tool) {
+  if (tool.not_configured) return "not_configured";
   if (tool.never_collected) return "unknown";
   if (!tool.reachable) return "error";
   return tool.stale ? "stale" : "ok";
@@ -74,10 +75,20 @@ export default function SupervisionView() {
 
   const summary = useAlertSummary();
   const nodeStates = useNodeStates();
-  const alertsQuery = useOpenAlerts({ limit: 40, organisation, node_type: nodeType });
-  const workload = useWorkload({ organisation, node_type: nodeType });
-  // Même clé de cache que useWorkload : une seule requête sert les deux.
-  const allAlerts = useAlerts({ limit: 1000, organisation, node_type: nodeType });
+  const network = useNetworkKpi({ hours });
+  const series = useNetworkSeries({ metricType: metric, hours });
+  const alertsQuery = useOpenAlerts({
+    limit: 40,
+    organisation,
+    node_type: nodeType,
+    kind: "technical",
+  });
+  const allAlerts = useAlerts({
+    limit: 1000,
+    organisation,
+    node_type: nodeType,
+    kind: "technical",
+  });
   const interop = useInterop();
   const coverage = useNodeCoverage();
   const maintenance = useMaintenanceWindows("active");
@@ -86,24 +97,14 @@ export default function SupervisionView() {
 
   const allNodesQuery = useNodes({ limit: 2000 });
   const allNodes = allNodesQuery.data?.items ?? [];
-  const scopedNodes = allNodes.filter(
-    (node) =>
-      (!organisation || node.organisation === organisation) &&
-      (!nodeType || node.node_type === nodeType),
-  );
-  const network = useNetworkKpi({ organisation, nodeType });
-  const series = useNetworkSeries({ metricType: metric, hours, organisation, nodeType });
   const orgOptions = [...new Set(allNodes.map(n => n.organisation).filter(Boolean))].map(o => ({ value: o, label: o }));
   const typeOptions = [...new Set(allNodes.map(n => n.node_type).filter(Boolean))].map(t => ({ value: t, label: t }));
 
   const s = summary.data;
   const states = nodeStates.data;
 
-  // « Non affectés » et « > 24 h » ne sont plus calculés par le serveur :
-  // ils se lisent sur la liste des alertes, déjà chargée pour la charge
-  // par intervenant.
+  // « > 24 h » se lit sur la liste des alertes déjà chargée.
   const openAlerts = (allAlerts.data?.alerts ?? []).filter((alert) => !alert.resolved_at);
-  const unassigned = openAlerts.filter((alert) => !alert.assigned_to).length;
   const ageing = openAlerts.filter(
     (alert) => alert.since && Date.now() - Date.parse(alert.since) > DAY_MS,
   ).length;
@@ -126,21 +127,21 @@ export default function SupervisionView() {
   ];
 
   const stateSegments = [
-    { key: "down", label: "Hors service", value: states?.down ?? 0, color: "var(--state-down)" },
-    { key: "degraded", label: "Dégradés", value: states?.degraded ?? 0, color: "var(--state-degraded)" },
-    { key: "silent", label: "Muets", value: states?.silent ?? 0, color: "var(--state-silent)" },
+    { key: "down", label: "Hors service", value: states?.down, color: "var(--state-down)" },
+    { key: "degraded", label: "Perturbés", value: states?.degraded ?? 0, color: "var(--state-degraded)" },
+    { key: "unknown", label: "Inconnus", value: (states?.unknown ?? 0) + (states?.silent ?? 0), color: "var(--ink-3)" },
     { key: "maintenance", label: "Maintenance", value: states?.maintenance ?? 0, color: "var(--state-maintenance)" },
-    { key: "up", label: "Nominaux", value: states?.up ?? 0, color: "var(--state-up)" },
+    { key: "up", label: "Normaux", value: states?.up, color: "var(--state-up)" },
   ];
 
-  const seriesData = series.data ?? [];
+  const seriesData = series.data?.points ?? [];
   const metricLabels = seriesData.map((point) => time(point.time));
 
   return (
     <div className="space-y-2.5">
       <PageHeader
         title="Salle de supervision"
-        subtitle="État instantané du réseau · la tendance suit la fenêtre et les filtres choisis"
+        subtitle="État du réseau, charge de l'équipe et santé de la collecte"
         actions={
           <Toolbar>
             {orgOptions.length > 0 && (
@@ -178,12 +179,12 @@ export default function SupervisionView() {
         }
       />
 
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
-        <NetworkVitals
-          data={network.data}
-          expectedNodes={organisation || nodeType ? scopedNodes.length : states?.total}
-          compact
-        />
+      <DashboardSummary />
+
+      {/* Colonnes auto-ajustées : le nombre de tuiles dépend des mesures
+          réellement collectées, la rangée ne doit pas rester à moitié vide. */}
+      <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))" }}>
+        <NetworkVitals data={network.data} expectedNodes={states?.total} compact />
       </div>
 
       <div className="grid grid-cols-12 gap-2.5">
@@ -191,7 +192,7 @@ export default function SupervisionView() {
         <div className="col-span-12 xl:col-span-8 min-w-0">
           <Panel
             title="Tendance réseau"
-            subtitle={`${hours} h · moyenne de ${seriesData.at(-1)?.nb_nodes ?? 0}/${seriesData.at(-1)?.sampled_nodes ?? 0} équipements mesurés, selon les filtres sélectionnés`}
+            subtitle={`moyenne sur ${series.data?.contributing_nodes ?? 0} équipement(s) mesuré(s)`}
             to="/performance"
             toLabel="Analyser"
             actions={
@@ -207,38 +208,33 @@ export default function SupervisionView() {
             <QueryBoundary
               query={series}
               compact
+              empty={(data) => !data?.points?.length}
               emptyMessage="Aucune mesure sur la fenêtre"
-              emptyHint="Cette métrique n'est pas publiée par les connecteurs actifs, ou la collecte est arrêtée."
+              emptyHint="Aucune mesure disponible pour ce périmètre sur cette période."
             >
               <LineChart
                 labels={metricLabels}
                 height={196}
                 yMax={metricMeta(metric).unit === "%" ? 100 : undefined}
                 targetLine={metricMeta(metric).target}
+                valueFormatter={(value) =>
+                  `${value} ${metricMeta(metric).unit}`
+                }
                 series={[
                   {
                     label: metricMeta(metric).label,
                     data: seriesData.map((point) => point.value),
+                    pointCounts: seriesData.map((point) => point.nb_nodes),
                     color: metricMeta(metric).color ?? "var(--accent)",
                     fill: true,
-                  },
-                  // La bande max n'est pas un ornement : sur un agrégat de
-                  // parc, la moyenne peut rester bonne alors qu'un site
-                  // est à zéro. L'écart entre les deux courbes est le
-                  // signal utile.
-                  {
-                    label: "Pire équipement",
-                    data: seriesData.map((point) =>
-                      metric === "availability_pct" ? point.min : point.max,
-                    ),
-                    color: "var(--sev-critical)",
-                    dashed: true,
-                    width: 1,
                   },
                 ]}
               />
             </QueryBoundary>
           </Panel>
+          <div className="mt-2.5">
+            <FleetStatesChart height={170} />
+          </div>
         </div>
 
         {/* --- Parc et alertes --- */}
@@ -272,7 +268,7 @@ export default function SupervisionView() {
                 {num(s?.total_open, "0")}
               </span>
               <span className="text-[11px]" style={{ color: "var(--ink-3)" }}>
-                sur {num(s?.localities_affected, "0")} sites touchés
+                sur {num(s?.localities_affected)} sites touchés
               </span>
             </div>
             <StackedBar segments={severitySegments} height={7} />
@@ -286,18 +282,13 @@ export default function SupervisionView() {
               ))}
             </div>
             <div
-              className="grid grid-cols-3 gap-2 mt-2.5 pt-2 border-t"
+              className="grid grid-cols-2 gap-2 mt-2.5 pt-2 border-t"
               style={{ borderColor: "var(--border)" }}
             >
               <MiniStat
                 label="Non acquittés"
                 value={num(s?.unacknowledged, "0")}
                 color={s?.unacknowledged ? "var(--sev-medium)" : "var(--state-up)"}
-              />
-              <MiniStat
-                label="Non affectés"
-                value={num(unassigned, "0")}
-                color={unassigned ? "var(--sev-high)" : "var(--state-up)"}
               />
               <MiniStat
                 label="> 24 h"
@@ -310,86 +301,10 @@ export default function SupervisionView() {
       </div>
 
       <div className="grid grid-cols-12 gap-2.5">
-        {/* --- Charge par intervenant --- */}
-        <div className="col-span-12 lg:col-span-5 min-w-0">
-          <Panel
-            title="Charge par intervenant"
-            subtitle="incidents ouverts"
-            accent="var(--accent)"
-            flush
-          >
-            <QueryBoundary
-              query={workload}
-              compact
-              emptyMessage="Aucun incident ouvert à répartir"
-            >
-              {(items) => (
-                <table className="tbl">
-                  <thead>
-                    <tr>
-                      <th>Intervenant</th>
-                      <th style={{ textAlign: "right" }}>Ouverts</th>
-                      <th style={{ textAlign: "right" }}>Crit.</th>
-                      <th style={{ textAlign: "right" }}>Non acq.</th>
-                      <th style={{ textAlign: "right" }}>Plus ancien</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {items.map((row) => {
-                      const unassigned = row.user_id === null;
-                      return (
-                        <tr key={row.user_id ?? "unassigned"}>
-                          <td>
-                            <span
-                              style={{
-                                color: unassigned ? "var(--sev-high)" : "var(--ink)",
-                                fontWeight: unassigned ? 600 : 400,
-                              }}
-                            >
-                              {row.full_name}
-                            </span>
-                            {row.role && (
-                              <span className="text-[10.5px] ml-1.5" style={{ color: "var(--ink-3)" }}>
-                                {row.role}
-                              </span>
-                            )}
-                          </td>
-                          <td className="num" style={{ textAlign: "right" }}>
-                            {num(row.open_incidents)}
-                          </td>
-                          <td
-                            className="num"
-                            style={{
-                              textAlign: "right",
-                              color: row.critical ? "var(--sev-critical)" : "var(--ink-3)",
-                            }}
-                          >
-                            {num(row.critical, "0")}
-                          </td>
-                          <td
-                            className="num"
-                            style={{
-                              textAlign: "right",
-                              color: row.unacknowledged ? "var(--sev-medium)" : "var(--ink-3)",
-                            }}
-                          >
-                            {num(row.unacknowledged, "0")}
-                          </td>
-                          <td className="num" style={{ textAlign: "right", color: "var(--ink-2)" }}>
-                            {duration(row.oldest_age_minutes)}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              )}
-            </QueryBoundary>
-          </Panel>
-        </div>
-
-        {/* --- Collecte ETL --- */}
-        <div className="col-span-12 sm:col-span-6 lg:col-span-4 min-w-0">
+        {/* --- Collecte ETL ---
+            (Plus de « charge par intervenant » : les affectations sont
+            tenues dans iTop, pas dans le NOC.) */}
+        <div className="col-span-12 lg:col-span-7 min-w-0">
           <Panel
             title="Collecte ETL"
             subtitle={interop.data ? `${toolsHealthy}/${tools.length} actifs` : undefined}
@@ -417,7 +332,7 @@ export default function SupervisionView() {
         </div>
 
         {/* --- Maintenances en cours --- */}
-        <div className="col-span-12 sm:col-span-6 lg:col-span-3 min-w-0">
+        <div className="col-span-12 lg:col-span-5 min-w-0">
           <Panel
             title="Maintenances en cours"
             accent="var(--state-maintenance)"
@@ -427,17 +342,23 @@ export default function SupervisionView() {
             <QueryBoundary
               query={maintenance}
               compact
-              emptyMessage="Aucune maintenance active"
-              emptyHint="Les alertes ne sont neutralisées nulle part en ce moment."
+              empty={(d) => !d?.windows?.length}
+              emptyMessage="Aucune maintenance en cours"
+              emptyHint="Planifiées dans iTop (changements) ou Zabbix, elles apparaissent ici."
             >
-              {(windows) => (
+              {(data) => (
                 <ul className="divide-y" style={{ borderColor: "var(--border)" }}>
-                  {windows.slice(0, 6).map((window) => (
-                    <li key={window.id} className="px-2.5 py-1.5">
-                      <div className="text-[12px] truncate">{window.reason}</div>
+                  {data.windows.slice(0, 6).map((window) => (
+                    <li key={window.key} className="px-2.5 py-1.5">
+                      <div className="text-[12px] truncate">
+                        {window.kind === "change" && window.ref ? `${window.ref} · ` : ""}
+                        {window.title}
+                      </div>
                       <div className="text-[10.5px]" style={{ color: "var(--ink-3)" }}>
-                        {window.node_name || window.node_key || window.site || "périmètre global"} · jusqu'à{" "}
-                        <span className="num">{time(window.ends_at)}</span>
+                        {window.nodes_total
+                          ? `${num(window.nodes_total)} équipement(s)${window.sites?.[0] ? ` · ${window.sites[0]}` : ""}`
+                          : "aucun équipement retrouvé"}{" "}
+                        · jusqu'à <span className="num">{window.end ? time(window.end) : "—"}</span>
                       </div>
                     </li>
                   ))}
@@ -497,7 +418,7 @@ export default function SupervisionView() {
 
         {/* --- Sites les plus touchés --- */}
         <div className="col-span-12 lg:col-span-7 min-w-0">
-          <Panel title="Sites les plus touchés ce mois" to="/carte" toLabel="Carte" flush>
+          <Panel title="Sites les plus touchés ce mois" to="/territoire" toLabel="Territoire" flush>
             <QueryBoundary query={localities} compact emptyMessage="Aucun incident ce mois">
               {(items) => (
                 <table className="tbl">
@@ -562,7 +483,7 @@ export default function SupervisionView() {
       <Panel
         title="Alertes en cours"
         accent="var(--sev-high)"
-        to="/incidents"
+        to="/alertes"
         toLabel="Toute la file"
         flush
       >
@@ -581,8 +502,8 @@ export default function SupervisionView() {
         </QueryBoundary>
       </Panel>
 
-      <IncidentDrawer
-        incidentId={selectedId}
+      <AlertDrawer
+        alertKey={selectedId}
         open={Boolean(selectedId)}
         onClose={() => setSelectedId(null)}
       />

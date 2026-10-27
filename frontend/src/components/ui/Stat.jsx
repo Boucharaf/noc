@@ -1,4 +1,4 @@
-import { ArrowDownRight, ArrowRight, ArrowUpRight } from "lucide-react";
+import { ArrowDownRight, ArrowRight, ArrowUpRight, HelpCircle } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import { DASH } from "../../lib/format";
@@ -18,7 +18,75 @@ import { DASH } from "../../lib/format";
  * 3. La variation est colorée selon son SENS MÉTIER, pas son signe
  *    (`invertDelta` pour les indicateurs où monter est mauvais). Un
  *    « +12 incidents » en vert est une faute d'interprétation garantie.
+ *
+ * Représentations facultatives, pour comprendre sans lire :
+ *   `gauge`     { value, target, max, higherIsBetter, color } — jauge avec
+ *               un repère d'objectif : l'écart à la cible se voit ;
+ *   `spark`     valeurs des dernières 24 h — mini-courbe, avec une flèche
+ *               de tendance si `delta` n'est pas fourni ;
+ *   `breakdown` segments { key, label, value, color } — barre de
+ *               répartition, le « pourquoi » d'un chiffre ;
+ *   `help`      définition affichée au survol du « ? ».
  */
+function Gauge({ value, target, max = 100, color = "var(--accent)" }) {
+  const clamp = (v) => Math.min(100, Math.max(0, (100 * v) / max));
+  const filled = value == null || !Number.isFinite(Number(value)) ? 0 : clamp(Number(value));
+  return (
+    <div className="relative mt-1.5" style={{ height: 6 }} aria-hidden="true">
+      <div className="absolute inset-0 rounded-full" style={{ background: "var(--surface-3)" }} />
+      <div
+        className="absolute left-0 top-0 bottom-0 rounded-full"
+        style={{ width: `${filled}%`, background: color, transition: "width .3s ease" }}
+      />
+      {target != null && (
+        <div
+          className="absolute"
+          style={{
+            left: `calc(${clamp(target)}% - 1px)`,
+            top: -3,
+            bottom: -3,
+            width: 2,
+            background: "var(--ink)",
+            borderRadius: 1,
+          }}
+          title={`Objectif : ${target}`}
+        />
+      )}
+    </div>
+  );
+}
+
+function MiniSpark({ values, color }) {
+  const points = (values ?? []).filter((v) => v != null && Number.isFinite(Number(v))).map(Number);
+  if (points.length < 2) return null;
+  const width = 64;
+  const height = 20;
+  // Échelle verticale d'au moins 5 % de la valeur (et d'une unité) :
+  // ramenée à son propre min/max, une variation de 69,6 à 69,7 % dessinerait
+  // une envolée. Seul un changement notable doit se voir.
+  const low = Math.min(...points);
+  const high = Math.max(...points);
+  const span = Math.max(high - low, Math.abs(high) * 0.05, 1);
+  const min = (low + high) / 2 - span / 2;
+  const coords = points.map((v, i) => [
+    (i / (points.length - 1)) * width,
+    height - 2 - ((v - min) / span) * (height - 4),
+  ]);
+  const line = coords.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+  return (
+    <svg width={width} height={height} className="shrink-0" aria-hidden="true">
+      <path d={`${line} L${width},${height} L0,${height} Z`} fill={color} opacity="0.12" />
+      <path d={line} fill="none" stroke={color} strokeWidth="1.3" strokeLinejoin="round" />
+      <circle cx={coords.at(-1)[0]} cy={coords.at(-1)[1]} r="1.8" fill={color} />
+    </svg>
+  );
+}
+
+function sparkDelta(values) {
+  const points = (values ?? []).filter((v) => v != null && Number.isFinite(Number(v))).map(Number);
+  return points.length >= 2 ? points.at(-1) - points[0] : null;
+}
+
 export default function Stat({
   label,
   value,
@@ -32,7 +100,15 @@ export default function Stat({
   to,
   compact = false,
   status,
+  gauge,
+  spark,
+  breakdown,
+  help,
 }) {
+  if ((delta === null || delta === undefined) && spark) {
+    delta = sparkDelta(spark);
+    deltaLabel = deltaLabel ?? "Variation sur 24 h";
+  }
   const hasDelta = delta !== null && delta !== undefined && Number.isFinite(Number(delta));
   const numericDelta = hasDelta ? Number(delta) : 0;
   const improving = invertDelta ? numericDelta < 0 : numericDelta > 0;
@@ -47,13 +123,18 @@ export default function Stat({
 
   const body = (
     <>
-      <div className="flex items-center gap-1.5">
+      <div className="flex min-w-0 items-start gap-1.5">
         <span
-          className="text-[10.5px] font-semibold uppercase tracking-[0.07em] truncate"
-          style={{ color: "var(--ink-3)" }}
+          className="min-w-0 text-[10.5px] font-semibold uppercase leading-tight tracking-[0.07em] break-words"
+          style={{ color: "var(--ink-3)", overflowWrap: "anywhere" }}
         >
           {label}
         </span>
+        {help && (
+          <span className="shrink-0 cursor-help" title={help} style={{ color: "var(--ink-3)" }}>
+            <HelpCircle size={11} aria-label={help} />
+          </span>
+        )}
         {status && (
           <span
             className="dot"
@@ -63,10 +144,14 @@ export default function Stat({
         )}
       </div>
 
-      <div className="flex items-baseline gap-1 mt-0.5">
+      <div className="flex min-w-0 flex-wrap items-baseline gap-1 mt-0.5">
         <span
-          className="num font-semibold leading-none"
-          style={{ fontSize: compact ? 17 : 21, color: color ?? "var(--ink)" }}
+          className="num min-w-0 font-semibold leading-tight break-words"
+          style={{
+            fontSize: compact ? 17 : 21,
+            color: color ?? "var(--ink)",
+            overflowWrap: "anywhere",
+          }}
         >
           {value ?? DASH}
         </span>
@@ -75,7 +160,19 @@ export default function Stat({
             {unit}
           </span>
         )}
+        {spark && (
+          <span className="ml-auto self-center">
+            <MiniSpark values={spark} color={color ?? "var(--accent)"} />
+          </span>
+        )}
       </div>
+
+      {gauge && <Gauge {...gauge} color={gauge.color ?? color ?? "var(--accent)"} />}
+      {breakdown && (
+        <div className="mt-1.5">
+          <StackedBar segments={breakdown} height={5} />
+        </div>
+      )}
 
       {(target || hasDelta || hint) && (
         <div className="flex items-center gap-2 mt-1 flex-wrap">
@@ -97,7 +194,10 @@ export default function Stat({
             </span>
           )}
           {hint && (
-            <span className="text-[10.5px] truncate" style={{ color: "var(--ink-3)" }}>
+            <span
+              className="text-[10.5px] break-words"
+              style={{ color: "var(--ink-3)", overflowWrap: "anywhere" }}
+            >
               {hint}
             </span>
           )}
@@ -106,7 +206,7 @@ export default function Stat({
     </>
   );
 
-  const className = `panel px-2.5 ${compact ? "py-1.5" : "py-2"} block ${
+  const className = `panel min-w-0 px-2.5 ${compact ? "py-1.5" : "py-2"} block ${
     to ? "hover:border-[var(--border-strong)] transition-colors" : ""
   }`;
 

@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 import { Wrench } from "lucide-react";
 
 import DataTable from "../ui/Table";
-import { SeverityBadge, StatusBadge, ToolTag } from "../ui/Badge";
+import { SeverityBadge, ToolTag } from "../ui/Badge";
 import { ageFrom, dateTime, duration, ellipsis, smartTime } from "../../lib/format";
 
 /**
@@ -22,7 +22,6 @@ export default function IncidentTable({
   onSelect,
   selectedId,
   variant = "full",
-  showAssignee = true,
   emptyRow,
 }) {
   const compact = variant === "wall";
@@ -30,9 +29,11 @@ export default function IncidentTable({
   const columns = [
     {
       key: "severity",
-      header: "Grav.",
-      width: 76,
-      render: (row) => <SeverityBadge severity={row.severity} short={compact} />,
+      header: "Gravité",
+      width: 118,
+      render: (row) => (
+        <SeverityBadge severity={row.severity} short={compact} source={row.source_severity} tool={row.tool ?? row.source_tool} />
+      ),
     },
     {
       key: "age",
@@ -90,25 +91,15 @@ export default function IncidentTable({
     },
   ];
 
-  if (!compact) {
-    columns.push({
-      key: "cause",
-      header: "Cause",
-      width: 150,
-      render: (row) => (
-        <span style={{ color: "var(--ink-2)" }} title={row.cause_category ?? undefined}>
-          {row.cause_label || row.cause_category || "—"}
-        </span>
-      ),
-    });
-  }
-
   columns.push({
     key: "description",
     header: "Description",
-    wrap: false,
+    // Retour à la ligne autorisé : en `truncate-cell` sans largeur fixe, la
+    // colonne était écrasée à zéro et le message de l'outil — la donnée
+    // technique principale — ne s'affichait plus du tout.
+    wrap: true,
     render: (row) => (
-      <span className="flex w-full min-w-0 items-center gap-1.5" title={row.description ?? ""}>
+      <span className="flex items-start gap-1.5" style={{ minWidth: 220 }} title={row.description ?? ""}>
         {row.is_maintenance && (
           <Wrench
             size={11}
@@ -116,38 +107,27 @@ export default function IncidentTable({
             aria-label="Pendant une fenêtre de maintenance planifiée"
           />
         )}
-        <span
-          className="block min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap"
-          style={{ color: "var(--ink-2)" }}
-        >
+        <span style={{ color: "var(--ink-2)" }}>
           {ellipsis(row.description, compact ? 60 : 110)}
         </span>
       </span>
     ),
   });
 
+  // Caractéristiques TECHNIQUES seulement : plus de cause, de statut de
+  // traitement ni d'affectation — ce circuit vit dans iTop. Reste l'état
+  // d'acquittement tel que l'OUTIL source le déclare.
   columns.push({
-    key: "status",
-    header: "Statut",
-    width: 92,
-    render: (row) => <StatusBadge status={row.status} />,
+    key: "ack",
+    header: "Acquit. outil",
+    width: 96,
+    render: (row) =>
+      row.acknowledged ? (
+        <span style={{ color: "var(--accent-ink)" }}>acquittée</span>
+      ) : (
+        <span style={{ color: "var(--ink-3)" }}>—</span>
+      ),
   });
-
-  if (showAssignee && !compact) {
-    columns.push({
-      key: "assignee",
-      header: "Affecté à",
-      width: 140,
-      render: (row) =>
-        row.assigned_to_full_name ? (
-          <span style={{ color: "var(--ink-2)" }}>{row.assigned_to_full_name}</span>
-        ) : (
-          // « Non affecté » en couleur d'alerte douce : c'est une file
-          // que personne ne traite, pas une simple absence de valeur.
-          <span style={{ color: "var(--sev-medium)" }}>Non affecté</span>
-        ),
-    });
-  }
 
   if (!compact) {
     columns.push({
@@ -165,7 +145,23 @@ export default function IncidentTable({
       key: "tool",
       header: "Source",
       width: 84,
-      render: (row) => <ToolTag tool={row.source_tool} />,
+      render: (row) => (
+        <div className="flex flex-col items-start gap-0.5">
+          <ToolTag tool={row.source_tool} />
+          <span
+            className="text-[10px]"
+            style={{ color: row.stale ? "var(--sev-medium)" : "var(--ink-3)" }}
+          >
+            {row.stale
+              ? `Périmé · ${row.kind === "itsm_ticket" ? "ITSM" : "supervision"}`
+              : row.kind === "itsm_ticket"
+                ? "Ticket ITSM"
+                : row.kind === "manual_incident"
+                  ? "Incident signalé"
+                  : "Alerte technique"}
+          </span>
+        </div>
+      ),
     });
   }
 

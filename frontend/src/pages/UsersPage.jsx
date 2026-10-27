@@ -461,8 +461,8 @@ function EmailAlertsPanel() {
             </div>
             {!data.smtp_configured && (
               <Notice tone="warning">
-                Aucun serveur SMTP : renseignez SMTP_HOST et les variables associées dans .env,
-                puis redémarrez le backend.
+                Aucun serveur de messagerie n'est configuré : contactez l'administrateur de la
+                plateforme.
               </Notice>
             )}
             {data.smtp_configured && !data.notifications_enabled && (

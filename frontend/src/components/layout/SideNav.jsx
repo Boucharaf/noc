@@ -1,10 +1,11 @@
 import {
   Activity,
+  BellRing,
   CalendarClock,
   FileBarChart,
   Gauge,
   LayoutDashboard,
-  Map,
+  MapPinned,
   Plug,
   Radio,
   Router,
@@ -15,7 +16,7 @@ import {
 import { NavLink } from "react-router-dom";
 
 import { PERMISSIONS, hasPermission, homeRoute } from "../../lib/permissions";
-import { useAlertSummary, useNodeStates } from "../../hooks/queries";
+import { useOverview } from "../../hooks/queries";
 import { useUiStore } from "../../store/ui";
 
 /**
@@ -40,11 +41,26 @@ const SECTIONS = [
     items: [
       { to: "__home__", label: "Tableau de bord", icon: LayoutDashboard },
       {
+        to: "/territoire",
+        label: "Territoire",
+        icon: MapPinned,
+        permission: PERMISSIONS.VIEW_MAP,
+      },
+      // Incidents = tickets iTop ; alertes = signaux des outils de
+      // supervision. Deux files distinctes, deux entrées distinctes.
+      {
         to: "/incidents",
-        label: "Incidents",
+        label: "Incidents iTop",
         icon: Radio,
         permission: PERMISSIONS.VIEW_INCIDENTS,
         badge: "openIncidents",
+      },
+      {
+        to: "/alertes",
+        label: "Alertes outils",
+        icon: BellRing,
+        permission: PERMISSIONS.VIEW_ALERTS,
+        badge: "openAlerts",
       },
       {
         to: "/equipements",
@@ -53,7 +69,6 @@ const SECTIONS = [
         permission: PERMISSIONS.VIEW_NODES,
         badge: "nodesDown",
       },
-      { to: "/carte", label: "Carte des sites", icon: Map, permission: PERMISSIONS.VIEW_MAP },
     ],
   },
   {
@@ -71,9 +86,9 @@ const SECTIONS = [
         to: "/maintenances",
         label: "Maintenances",
         icon: CalendarClock,
-        permission: PERMISSIONS.MANAGE_MAINTENANCE,
+        permission: PERMISSIONS.VIEW_MAINTENANCE,
       },
-      { to: "/terrain", label: "Interventions", icon: Truck, permission: PERMISSIONS.VIEW_TERRAIN },
+      { to: "/interventions", label: "Interventions", icon: Truck, permission: PERMISSIONS.VIEW_INTERVENTIONS },
       {
         to: "/integrations",
         label: "Collecte ETL",
@@ -114,12 +129,14 @@ function NavBadge({ value, color }) {
 
 export default function SideNav({ role, toolsDown = 0, onNavigate }) {
   const collapsed = useUiStore((s) => s.railCollapsed);
-  const { data: alertSummary } = useAlertSummary();
-  const { data: nodeStates } = useNodeStates();
+  // Compteurs de TOUT le réseau, indépendants du périmètre consulté : la
+  // navigation signale ce qui attend, où que ce soit.
+  const { data: overview } = useOverview({ global: true });
 
   const badges = {
-    openIncidents: { value: alertSummary?.total_open, color: "var(--sev-high)" },
-    nodesDown: { value: nodeStates?.down, color: "var(--state-down)" },
+    openIncidents: { value: overview?.incidents_total, color: "var(--sev-high)" },
+    openAlerts: { value: overview?.alerts_unacknowledged, color: "var(--sev-medium)" },
+    nodesDown: { value: overview?.nodes_by_state?.down, color: "var(--state-down)" },
     toolsDown: { value: toolsDown, color: "var(--sev-medium)" },
   };
 

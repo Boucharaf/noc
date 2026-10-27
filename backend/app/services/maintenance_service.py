@@ -1,205 +1,161 @@
 """
-Fenêtres de maintenance planifiée.
+Maintenances planifiées et interventions — lues dans les outils, en
+lecture seule.
 
-CE QU'UNE FENÊTRE FAIT, ET NE FAIT PAS. Elle ne masque pas l'alerte : elle
-la MARQUE. Un exploitant doit voir qu'un site est en coupure programmée —
-sinon il croit à un trou de supervision et envoie quelqu'un sur place pour
-rien. En revanche, une alerte marquée est exclue des indicateurs, parce
-qu'une coupure voulue n'est pas une panne et que la compter fausserait à la
-fois le volume d'incidents et le respect du SLA.
+D'OÙ ELLES VIENNENT. Le NOC ne tient plus son propre registre :
+  * une maintenance planifiée est un CHANGEMENT iTop (dates de début et de
+    fin, CI impactés), ou une maintenance déclarée dans Zabbix ;
+  * une intervention est un ORDRE DE TRAVAIL iTop (équipe, agent, dates),
+    rattaché au ticket qui l'a motivée.
+Le collecteur les relit à chaque cycle et rattache leurs CI aux équipements
+du parc (collector/operations.py). Les planifier, les affecter, les clore :
+cela se fait dans iTop (ou Zabbix), qui reste la référence — comme pour les
+incidents.
 
-PORTÉE : un site est toujours requis. La fenêtre peut viser tous ses
-équipements ou une sélection de plusieurs équipements de ce site. Un
-équipement ne peut pas être sélectionné sans site.
+CE QU'UNE MAINTENANCE EN COURS FAIT DANS LE NOC. Elle ne masque pas
+l'alerte : elle la MARQUE, et l'équipement passe à l'état « maintenance »
+(node_service.apply_maintenance_windows). Une coupure voulue n'est pas une
+panne : elle est exclue de la disponibilité et des SLA.
+
+Les anciennes tables ops_maintenance_window et ops_field_intervention ne
+sont plus lues ; elles sont conservées en base le temps d'en exporter le
+contenu.
 """
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timezone
 
-from fastapi import HTTPException
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from app.models import MaintenanceWindow, User
-from app.services import live_service
-
-logger = logging.getLogger(__name__)
+from app.services import geo_service, live_service
+from collector.operations import window_is_active
 
 
-def _serialise(window: MaintenanceWindow, author: str | None = None) -> dict:
-    now = datetime.now(timezone.utc)
+def _parse(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _timing(record: dict, now: datetime) -> str:
+    """`active`, `upcoming` ou `past` — calculé ici, une fois pour tous les
+    écrans, plutôt que redéduit de deux dates par chaque client."""
+    if record.get("kind") in ("change", "maintenance") and window_is_active(record, now):
+        return "active"
+    start, end = _parse(record.get("start")), _parse(record.get("end"))
+    if start and start > now:
+        return "upcoming"
+    if end and end < now:
+        return "past"
+    if record.get("kind") is None:  # ordre de travail
+        return "past" if record.get("status") == "closed" else "active"
+    return "past" if record.get("status") == "closed" else "active"
+
+
+def _enrich(record: dict, nodes_by_id: dict[str, dict], now: datetime) -> dict:
+    nodes = [nodes_by_id[key] for key in record.get("node_keys") or [] if key in nodes_by_id]
     return {
-        "id": window.id,
-        "node_key": window.node_key,
-        "node_keys": window.node_keys or [],
-        "site": window.site,
-        "reason": window.reason,
-        "starts_at": window.starts_at.isoformat(),
-        "ends_at": window.ends_at.isoformat(),
-        "suppress_alerts": window.suppress_alerts,
-        "created_by": author,
-        "created_at": window.created_at.isoformat() if window.created_at else None,
-        # Calculé ici plutôt qu'au frontend : trois clients qui déduisent
-        # chacun « est-elle active ? » de deux dates finiraient par diverger
-        # sur les fuseaux.
-        "active": window.starts_at <= now <= window.ends_at,
-        "upcoming": window.starts_at > now,
+        **record,
+        "timing": _timing(record, now),
+        "nodes": [
+            {
+                "id": node["id"],
+                "name": node.get("name"),
+                "state": node.get("state"),
+                "site": node.get("site"),
+                "province": node.get("province"),
+                "region": node.get("region"),
+            }
+            for node in nodes[:50]
+        ],
+        "nodes_total": len(nodes),
+        "sites": sorted({node["site"] for node in nodes if node.get("site")}),
+        "unmatched_cis": [
+            ci for ci in record.get("cis") or []
+            if not record.get("node_keys")
+        ],
     }
 
 
-def _author_names(db: Session, windows: list[MaintenanceWindow]) -> dict[int, str]:
-    ids = {w.created_by for w in windows if w.created_by}
-    if not ids:
-        return {}
-    rows = db.execute(
-        select(User.id, User.full_name, User.username).where(User.id.in_(ids))
+async def _filtered(records: list[dict], region, province, site, search) -> tuple[list[dict], dict]:
+    nodes = await live_service.get_nodes()
+    nodes_by_id = {node["id"]: node for node in nodes}
+    scoped = (
+        {n["id"] for n in geo_service.scope_nodes(nodes, region, province, site)}
+        if (region or province or site)
+        else None
     )
-    return {row.id: row.full_name or row.username for row in rows}
+    needle = (search or "").strip().casefold()
+    kept = []
+    for record in records:
+        keys = set(record.get("node_keys") or [])
+        if scoped is not None and not keys & scoped:
+            continue
+        if needle:
+            haystack = " ".join(
+                str(value or "")
+                for value in (
+                    record.get("ref"), record.get("title"), record.get("agent"),
+                    record.get("team"), (record.get("ticket") or {}).get("ref"),
+                    *(ci.get("name") for ci in record.get("cis") or []),
+                )
+            ).casefold()
+            if needle not in haystack:
+                continue
+        kept.append(record)
+    return kept, nodes_by_id
 
 
-def list_windows(
-    db: Session, scope: str = "all", limit: int = 200
-) -> list[dict]:
-    """Fenêtres, filtrées par leur position dans le temps.
-
-    `scope` vaut `active`, `upcoming`, `past` ou `all`. Le filtrage est fait
-    en SQL et non en Python : sur un parc qui accumule des années de
-    fenêtres, tout charger pour n'en garder que trois serait absurde.
-    """
-    now = datetime.now(timezone.utc)
-    query = select(MaintenanceWindow)
-
-    if scope == "active":
-        query = query.where(
-            MaintenanceWindow.starts_at <= now, MaintenanceWindow.ends_at >= now
-        )
-    elif scope == "upcoming":
-        query = query.where(MaintenanceWindow.starts_at > now)
-    elif scope == "past":
-        query = query.where(MaintenanceWindow.ends_at < now)
-
-    windows = list(
-        db.execute(
-            query.order_by(MaintenanceWindow.starts_at.desc()).limit(limit)
-        ).scalars()
-    )
-    authors = _author_names(db, windows)
-    return [_serialise(w, authors.get(w.created_by)) for w in windows]
-
-
-async def create_window(
-    db: Session,
-    user_id: int,
-    reason: str,
-    starts_at: datetime,
-    ends_at: datetime,
-    node_key: str | None = None,
-    node_keys: list[str] | None = None,
+async def list_windows(
+    scope: str = "all",
+    region: str | None = None,
+    province: str | None = None,
     site: str | None = None,
-    suppress_alerts: bool = True,
+    search: str | None = None,
 ) -> dict:
-    if ends_at <= starts_at:
-        raise HTTPException(400, "La fin de la fenêtre doit suivre son début.")
-    if not site:
-        raise HTTPException(
-            400, "Sélectionnez un site avant de planifier la maintenance."
-        )
-
-    selected_node_keys = list(dict.fromkeys(node_keys or []))
-    if node_key:
-        selected_node_keys.append(node_key)
-        selected_node_keys = list(dict.fromkeys(selected_node_keys))
-
-    if selected_node_keys:
-        # Un équipement est validé dans le snapshot et doit appartenir au
-        # site choisi. Une sélection vide avec un site signifie site entier.
-        snapshot_nodes = await live_service.get_nodes()
-        nodes_by_id = {node.get("id"): node for node in snapshot_nodes}
-        for selected_key in selected_node_keys:
-            node = nodes_by_id.get(selected_key)
-            if node is None:
-                raise HTTPException(
-                    404,
-                    f"Aucun équipement « {selected_key} » dans l'instantané courant.",
-                )
-            if node.get("site") != site:
-                raise HTTPException(
-                    400,
-                    f"L'équipement « {node.get('name') or selected_key} » "
-                    f"n'appartient pas au site « {site} ».",
-                )
-    elif not any(node.get("site") == site for node in await live_service.get_nodes()):
-        raise HTTPException(404, f"Le site « {site} » est absent de l'inventaire courant.")
-
-    if node_key and len(selected_node_keys) == 1:
-        # Keep the legacy single-target column populated for existing readers.
-        stored_node_key = node_key
-        stored_node_keys = None
-    elif selected_node_keys:
-        stored_node_key = None
-        stored_node_keys = selected_node_keys
-    else:
-        stored_node_key = None
-        stored_node_keys = None
-
-    window = MaintenanceWindow(
-        node_key=stored_node_key,
-        node_keys=stored_node_keys,
-        site=site,
-        reason=reason,
-        starts_at=starts_at,
-        ends_at=ends_at,
-        suppress_alerts=suppress_alerts,
-        created_by=user_id,
+    """Maintenances planifiées (changements iTop, maintenances Zabbix)."""
+    now = datetime.now(timezone.utc)
+    records, nodes_by_id = await _filtered(
+        await live_service.get_maintenance(), region, province, site, search
     )
-    db.add(window)
-    db.commit()
-    db.refresh(window)
+    windows = [_enrich(record, nodes_by_id, now) for record in records]
+    counts = {timing: sum(1 for w in windows if w["timing"] == timing)
+              for timing in ("active", "upcoming", "past")}
+    if scope != "all":
+        windows = [w for w in windows if w["timing"] == scope]
+    order = {"active": 0, "upcoming": 1, "past": 2}
+    windows.sort(key=lambda w: (order[w["timing"]], w.get("start") or ""))
+    return {
+        "windows": windows,
+        "counts": counts,
+        "nodes_in_maintenance": len({
+            key for w in windows if w["timing"] == "active" for key in w.get("node_keys") or []
+        }),
+    }
 
-    logger.info(
-        "Fenêtre de maintenance créée : %s",
-        f"{len(selected_node_keys)} équipement(s) du site {site}"
-        if selected_node_keys
-        else f"site {site}",
+
+async def list_work_orders(
+    status: str = "all",
+    region: str | None = None,
+    province: str | None = None,
+    site: str | None = None,
+    search: str | None = None,
+) -> dict:
+    """Interventions : ordres de travail iTop, ouverts et récents."""
+    now = datetime.now(timezone.utc)
+    records, nodes_by_id = await _filtered(
+        await live_service.get_work_orders(), region, province, site, search
     )
-    return _serialise(window)
-
-
-def delete_window(db: Session, window_id: int) -> None:
-    window = db.get(MaintenanceWindow, window_id)
-    if window is None:
-        raise HTTPException(404, "Fenêtre de maintenance introuvable.")
-    db.delete(window)
-    db.commit()
-
-
-def active_at(db: Session, at: datetime | None = None) -> list[MaintenanceWindow]:
-    """Fenêtres actives à un instant donné, pour les autres services."""
-    moment = at or datetime.now(timezone.utc)
-    return list(
-        db.execute(
-            select(MaintenanceWindow).where(
-                MaintenanceWindow.starts_at <= moment,
-                MaintenanceWindow.ends_at >= moment,
-            )
-        ).scalars()
-    )
-
-
-def covers(
-    windows: list[MaintenanceWindow], node_key: str | None, site: str | None
-) -> MaintenanceWindow | None:
-    """Fenêtre couvrant un équipement, s'il y en a une."""
-    for window in windows:
-        if window.node_keys:
-            if node_key and node_key in window.node_keys:
-                return window
-            continue
-        if window.node_key:
-            if window.node_key == node_key:
-                return window
-            continue
-        if window.site and site and window.site == site:
-            return window
-    return None
+    orders = [_enrich(record, nodes_by_id, now) for record in records]
+    counts = {
+        "open": sum(1 for o in orders if o.get("status") != "closed"),
+        "closed": sum(1 for o in orders if o.get("status") == "closed"),
+        "unassigned": sum(1 for o in orders if o.get("status") != "closed" and not o.get("agent")),
+    }
+    if status == "open":
+        orders = [o for o in orders if o.get("status") != "closed"]
+    elif status == "closed":
+        orders = [o for o in orders if o.get("status") == "closed"]
+    orders.sort(key=lambda o: (o.get("status") == "closed", o.get("start") or ""), reverse=False)
+    return {"work_orders": orders, "counts": counts}

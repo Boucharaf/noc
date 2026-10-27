@@ -6,9 +6,9 @@ d'outils que celles exploitées en production par l'agence :
 | Outil | Version | Interface | API interrogée par le collecteur |
 |---|---|---|---|
 | Zabbix | **7.0.23** | <http://localhost:8081> — `Admin` / `zabbix` | `http://zabbix-web:8080/api_jsonrpc.php` |
-| Centreon | **22.10.7** | <http://localhost:8084/centreon> — `admin` | `http://centreon/centreon/api/latest` |
+| Centreon | **22.10.7** — ⚠️ non constructible, voir plus bas | <http://localhost:8084/centreon> — `admin` | `http://centreon/centreon/api/latest` |
 | iTop | **3.2.3-2** (build 20678) | <http://localhost:8082> — `admin` | `http://itop/webservices/rest.php` |
-| NetXMS | **5.0.8** | <http://localhost:8087/netxms-websvc/> — `admin` (mot de passe vide au premier démarrage) | `http://netxms-server:8080/netxms-websvc` |
+| Nagios Core | **4.5.12** | <http://localhost:8085/nagios> — `nagiosadmin` / `NAGIOS_API_PASSWORD` | `http://nagios/nagios/cgi-bin/statusjson.cgi` |
 
 ## Pourquoi à l'identique
 
@@ -26,32 +26,81 @@ gigaoctets et un poste de 8 Go ne les tient pas tous confortablement en même
 temps que la plateforme. Ils se lancent par profil :
 
 ```bash
-docker compose --profile zabbix   up -d     # ~1,0 Go
+docker compose --profile zabbix   up -d     # ~0,3 Go (allégé, voir plus bas)
+docker compose --profile netlab   up -d     # ~0,1 Go — 6 équipements réseau
 docker compose --profile itop     up -d     # ~0,8 Go
 docker compose --profile centreon up -d     # ~2,0 Go
-docker compose --profile netxms   up -d     # ~0,6 Go — serveur NEUF, pas le dump
-docker compose --profile tools    up -d     # zabbix + centreon + itop (netxms non inclus, voir plus bas)
+docker compose --profile nagios   up -d     # ~0,2 Go
+docker compose --profile tools    up -d     # zabbix + centreon + itop + nagios
+docker compose --profile netxms   up -d netxms-db   # base du dump NetXMS (voir plus bas)
 ```
 
-Sur une machine de 8 Go, le mode d'emploi réaliste est : Zabbix et iTop
-ensemble, Centreon séparément. NetXMS est plus léger que les trois et peut
-s'ajouter à l'une ou l'autre combinaison.
+Sur une machine de 8 Go, le mode d'emploi réaliste est : Zabbix, iTop et
+Nagios ensemble, Centreon séparément.
 
-**Pourquoi `netxms` n'est pas dans `tools`.** Le profil `netxms` réunit deux
-usages distincts qui ne doivent jamais tourner en même temps sur la même
-base : le serveur neuf (`netxms-server` + `netxms-server-db`, décrit
-ci-dessous) et l'inspection du dump de production (`netxms-db`, resté séparé
-et documenté en bas de ce fichier). Les grouper avec les trois autres sous
-`tools` aurait rendu cette distinction moins visible.
-
-**Premier démarrage.** Centreon, iTop et NetXMS s'installent tout seuls et
-cela prend quelques minutes ; les conteneurs ne sont déclarés sains qu'une
-fois leur API capable de répondre à une authentification — pas avant.
-Suivre :
+**Premier démarrage.** Centreon et iTop s'installent tout seuls et cela
+prend quelques minutes ; les conteneurs ne sont déclarés sains qu'une fois
+leur API capable de répondre à une authentification — pas avant. Suivre :
 
 ```bash
-docker compose logs -f centreon itop netxms-server
+docker compose logs -f centreon itop
 ```
+
+## Le réseau de laboratoire (`netdevice/`, profil `netlab`)
+
+Sans équipement réseau à superviser, Zabbix ne remonte ni interface, ni
+débit, ni latence : les panneaux réseau du NOC restent vides. Le profil
+`netlab` démarre six « équipements » de site, chacun un conteneur Alpine
+d'environ 16 Mo :
+
+| Équipement | Région / province | Lien simulé |
+|---|---|---|
+| `LAB-OUAGA-CORE-RT01` | Kadiogo / Kadiogo | cœur, ~1 ms, reçoit le trafic des sites |
+| `LAB-OUAGA-DIST-SW01` | Kadiogo / Kadiogo | distribution, ~1 ms |
+| `LAB-BOBO-RT01` | Guiriko / Houet | fibre, ~22 ms |
+| `LAB-MANGA-RT01` | Nazinon / Zoundweogo | faisceau hertzien, ~45 ms ± 15, 2 % de pertes |
+| `LAB-OUAHIGOUYA-VSAT01` | Yaadga / Yatenga | satellite, ~380 ms, 6 % de pertes |
+| `LAB-DEDOUGOU-RT01` | Bankui / Mouhoun | instable : coupé 6 min toutes les 30 |
+
+Chacun porte un **vrai agent SNMP** (net-snmp : interfaces 64 bits, CPU,
+mémoire, disque), envoie un **vrai trafic** à un voisin (variable selon
+l'heure) et applique les conditions de son lien. Zabbix les supervise avec
+le gabarit livré **« Linux by SNMP »** (interfaces, débits, CPU, mémoire,
+ICMP) ; ses déclencheurs standard produisent de vraies alertes (temps de
+réponse élevé sur le VSAT, équipement injoignable pendant les coupures de
+Dédougou), qui remontent au NOC.
+
+**Pourquoi pas `tc netem`.** Le noyau WSL2 de Docker Desktop est compilé
+sans `netem`, `tbf` ni cible `NFQUEUE` : impossible de retarder un paquet
+côté noyau. Chaque équipement coupe donc la réponse automatique au ping
+(`sysctl net.ipv4.icmp_echo_ignore_all=1`, propre à son espace réseau) et
+`icmp_responder.py` répond lui-même, après le délai du lien et avec ses
+pertes. Les pertes et coupures SNMP passent par iptables (module
+`statistic`, présent dans ce noyau). Le ping de Zabbix mesure lui-même le
+temps d'aller-retour.
+
+Le VSAT est réglé à ~380 ms et non aux ~600 ms d'un vrai satellite
+géostationnaire : le ping de Zabbix abandonne une réponse au-delà de
+500 ms et déclarerait le site en panne plutôt que lent.
+
+Les noms sont préfixés `LAB-` et les sites « Laboratoire … » : ils ne se
+confondent jamais avec l'inventaire de l'agence.
+
+## Poste de 8 Go : ce qui a été allégé
+
+Docker Desktop n'alloue ici que ~3,8 Go à sa machine virtuelle. Zabbix tourne
+en images Alpine (les plus légères publiées) avec des caches et des
+processus réduits à un laboratoire d'une vingtaine d'hôtes, et une base
+PostgreSQL bridée (`shared_buffers` 48 Mo, 60 connexions) — voir
+`docker-compose.yml`. Mesuré : ~310 Mo pour Zabbix complet, ~16 Mo par
+équipement du réseau de laboratoire.
+
+## Brancher le NOC sur le laboratoire
+
+Le collecteur lit l'outil désigné par `ZABBIX_API_URL` dans `.env`. Pour le
+laboratoire : `ZABBIX_API_URL=http://zabbix-web:8080` et les identifiants
+`ZABBIX_LAB_*` (le `.env` du poste contient les deux blocs, celui de
+l'agence commenté). Puis `docker compose up -d collector backend`.
 
 ## Peupler avec l'inventaire réel
 
@@ -66,14 +115,10 @@ Redis, PostgreSQL, et les outils eux-mêmes — et les font superviser par de
 **vraies sondes** : agent Zabbix, `check_ping` ICMP côté Centreon, CI dans
 la CMDB iTop.
 
-NetXMS suit le même principe mais n'a besoin que de la première commande —
-son API Legacy Web accepte la création d'objets depuis l'extérieur, à
-la différence de Centreon dont c'est CLAPI, local au conteneur, qui écrit la
-configuration :
-
-```bash
-docker compose --profile provision run --rm provision --only netxms
-```
+Nagios n'a besoin d'aucune commande : son inventaire est un fichier de
+configuration, `nagios/noc-lab.cfg`, monté en lecture seule dans le
+conteneur — les mêmes conteneurs réels, sondés par `check_ping`,
+`check_http` et `check_tcp`. Le modifier puis `docker compose restart nagios`.
 
 Aucune donnée n'est inventée. C'est ce qui distingue ce laboratoire d'un jeu
 d'essai : un jeu de données semé en base ne traverse aucune ligne de code
@@ -87,6 +132,16 @@ Le provisionnement est **idempotent** : le relancer ne crée pas de doublons.
 ## Ce que fait chaque image
 
 ### `centreon/` — Centreon 22.10.7
+
+> ⚠️ **Image non constructible depuis octobre 2026.** Centreon a retiré de
+> `packages.centreon.com` les dépôts 22.10, 23.04, 23.10 et 24.04 (« does not
+> have a Release file ») ; seule la branche 24.10 (Debian 12) reste publique,
+> et aucune image Docker complète (interface + API) de la 22.10 n'existe — les
+> images communautaires ne sont que des collecteurs. Deux voies : obtenir de
+> l'agence les paquets `.deb`/`.rpm` de son serveur 22.10 (cache apt/yum ou
+> miroir interne) pour reconstruire à l'identique, ou bâtir sur 24.10, dont
+> l'API v2 lue par le NOC est la même. En attendant, `CENTREON_API_URL` est
+> commentée dans `.env` : le connecteur se déclare « non configuré ».
 
 Centreon ne publie aucune image Docker supportée. L'image installe les
 paquets Debian de l'éditeur depuis `packages.centreon.com`, exactement comme
@@ -138,30 +193,21 @@ l'archive publiée par Combodo sur GitHub.
   lecture seule, on retient la combinaison la plus étroite qui couvre ce que
   le NOC lit.
 
-### `netxms/` — NetXMS 5.0.8
+### `nagios/` — Nagios Core 4.5.12
 
-NetXMS ne publie aucune image Docker officielle. L'image installe les
-paquets Debian de l'éditeur depuis `packages.netxms.org`, puis déploie l'API
-Legacy Web — un `.war` Java autonome, distribué en dehors du système de
-paquets — dans un Tomcat.
+Image `jasonrivers/nagios`, version épinglée. Le collecteur lit les CGI JSON
+livrés avec Nagios Core (`NAGIOS_MODE=statusjson`), sans module
+supplémentaire.
 
-* **Une installation NEUVE, jamais le dump de production.** Ce conteneur a
-  sa **propre base vierge** (`netxms-server-db`, distincte de `netxms-db`
-  décrit plus bas) : sans les canaux de notification ni les communautés
-  SNMP réelles de la production, un `netxmsd` neuf peut tourner et recevoir
-  des sondes sans aucun risque.
-
-* **Le mot de passe `admin` est VIDE au premier démarrage.** C'est le
-  comportement documenté d'une installation NetXMS neuve, pas un oubli — le
-  changer avant d'ouvrir ce laboratoire à qui que ce soit d'autre que vous
-  (interface web du `.war`, ou `nxadm` en console).
-
-* **Deux points n'ont pas pu être vérifiés contre une instance réelle** avant
-  livraison de cette image, faute d'environnement pour la tester : le
-  découpage exact des paquets Debian de la 5.0 (métapaquet unique ou pilote
-  de base séparé), et l'URL exacte du `.war` de l'API. Les deux sont
-  documentés en tête de `tools/netxms/Dockerfile`, avec la commande de
-  diagnostic à lancer si le build échoue à cet endroit.
+* **Les CGI JSON codent les états en masques de bits** (hôte : 2 UP,
+  4 DOWN, 8 UNREACHABLE ; service : 2 OK, 4 WARNING, 8 UNKNOWN,
+  16 CRITICAL), et non avec les codes de retour des sondes. Voir l'en-tête
+  de `integrations/nagios.py`.
+* **Le compte `nagiosadmin`** est créé au démarrage avec `NAGIOS_API_USER` /
+  `NAGIOS_API_PASSWORD` ; c'est le seul que le `cgi.cfg` de l'image autorise
+  à voir tous les hôtes.
+* Le frontend du NOC n'est pas déclaré : il n'est pas sur le réseau
+  `default`, la sonde le verrait toujours DOWN.
 
 ### `provision/` — peuplement du laboratoire
 
@@ -202,13 +248,14 @@ docker compose --profile itop up -d
 
 ## Ce qui n'est pas dans le laboratoire
 
-**Nagios et Nokia NSP.** Leurs connecteurs sont écrits et prêts
-(`integrations/nagios.py`, `nsp.py`) : renseigner `<OUTIL>_API_URL` dans
-`.env` suffit à les activer, sans une ligne de code à écrire. Nokia ne
-distribue pas NSP publiquement.
+**Nokia NSP.** Son connecteur est écrit et câblé (`integrations/nsp.py`,
+variables `NSP_*` passées au collecteur et au backend) : renseigner
+`NSP_API_URL`, le compte et `NSP_FM_MODE` dans `.env` suffit à l'activer.
+Nokia ne distribue pas NSP publiquement, il n'existe donc aucun laboratoire.
 
-**Le dump de production NetXMS** coexiste avec le serveur neuf décrit
-ci-dessus, dans un service séparé (`netxms-db`, même profil `netxms`) :
+**Un serveur NetXMS.** Le connecteur API (`integrations/netxms.py`) reste
+dans le code, mais le laboratoire ne monte plus de serveur NetXMS : seule la
+base du dump de production est servie (`netxms-db`, profil `netxms`) :
 restauré depuis `database/netxmsbd07082026.sql` et lu en lecture seule par
 `integrations/netxms_db.py` — voir le README principal. Aucun serveur
 `netxmsd` n'est démarré sur cette base précise : il exécuterait les actions

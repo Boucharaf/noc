@@ -43,36 +43,42 @@ export const STATUS = {
 export const statusMeta = (value) => STATUS[value] ?? { label: value ?? "—", color: "var(--ink-3)" };
 
 /* ------------------------------------------------------------------ */
-/* État d'un équipement — dérivé par backend/app/services/node_service  */
+/* État d'un équipement — miroir de integrations/models.py::NODE_STATES */
 /* ------------------------------------------------------------------ */
-export const NODE_STATES = ["down", "degraded", "silent", "maintenance", "up", "unknown", "inactive"];
+// « unknown » DOIT figurer ici : sans lui, les équipements à l'état inconnu
+// (états contradictoires entre outils, CI vus par la seule CMDB) n'étaient
+// comptés dans aucune tuile, et le total ne se retrouvait pas.
+// « silent » (muet) est fusionné dans « unknown » par le collecteur.
+export const NODE_STATES = ["down", "degraded", "maintenance", "up", "unknown"];
 
 export const NODE_STATE = {
   down: {
     label: "Hors service",
     color: "var(--state-down)",
-    hint: "Incident bloquant ouvert, ou disponibilité mesurée nulle.",
+    hint: "L'outil de supervision constate l'équipement injoignable.",
   },
   degraded: {
-    label: "Dégradé",
+    label: "Perturbé",
     color: "var(--state-degraded)",
-    hint: "Incident ouvert, ou seuil dépassé (dispo < 99 %, pertes > 5 %, CPU/RAM > 90 %).",
+    hint: "Répond, mais avec des anomalies : pertes de paquets, service en défaut.",
   },
+  // Fusionné dans « Inconnu » : un équipement dont l'outil ne remonte plus
+  // rien n'est ni en marche ni en panne connue.
   silent: {
-    label: "Muet",
-    color: "var(--state-silent)",
-    hint: "Aucune métrique reçue depuis 6 h — l'outil de supervision ne remonte plus rien.",
+    label: "Inconnu",
+    color: "var(--ink-3)",
+    hint: "État non mesuré : l'outil ne remonte rien sur cet équipement.",
   },
   maintenance: {
     label: "Maintenance",
     color: "var(--state-maintenance)",
-    hint: "Couvert par une fenêtre de maintenance planifiée : alertes neutralisées.",
+    hint: "Couvert par une fenêtre de maintenance planifiée : exclu du calcul de disponibilité.",
   },
-  up: { label: "Nominal", color: "var(--state-up)", hint: "Aucun incident, seuils respectés." },
+  up: { label: "Normal", color: "var(--state-up)", hint: "En service." },
   unknown: {
     label: "Inconnu",
     color: "var(--ink-3)",
-    hint: "Aucun état exploitable n'est fourni par les outils sources.",
+    hint: "État non mesuré : rien ne remonte sur cet équipement, ou il n'est connu que de l'inventaire.",
   },
   inactive: {
     label: "Désactivé",
@@ -132,7 +138,7 @@ export const METRICS = {
     color: "var(--state-maintenance)",
   },
   bandwidth_in_mbps: {
-    label: "Trafic entrant",
+    label: "Débit up",
     unit: "Mb/s",
     digits: 1,
     higherIsBetter: null, // ni bon ni mauvais : c'est une charge, pas un score
@@ -140,7 +146,7 @@ export const METRICS = {
     color: "var(--accent)",
   },
   bandwidth_out_mbps: {
-    label: "Trafic sortant",
+    label: "Débit down",
     unit: "Mb/s",
     digits: 1,
     higherIsBetter: null,

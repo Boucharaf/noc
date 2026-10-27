@@ -8,9 +8,9 @@ import { FilterSelect, SearchField, Toolbar } from "../components/ui/Controls";
 import { PageHeader } from "../components/layout/TopBar";
 import { Pagination } from "../components/ui/Table";
 import { QueryBoundary, SkeletonRows } from "../components/ui/States";
-import { NODE_STATES, nodeStateMeta, toolLabel } from "../lib/vocabulary";
+import { NODE_STATES, TOOL_LABEL, nodeStateMeta, toolLabel } from "../lib/vocabulary";
 import { num } from "../lib/format";
-import { useNodeCoverage, useNodeStates, useNodes, useReference } from "../hooks/queries";
+import { useNodes, useOverview } from "../hooks/queries";
 
 /**
  * Inventaire du parc.
@@ -30,9 +30,8 @@ const PAGE_SIZE = 50;
 
 export default function NodesPage() {
   const [params, setParams] = useSearchParams();
-  const { data: reference } = useReference();
-  const stateCounts = useNodeStates();
-  const coverage = useNodeCoverage();
+  // Décomptes par état DU PÉRIMÈTRE courant (barre commune), pas du pays.
+  const overview = useOverview();
 
   const setParam = useCallback(
     (key, value) => {
@@ -51,21 +50,20 @@ export default function NodesPage() {
       page_size: PAGE_SIZE,
       q: params.get("q") || undefined,
       state: params.get("state") || undefined,
-      locality_id: params.get("locality_id") || undefined,
-      region_id: params.get("region_id") ? Number(params.get("region_id")) : undefined,
-      ministry_id: params.get("ministry_id") ? Number(params.get("ministry_id")) : undefined,
-      node_type: params.get("node_type") || undefined,
-      source_tool: params.get("source_tool") || undefined,
+      // Région, province et site viennent de la barre de périmètre.
+      tool: params.get("source_tool") || undefined,
       sort: params.get("sort") || "state",
     };
     return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined));
   }, [params]);
 
   const query = useNodes(filters);
-  const counts = stateCounts.data;
+  const counts = overview.data
+    ? { ...overview.data.nodes_by_state, total: overview.data.nodes_total }
+    : undefined;
   const activeState = params.get("state");
 
-  const activeFilters = ["q", "state", "locality_id", "region_id", "ministry_id", "node_type", "source_tool"].filter(
+  const activeFilters = ["q", "state", "source_tool"].filter(
     (key) => params.get(key),
   ).length;
 
@@ -156,47 +154,7 @@ export default function NodesPage() {
               onChange={(value) => setParam("q", value)}
               placeholder="Nom ou adresse IP…"
               width={190}
-            />
-            <FilterSelect
-              label="Région"
-              value={params.get("region_id")}
-              onChange={(value) => setParam("region_id", value)}
-              allLabel="Toutes régions"
-              width={150}
-              options={(reference?.regions ?? []).map((region) => ({
-                value: region.id,
-                label: region.name,
-              }))}
-            />
-            <FilterSelect
-              label="Site"
-              value={params.get("locality_id")}
-              onChange={(value) => setParam("locality_id", value)}
-              allLabel="Tous les sites"
-              width={160}
-              options={(reference?.localities ?? []).map((locality) => ({
-                value: locality.id,
-                label: locality.name,
-              }))}
-            />
-            <FilterSelect
-              label="Ministère"
-              value={params.get("ministry_id")}
-              onChange={(value) => setParam("ministry_id", value)}
-              allLabel="Tous ministères"
-              width={190}
-              options={(reference?.ministries ?? []).map((ministry) => ({
-                value: ministry.id,
-                label: ministry.name,
-              }))}
-            />
-            <FilterSelect
-              label="Type"
-              value={params.get("node_type")}
-              onChange={(value) => setParam("node_type", value)}
-              allLabel="Tous types"
-              width={120}
-              options={(reference?.node_types ?? []).map((type) => ({ value: type, label: type }))}
+              suggest="node"
             />
             <FilterSelect
               label="État"
@@ -215,10 +173,9 @@ export default function NodesPage() {
               onChange={(value) => setParam("source_tool", value)}
               allLabel="Tous les outils"
               width={140}
-              options={(coverage.data ?? []).map(({ tool }) => ({
-                value: tool,
-                label: toolLabel(tool),
-              }))}
+              options={Object.keys(TOOL_LABEL)
+                .filter((tool) => tool !== "manual")
+                .map((tool) => ({ value: tool, label: toolLabel(tool) }))}
             />
           </Toolbar>
         </div>
@@ -232,7 +189,7 @@ export default function NodesPage() {
             emptyHint={
               activeFilters
                 ? "Retirez un filtre pour élargir la recherche."
-                : "L'inventaire est vide : dim_node n'est peuplée que par la collecte ETL."
+                : "Aucun équipement dans l'inventaire pour l'instant."
             }
           >
             {(data) => (

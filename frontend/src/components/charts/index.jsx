@@ -11,7 +11,7 @@ import {
 } from "chart.js";
 import { Bar, Line } from "react-chartjs-2";
 
-import { useChartTheme } from "./useChartTheme";
+import { canvasColor, useChartTheme } from "./useChartTheme";
 
 ChartJS.register(
   CategoryScale,
@@ -110,25 +110,27 @@ export function LineChart({
   yMin,
   valueFormatter,
   targetLine,
+  stacked = false,
 }) {
   const chrome = useChartTheme();
 
   const data = {
     labels,
-    datasets: series.map((s) => ({
+    datasets: series.map((s, index) => ({
       label: s.label,
       data: s.data,
-      borderColor: s.color,
-      backgroundColor: s.fill
-        ? `color-mix(in srgb, ${s.color} 18%, transparent)`
-        : s.color,
+      borderColor: canvasColor(s.color),
+      backgroundColor:
+        stacked ? canvasColor(s.color, 0.55) : s.fill ? canvasColor(s.color, 0.18) : canvasColor(s.color),
       borderWidth: s.width ?? 1.6,
       borderDash: s.dashed ? [4, 3] : undefined,
-      fill: s.fill ?? false,
+      // Aires empilées : chaque série remplit jusqu'à la précédente.
+      fill: stacked ? (index === 0 ? "origin" : "-1") : (s.fill ?? false),
       tension: 0.25,
       pointRadius: 0,
       pointHoverRadius: 3,
       pointHitRadius: 12,
+      pointCounts: s.pointCounts,
       spanGaps: true,
     })),
   };
@@ -139,9 +141,17 @@ export function LineChart({
   });
   options.scales.y.max = yMax;
   options.scales.y.min = yMin;
+  if (stacked) {
+    options.scales.y.stacked = true;
+    options.interaction = { mode: "index", intersect: false };
+  }
   if (valueFormatter) {
     options.plugins.tooltip.callbacks = {
-      label: (context) => `${context.dataset.label} : ${valueFormatter(context.parsed.y)}`,
+      label: (context) => {
+        const count = context.dataset.pointCounts?.[context.dataIndex];
+        const contributors = Number.isFinite(count) ? ` · ${count} équipements` : "";
+        return `${context.dataset.label} : ${valueFormatter(context.parsed.y)}${contributors}`;
+      },
     };
     options.scales.y.ticks.callback = (value) => valueFormatter(value);
   }
@@ -184,7 +194,7 @@ export function BarChart({
     datasets: series.map((s) => ({
       label: s.label,
       data: s.data,
-      backgroundColor: s.colors ?? s.color,
+      backgroundColor: s.colors ? s.colors.map((c) => canvasColor(c)) : canvasColor(s.color),
       borderRadius: 2,
       borderSkipped: false,
       barPercentage: 0.82,

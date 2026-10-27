@@ -31,8 +31,24 @@ export function Badge({ color = "var(--ink-3)", children, title, className = "" 
   );
 }
 
-export function SeverityBadge({ severity, short = false }) {
+/**
+ * Gravité. Pour une alerte d'outil, `source` porte la gravité D'ORIGINE en
+ * clair (« Désastre », « Majeure », « Hôte injoignable ») : c'est elle qui
+ * s'affiche ; la couleur suit l'échelle commune du NOC, pour que les outils
+ * restent comparables.
+ */
+export function SeverityBadge({ severity, short = false, source, tool }) {
   const meta = severityMeta(severity);
+  if (source) {
+    return (
+      <Badge
+        color={meta.color}
+        title={`Gravité ${tool ? `${toolLabel(tool)} ` : "d'origine "}: ${source} — niveau commun : ${meta.label}`}
+      >
+        {source}
+      </Badge>
+    );
+  }
   return (
     <Badge color={meta.color} title={`Gravité : ${meta.label}`}>
       {short ? meta.short : meta.label}

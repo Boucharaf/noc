@@ -122,26 +122,6 @@ Chaque utilisateur modifie ensuite ses propres identifiants dans *Mon compte*.
 À ce stade, **le tableau de bord est vide** : aucune source de données n'est
 branchée. C'est normal — voir la section suivante.
 
-### Faire évoluer le schéma de la base
-
-Un volume PostgreSQL neuf reçoit le schéma initial depuis
-`backend/sql/schema.sql`. Au démarrage, le backend exécute ensuite
-`alembic upgrade head` avant de lancer l'API. La révision de baseline marque
-ce schéma existant sans tenter de recréer ses tables; les changements futurs
-doivent être ajoutés comme révisions dans `backend/migrations/versions/`.
-
-Depuis un environnement de développement configuré vers une base de test :
-
-```bash
-cd backend
-alembic revision --autogenerate -m "describe schema change"
-```
-
-Relire et corriger la migration générée avant de la versionner. Lors du
-déploiement, `docker compose up -d --build backend` applique les révisions
-avant que les workers API démarrent. Garder `schema.sql` à jour pour que les
-installations neuves partent du même schéma courant.
-
 ---
 
 ## 3. Choisir ses sources de données
@@ -162,9 +142,10 @@ sont fusionnés dans un même parc.
 
 ### 3.1 Base NetXMS restaurée depuis le dump
 
-Le fichier `database/netxmsbd07082026.sql` (356 Mo, **exclu de git** car il
-contient des données de production) doit être copié à la main dans
-`database/`.
+Le dump `database/netxmsbd07082026.sql` (ou sa version compressée
+`database/netxmsbd07082026.sql.gz`) contient des données de production et est
+**exclu de git**. Il doit être obtenu par un canal autorisé et copié à la main
+dans `database/`. Le script de restauration attend le fichier SQL décompressé.
 
 ```bash
 # 1. Démarrer la base NetXMS locale
@@ -215,9 +196,11 @@ lecture seule**. Ne jamais mélanger les deux blocs.
 Pour NetXMS, deux accès sont possibles, sans changer de code :
 
 - **par son API Web** : `NETXMS_API_URL=https://…` et un compte NetXMS ;
+  à valider sur la version de l'agence avant mise en service ;
 - **par sa base, en lecture seule** : l'administrateur de l'agence exécute
   `database/netxms_readonly_role.sql`, puis
   `NETXMS_API_URL=postgresql://<hôte>:5432/netxms?sslmode=verify-full`.
+  C'est le mode recommandé si cet accès est accordé.
 
 ---
 
@@ -268,6 +251,11 @@ refaire le test.
 | Sauvegarder la base du NOC | `docker compose exec -T postgres pg_dump -U noc -d noc --clean --if-exists > sauvegarde_noc.sql` |
 | Restaurer une sauvegarde | `docker compose exec -T postgres psql -U noc -d noc < sauvegarde_noc.sql` |
 
+Les tests du backend n'écrivent pas dans une base réelle. Les tests
+d'intégration vérifient les contrats actuels (fenêtres mensuelles, routes
+internes protégées); les anciens tests fondés sur `fact_incident` et
+`metric_value` ont été retirés avec ces tables.
+
 > ⛔ **Ne jamais lancer `docker compose down -v`.** L'option `-v` supprime les
 > volumes : tous les comptes, acquittements, notes et maintenances sont
 > perdus, et plus personne ne peut se connecter.
@@ -288,7 +276,7 @@ refaire le test.
 | `NOTIFICATIONS_ENABLED` | Envoi automatique des courriels et SMS | `false` |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_USE_TLS` | Serveur de messagerie | vide |
 | `NOTIFY_SEVERITIES` | Gravités qui déclenchent une notification | `critical,high` |
-| `REFRESH_COOKIE_SECURE` | `true` dès que l'accès se fait en HTTPS | `false` |
+| `REFRESH_COOKIE_SECURE` | `true` dès que l'accès se fait en HTTPS | `true` |
 | `CORS_ORIGINS`, `DASHBOARD_URL` | Adresse publique de l'interface (à adapter sur un serveur) | `localhost` |
 
 > ⚠️ **Ne jamais écrire deux fois la même variable dans `.env`.** Docker
@@ -323,6 +311,12 @@ services:
 ```
 
 `docker compose up -d backend`, puis <http://127.0.0.1:8000/docs>.
+
+Nginx joint le backend par un réseau privé dédié. Si le sous-réseau
+`172.31.250.0/29` est déjà utilisé sur l'hôte, adapter ensemble
+`API_PROXY_SUBNET` et `NGINX_API_PROXY_IP` dans `.env`; l'adresse choisie
+est appliquée à nginx dans Compose et transmise comme seule IP de proxy de
+confiance au backend.
 
 ---
 

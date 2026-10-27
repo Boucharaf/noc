@@ -27,9 +27,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import SEVERITIES
-from app.models import AlertState, ManualIncident, MaintenanceWindow, User
-from app.services import live_service
-from app.services.maintenance_service import covers as maintenance_covers
+from app.models import AlertState, ManualIncident, User
+from app.services import geo_service, live_service, node_service
 
 logger = logging.getLogger(__name__)
 
@@ -49,29 +48,12 @@ def _severity_rank(severity: str) -> int:
 # ---------------------------------------------------------------------------
 # Maintenance
 # ---------------------------------------------------------------------------
-def _active_windows(db: Session, at: datetime) -> list[MaintenanceWindow]:
-    return list(
-        db.execute(
-            select(MaintenanceWindow).where(
-                MaintenanceWindow.starts_at <= at,
-                MaintenanceWindow.ends_at >= at,
-                MaintenanceWindow.suppress_alerts.is_(True),
-            )
-        ).scalars()
-    )
-
-
-def _covered_by_maintenance(
-    windows: list[MaintenanceWindow], node_key: str | None, site: str | None
-) -> MaintenanceWindow | None:
-    """Fenêtre couvrant cette alerte, s'il y en a une.
-
-    Une fenêtre porte sur un équipement OU sur un site entier. Le second cas
-    est celui qui compte en pratique : quand un groupe électrogène est coupé
-    pour entretien, ce sont tous les équipements du site qui tombent, pas un
-    seul — et personne n'a le temps de déclarer trente fenêtres.
-    """
-    return maintenance_covers(windows, node_key, site)
+def _covered_by_maintenance(windows: list[dict], node_key: str | None) -> dict | None:
+    """Maintenance en cours (changement iTop, maintenance Zabbix) visant
+    l'équipement de cette alerte, s'il y en a une."""
+    if not node_key:
+        return None
+    return next((w for w in windows if node_key in (w.get("node_keys") or [])), None)
 
 
 # ---------------------------------------------------------------------------
@@ -115,12 +97,12 @@ def _manual_alerts(db: Session) -> list[dict]:
     return [
         {
             "tool": "manual",
+            "kind": "manual_incident",
             "ref": str(row.id),
             "key": row.alert_key(),
             "severity": row.severity,
             "message": row.title,
             "description": row.description,
-            "cause": row.cause,
             "since": row.detected_at.isoformat() if row.detected_at else None,
             "node_ref": row.node_key,
             "node_name": row.node_name,
@@ -137,10 +119,13 @@ async def list_alerts(
     db: Session,
     severity: str | None = None,
     tool: str | None = None,
+    kind: str | None = None,
     site: str | None = None,
     organisation: str | None = None,
+    region: str | None = None,
+    province: str | None = None,
+    search: str | None = None,
     node_type: str | None = None,
-    node_key: str | None = None,
     acknowledged: bool | None = None,
     include_maintenance: bool = True,
     limit: int = 500,
@@ -173,6 +158,8 @@ async def list_alerts(
                 "node_key": node["id"] if node else None,
                 "node_name": alert.get("node_name") or (node["name"] if node else None),
                 "site": node.get("site") if node else None,
+                "province": node.get("province") if node else None,
+                "region": node.get("region") if node else None,
             }
         )
 
@@ -197,24 +184,22 @@ async def list_alerts(
     names = _user_names(db, user_ids)
 
     # -- maintenance ------------------------------------------------------
-    windows = _active_windows(db, now)
+    windows = await node_service.active_windows(now)
 
     enriched: list[dict] = []
     for alert in alerts:
         state = states.get(alert["key"])
-        window = _covered_by_maintenance(windows, alert.get("node_key"), alert.get("site"))
+        window = _covered_by_maintenance(windows, alert.get("node_key"))
 
         enriched.append(
             {
                 **alert,
+                "kind": alert.get("kind", "technical"),
                 # L'acquittement vient soit de l'outil source, soit du NOC.
                 # Les deux comptent : un technicien qui acquitte dans Zabbix
                 # a fait le travail, même s'il n'est pas passé par le NOC.
                 "acknowledged": bool(alert.get("acknowledged")) or bool(state and state.acknowledged_at),
                 "acknowledged_by": names.get(state.acknowledged_by) if state else None,
-                "source_acknowledged_by": alert.get("acknowledged_by"),
-                "source_acknowledged_at": alert.get("acknowledged_at"),
-                "source_acknowledgement_note": alert.get("acknowledgement_note"),
                 "acknowledged_at": (
                     state.acknowledged_at.isoformat()
                     if state and state.acknowledged_at
@@ -223,34 +208,37 @@ async def list_alerts(
                 "assigned_to": names.get(state.assigned_to) if state else None,
                 "cause": state.cause if state else None,
                 "escalation_level": state.escalation_level if state else 0,
-                "is_maintenance": window is not None or bool(alert.get("is_maintenance")),
-                "maintenance_reason": window.reason if window else None,
-                "maintenance_until": (
-                    window.ends_at.isoformat()
-                    if window
-                    else (
-                        alert["maintenance_until"].isoformat()
-                        if hasattr(alert.get("maintenance_until"), "isoformat")
-                        else alert.get("maintenance_until")
-                    )
-                ),
-                "source_status": alert.get("source_status"),
-                "last_change_at": alert.get("last_change_at"),
-                "source_assignee": alert.get("source_assignee"),
-                "source_team": alert.get("source_team"),
-                "business_service": alert.get("business_service"),
+                "is_maintenance": window is not None,
+                "maintenance_reason": node_service.maintenance_label(window) if window else None,
             }
         )
 
     # -- filtres ----------------------------------------------------------
+    # Périmètre territorial : la même règle que tous les écrans
+    # (geo_service.scope_nodes). Une alerte sans équipement connu sort du
+    # périmètre dès qu'une localité est demandée.
+    from app.services.geo_service import scope_nodes
+
+    scoped_ids = (
+        {node["id"] for node in scope_nodes(list(nodes.values()), region, province, site)}
+        if (region or province or site)
+        else None
+    )
+    needle = (search or "").strip().casefold()
+
     def keep(alert: dict) -> bool:
-        if node_key and alert.get("node_key") != node_key:
+        if scoped_ids is not None and alert.get("node_key") not in scoped_ids:
+            return False
+        if needle and needle not in " ".join(
+            str(alert.get(field) or "")
+            for field in ("message", "node_name", "site", "province", "region", "tool", "ref")
+        ).casefold():
             return False
         if severity and alert.get("severity") != severity:
             return False
         if tool and alert.get("tool") != tool:
             return False
-        if site and alert.get("site") != site:
+        if kind and alert.get("kind", "technical") != kind:
             return False
         if organisation or node_type:
             node = nodes.get(alert.get("node_key") or "") or {}
@@ -330,7 +318,11 @@ async def get_alert(db: Session, alert_key: str) -> dict | None:
         "resolved_at": (
             state.resolved_at.isoformat() if state and state.resolved_at else None
         ),
-        "ticket_ref": state.ticket_ref if state else None,
+        "ticket_ref": alert.get("ticket_ref") or (state.ticket_ref if state else None),
+        "node": _node_facts(nodes := await live_service.get_nodes(), alert.get("node_key")),
+        "position": geo_service.position(
+            next((n for n in nodes if n.get("id") == alert.get("node_key")), None), nodes
+        ),
         "timeline": [
             {
                 "action": row.action,
@@ -343,121 +335,24 @@ async def get_alert(db: Session, alert_key: str) -> dict | None:
     }
 
 
-# ---------------------------------------------------------------------------
-# Écritures
-# ---------------------------------------------------------------------------
-async def _ensure_state(db: Session, alert_key: str) -> AlertState:
-    """Récupère l'état d'une alerte, en le créant au besoin.
-
-    La création FIGE une copie du libellé et de la sévérité. C'est la seule
-    duplication tolérée dans ce schéma, et elle a une raison précise : quand
-    Zabbix aura purgé l'événement, la fiche d'exploitation devra rester
-    lisible. Elle n'est jamais rafraîchie ensuite — sinon elle deviendrait
-    une seconde source de vérité qui dériverait de l'instantané.
-    """
-    state = db.get(AlertState, alert_key)
-    if state is not None:
-        return state
-
-    snapshot = None
-    for alert in await live_service.get_alerts():
-        if f"{alert['tool']}:{alert['ref']}" == alert_key:
-            snapshot = alert
-            break
-
-    detected_at = None
-    if snapshot and snapshot.get("since"):
-        try:
-            detected_at = datetime.fromisoformat(snapshot["since"])
-        except ValueError:
-            detected_at = None
-
-    state = AlertState(
-        alert_key=alert_key,
-        node_key=snapshot.get("node_ref") if snapshot else None,
-        node_name=snapshot.get("node_name") if snapshot else None,
-        severity_at_pickup=snapshot.get("severity") if snapshot else None,
-        message_at_pickup=snapshot.get("message") if snapshot else None,
-        detected_at=detected_at,
-    )
-    db.add(state)
-    return state
-
-
-async def acknowledge(db: Session, alert_key: str, user_id: int, note: str | None) -> dict:
-    from app.models import AlertTimeline
-
-    state = await _ensure_state(db, alert_key)
-    if state.acknowledged_at is None:
-        state.acknowledged_at = datetime.now(timezone.utc)
-        state.acknowledged_by = user_id
-    state.updated_at = datetime.now(timezone.utc)
-
-    db.add(
-        AlertTimeline(
-            alert_key=alert_key, user_id=user_id, action="acknowledged", note=note
-        )
-    )
-    db.commit()
-    return {"alert_key": alert_key, "acknowledged_at": state.acknowledged_at.isoformat()}
-
-
-async def assign(db: Session, alert_key: str, user_id: int, assignee_id: int,
-                 note: str | None) -> dict:
-    from app.models import AlertTimeline
-
-    state = await _ensure_state(db, alert_key)
-    state.assigned_to = assignee_id
-    state.assigned_at = datetime.now(timezone.utc)
-    state.updated_at = state.assigned_at
-
-    db.add(
-        AlertTimeline(
-            alert_key=alert_key,
-            user_id=user_id,
-            action="assigned",
-            note=note or f"Affectée à l'utilisateur {assignee_id}",
-        )
-    )
-    db.commit()
-    return {"alert_key": alert_key, "assigned_to": assignee_id}
-
-
-async def resolve(db: Session, alert_key: str, user_id: int, cause: str | None,
-                  note: str | None) -> dict:
-    """Clôture côté NOC.
-
-    Ne ferme RIEN chez l'outil source : le NOC n'a pas à décider qu'un
-    déclencheur Zabbix doit se taire. Cette clôture enregistre le diagnostic
-    et la fin du travail d'exploitation ; si l'alerte reste active à la
-    source, elle reste visible, marquée comme traitée. C'est volontaire —
-    masquer une alerte encore active serait dangereux.
-    """
-    from app.models import AlertTimeline
-
-    state = await _ensure_state(db, alert_key)
-    state.resolved_at = datetime.now(timezone.utc)
-    state.cause = cause or state.cause
-    state.resolution_note = note or state.resolution_note
-    state.updated_at = state.resolved_at
-
-    db.add(
-        AlertTimeline(
-            alert_key=alert_key,
-            user_id=user_id,
-            action="resolved",
-            note=note or cause,
-        )
-    )
-    db.commit()
-    return {"alert_key": alert_key, "resolved_at": state.resolved_at.isoformat()}
-
-
-async def add_note(db: Session, alert_key: str, user_id: int, note: str) -> dict:
-    from app.models import AlertTimeline
-
-    await _ensure_state(db, alert_key)
-    entry = AlertTimeline(alert_key=alert_key, user_id=user_id, action="note", note=note)
-    db.add(entry)
-    db.commit()
-    return {"alert_key": alert_key, "note": note}
+def _node_facts(nodes: list[dict], node_key: str | None) -> dict | None:
+    """Caractéristiques techniques de l'équipement d'une alerte."""
+    node = next((item for item in nodes if item.get("id") == node_key), None)
+    if node is None:
+        return None
+    return {
+        "id": node["id"],
+        "name": node.get("name"),
+        "hostname": node.get("hostname"),
+        "ip": node.get("ip"),
+        "state": node.get("state"),
+        "node_type": node.get("node_type"),
+        "organisation": node.get("organisation"),
+        "site": node.get("site"),
+        "province": node.get("province"),
+        "region": node.get("region"),
+        "sources": node.get("sources") or {},
+        "state_conflict": node.get("state_conflict") or {},
+        "alerts": node.get("alerts", 0),
+        "worst_severity": node.get("worst_severity"),
+    }

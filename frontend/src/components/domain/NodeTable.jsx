@@ -231,7 +231,7 @@ export default function NodeTable({ nodes, sort, onSort, selectedId, onSelect, v
               : "Aucune métrique reçue depuis plus de 6 h"
           }
         >
-          {row.last_metric_at ? ageFrom(row.last_metric_at) : "muet"}
+          {row.last_metric_at ? ageFrom(row.last_metric_at) : "jamais"}
         </span>
       ),
     },

@@ -1,472 +1,300 @@
-import { useState } from "react";
-import { CalendarPlus, Trash2 } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
+import { Link } from "react-router-dom";
 
 import Panel from "../components/ui/Panel";
 import Stat from "../components/ui/Stat";
+import DataTable from "../components/ui/Table";
 import { Badge } from "../components/ui/Badge";
-import { ConfirmDialog, Modal } from "../components/ui/Overlay";
-import { Field, Notice, Segmented } from "../components/ui/Controls";
+import { SearchField, Segmented, Toolbar } from "../components/ui/Controls";
 import { PageHeader } from "../components/layout/TopBar";
-import { EmptyState, QueryBoundary } from "../components/ui/States";
+import { QueryBoundary, SkeletonRows } from "../components/ui/States";
 import { dateTime, duration, num } from "../lib/format";
-import { errorMessage } from "../api/client";
-import { toolLabel } from "../lib/vocabulary";
-import { PERMISSIONS } from "../lib/permissions";
-import { useMaintenanceActions, useMaintenanceWindows, useNodes, useSites } from "../hooks/queries";
-import { usePermission } from "../hooks/useSession";
+import { CHANGE_STATUS, changeStatusMeta } from "../lib/itop";
+import { useMaintenanceWindows } from "../hooks/queries";
+import { scopeLabel, useScopeStore } from "../store/scope";
 
 /**
- * Fenêtres de maintenance planifiée.
+ * Maintenances planifiées — lues dans iTop et Zabbix, en LECTURE SEULE.
  *
- * Ce n'est pas un agenda : c'est un mécanisme de NEUTRALISATION. Une
- * fenêtre active exclut les incidents qu'elle couvre de tous les KPI et
- * du calcul de SLA (`v_incident.is_maintenance`). Une coupure voulue
- * comptée comme une panne fausse à la fois le volume d'incidents et la
- * conformité contractuelle — et c'est le reproche classique fait à un
- * NOC en comité de pilotage.
- *
- * Conséquence, rappelée dans l'interface : créer une fenêtre trop large
- * masque de vraies pannes. La portée (équipement OU site) est donc
- * obligatoire, jamais « tout le réseau ».
+ * Une maintenance se planifie là où l'agence la décide : un CHANGEMENT iTop
+ * (dates de début et de fin, CI impactés), ou une maintenance Zabbix. Le NOC
+ * les relit à chaque cycle de collecte et en tire deux effets :
+ *   * les équipements visés passent à l'état « maintenance » pendant la
+ *     fenêtre ;
+ *   * leurs alertes sont marquées et sortent de la disponibilité et des SLA
+ *     — une coupure voulue n'est pas une panne.
  */
-export default function MaintenancePage() {
-  const [filter, setFilter] = useState("all");
-  const [createOpen, setCreateOpen] = useState(false);
-  const [toDelete, setToDelete] = useState(null);
+const SCOPES = [
+  { value: "all", label: "Toutes" },
+  { value: "active", label: "En cours" },
+  { value: "upcoming", label: "À venir" },
+  { value: "past", label: "Terminées" },
+];
 
-  const canManage = usePermission(PERMISSIONS.MANAGE_MAINTENANCE);
-  const windows = useMaintenanceWindows({ onlyActive: filter === "active", limit: 200 });
-  const actions = useMaintenanceActions();
+const TIMING = {
+  active: { label: "En cours", color: "var(--state-maintenance)" },
+  upcoming: { label: "À venir", color: "var(--accent-ink)" },
+  past: { label: "Terminée", color: "var(--ink-3)" },
+};
 
-  const items = windows.data ?? [];
+const SOURCE = { change: "Changement iTop", maintenance: "Maintenance Zabbix" };
+
+/**
+ * Frise des maintenances : une ligne par fenêtre, une barre du début à la
+ * fin, et le trait « maintenant ». Les chevauchements (deux coupures sur le
+ * même site) et ce qui arrive dans les prochains jours se voient sans lire
+ * de dates.
+ */
+function MaintenanceTimeline({ windows }) {
   const now = Date.now();
-  const active = items.filter(
-    (w) => new Date(w.starts_at).getTime() <= now && new Date(w.ends_at).getTime() >= now,
-  );
-  const upcoming = items.filter((w) => new Date(w.starts_at).getTime() > now);
-
+  const day = 86400_000;
+  const starts = windows.map((w) => Date.parse(w.start)).filter(Number.isFinite);
+  const ends = windows.map((w) => (w.end ? Date.parse(w.end) : now + 2 * day)).filter(Number.isFinite);
+  const from = Math.min(now - day, ...starts);
+  const to = Math.max(now + day, ...ends);
+  const span = to - from || 1;
+  const x = (t) => `${(100 * (t - from)) / span}%`;
+  const ticks = [];
+  for (let t = Math.ceil(from / day) * day; t <= to; t += day * Math.max(1, Math.round(span / day / 8))) {
+    ticks.push(t);
+  }
   return (
-    <div className="space-y-2.5">
-      <PageHeader
-        title="Maintenances planifiées"
-        subtitle="Fenêtres pendant lesquelles les alertes ne comptent ni dans les KPI ni dans le SLA"
-        actions={
-          canManage && (
-            <button type="button" className="btn btn-sm btn-primary" onClick={() => setCreateOpen(true)}>
-              <CalendarPlus size={13} /> Planifier
-            </button>
-          )
-        }
+    <div className="relative" style={{ paddingTop: 18 }}>
+      {ticks.map((t) => (
+        <div key={t} className="absolute top-0 bottom-0" style={{ left: x(t), borderLeft: "1px dashed var(--border)" }}>
+          <span className="absolute text-[10px] num -translate-x-1/2" style={{ top: -2, color: "var(--ink-3)" }}>
+            {new Date(t).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" })}
+          </span>
+        </div>
+      ))}
+      <div
+        className="absolute top-0 bottom-0 z-10"
+        style={{ left: x(now), borderLeft: "2px solid var(--sev-critical)" }}
+        title="Maintenant"
       />
-
-      <div className="grid grid-cols-3 gap-2">
-        <Stat
-          label="En cours"
-          value={num(active.length, "0")}
-          color={active.length ? "var(--state-maintenance)" : "var(--ink-2)"}
-          hint="alertes neutralisées"
-        />
-        <Stat label="À venir" value={num(upcoming.length, "0")} />
-        <Stat label="Enregistrées" value={num(items.length, "0")} />
-      </div>
-
-      <Panel
-        title="Fenêtres"
-        flush
-        actions={
-          <Segmented
-            ariaLabel="Filtre"
-            value={filter}
-            onChange={setFilter}
-            options={[
-              { value: "all", label: "Toutes" },
-              { value: "active", label: "En cours" },
-            ]}
-          />
-        }
-      >
-        <QueryBoundary
-          query={windows}
-          emptyMessage="Aucune fenêtre de maintenance"
-          emptyHint="Les fenêtres peuvent aussi être importées depuis les outils (mode maintenance Zabbix, downtime Centreon) via l'API interne de l'ETL."
-        >
-          {(rows) => (
-            <table className="tbl">
-              <thead>
-                <tr>
-                  <th style={{ width: 96 }}>État</th>
-                  <th style={{ width: 200 }}>Portée</th>
-                  <th>Motif</th>
-                  <th style={{ width: 140 }}>Début</th>
-                  <th style={{ width: 140 }}>Fin</th>
-                  <th style={{ width: 80, textAlign: "right" }}>Durée</th>
-                  <th style={{ width: 130 }}>Créée par</th>
-                  {canManage && <th style={{ width: 40 }} />}
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((window) => {
-                  const start = new Date(window.starts_at).getTime();
-                  const end = new Date(window.ends_at).getTime();
-                  const isActive = start <= now && end >= now;
-                  const isPast = end < now;
-                  return (
-                    <tr key={window.id}>
-                      <td>
-                        <Badge
-                          color={
-                            isActive
-                              ? "var(--state-maintenance)"
-                              : isPast
-                                ? "var(--ink-3)"
-                                : "var(--sev-info)"
-                          }
-                        >
-                          {isActive ? "En cours" : isPast ? "Terminée" : "À venir"}
-                        </Badge>
-                      </td>
-                      <td>
-                        {window.node_keys?.length ? (
-                          <span>
-                            {window.node_keys.length} équipement{window.node_keys.length > 1 ? "s" : ""}
-                            <span className="text-[10.5px] ml-1" style={{ color: "var(--ink-3)" }}>
-                              · {window.site}
-                            </span>
-                          </span>
-                        ) : window.node_name ? (
-                          <span>
-                            {window.node_name}
-                            <span className="text-[10.5px] ml-1" style={{ color: "var(--ink-3)" }}>
-                              équipement
-                            </span>
-                          </span>
-                        ) : window.locality_name ? (
-                          <span>
-                            {window.locality_name}
-                            <span className="text-[10.5px] ml-1" style={{ color: "var(--ink-3)" }}>
-                              site entier
-                            </span>
-                          </span>
-                        ) : (
-                          <span style={{ color: "var(--ink-3)" }}>—</span>
-                        )}
-                      </td>
-                      <td className="truncate-cell" title={window.reason}>
-                        {window.reason}
-                        {!window.suppress_alerts && (
-                          <span className="text-[10.5px] ml-1.5" style={{ color: "var(--sev-medium)" }}>
-                            (alertes conservées)
-                          </span>
-                        )}
-                      </td>
-                      <td className="num" style={{ color: "var(--ink-2)" }}>
-                        {dateTime(window.starts_at)}
-                      </td>
-                      <td className="num" style={{ color: "var(--ink-2)" }}>
-                        {dateTime(window.ends_at)}
-                      </td>
-                      <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>
-                        {duration((end - start) / 60000)}
-                      </td>
-                      <td style={{ color: "var(--ink-3)" }}>
-                        {window.created_by_full_name ||
-                          (window.source_tool ? toolLabel(window.source_tool) : "—")}
-                      </td>
-                      {canManage && (
-                        <td>
-                          <button
-                            type="button"
-                            className="btn btn-ghost btn-sm"
-                            onClick={() => setToDelete(window)}
-                            title="Supprimer cette fenêtre"
-                          >
-                            <Trash2 size={12} />
-                          </button>
-                        </td>
-                      )}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )}
-        </QueryBoundary>
-      </Panel>
-
-      {createOpen && (
-        <CreateWindowModal onClose={() => setCreateOpen(false)} create={actions.create} />
-      )}
-
-      <ConfirmDialog
-        open={Boolean(toDelete)}
-        onClose={() => setToDelete(null)}
-        pending={actions.remove.isPending}
-        title="Supprimer la fenêtre"
-        message={
-          toDelete
-            ? `« ${toDelete.reason} » sera supprimée. Les incidents survenus pendant cette fenêtre redeviendront comptabilisés dans les KPI et le SLA.`
-            : ""
-        }
-        confirmLabel="Supprimer"
-        onConfirm={async () => {
-          await actions.remove.mutateAsync(toDelete.id);
-          setToDelete(null);
-        }}
-      />
+      <ul className="relative space-y-1.5">
+        {windows.map((w) => {
+          const start = Date.parse(w.start);
+          const end = w.end ? Date.parse(w.end) : to;
+          // Libellé À CÔTÉ de la barre, jamais rogné : une coupure de 2 h sur
+          // une frise de plusieurs jours n'a pas la place de porter son titre.
+          // Il passe à gauche de la barre quand elle est trop à droite.
+          const alignRight = (end - from) / span > 0.7;
+          return (
+            <li key={w.key} className="relative h-[22px]">
+              <div
+                className="absolute top-[3px] bottom-[3px] rounded"
+                style={{
+                  left: x(start),
+                  width: `max(6px, calc(${x(end)} - ${x(start)}))`,
+                  background: `color-mix(in srgb, ${TIMING[w.timing]?.color} 35%, transparent)`,
+                  border: `1px solid ${TIMING[w.timing]?.color}`,
+                  borderRightStyle: w.end ? "solid" : "dashed",
+                }}
+                title={`${w.title} — ${dateTime(w.start)} → ${w.end ? dateTime(w.end) : "non bornée"}`}
+              />
+              <span
+                className="absolute top-0 bottom-0 flex items-center text-[11px] whitespace-nowrap px-1.5"
+                style={
+                  alignRight
+                    ? { right: `calc(100% - ${x(start)})` }
+                    : { left: `calc(${x(end)} + 2px)` }
+                }
+              >
+                {w.kind === "change" && w.ref ? `${w.ref} · ` : ""}
+                {w.title}
+                {w.nodes_total ? ` · ${num(w.nodes_total)} équip.` : ""}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }
 
-function CreateWindowModal({ onClose, create }) {
-  const sitesQuery = useSites();
-  const [site, setSite] = useState("");
-  const [target, setTarget] = useState(null);
-  const [search, setSearch] = useState("");
-  const [selectedNodeKeys, setSelectedNodeKeys] = useState([]);
-  const [reason, setReason] = useState("");
-  const [startsAt, setStartsAt] = useState("");
-  const [endsAt, setEndsAt] = useState("");
-  const [suppress, setSuppress] = useState(true);
-  const [error, setError] = useState(null);
+export default function MaintenancePage() {
+  const [params, setParams] = useSearchParams();
+  const scope = useScopeStore();
+  const filter = params.get("vue") || "all";
+  const search = params.get("q") || "";
+  const query = useMaintenanceWindows(filter);
+  const data = query.data;
 
-  const nodes = useNodes(
-    { site, search: search.trim() || undefined, limit: 2000, sort: "name" },
-    { enabled: Boolean(site) && target === "nodes" },
-  );
-
-  const knownSite = Boolean(site && sitesQuery.data?.some((entry) => entry.site === site));
-  const valid =
-    knownSite &&
-    target !== null &&
-    reason.trim() &&
-    startsAt &&
-    endsAt &&
-    new Date(endsAt) > new Date(startsAt) &&
-    (target === "site" || selectedNodeKeys.length > 0);
-
-  const submit = async () => {
-    setError(null);
-    try {
-      await create.mutateAsync({
-        site,
-        node_keys: target === "nodes" ? selectedNodeKeys : [],
-        reason: reason.trim(),
-        starts_at: new Date(startsAt).toISOString(),
-        ends_at: new Date(endsAt).toISOString(),
-        suppress_alerts: suppress,
-      });
-      onClose();
-    } catch (submitError) {
-      setError(errorMessage(submitError));
-    }
+  const setParam = (key, value, fallback) => {
+    const next = new URLSearchParams(params);
+    if (value && value !== fallback) next.set(key, value);
+    else next.delete(key);
+    setParams(next, { replace: true });
   };
 
-  return (
-    <Modal
-      open
-      onClose={onClose}
-      title="Planifier une maintenance"
-      subtitle="Choisissez d’abord un site, puis le site entier ou les équipements concernés."
-      width={480}
-      footer={
-        <>
-          <button type="button" className="btn btn-sm" onClick={onClose}>
-            Annuler
-          </button>
-          <button
-            type="button"
-            className="btn btn-sm btn-primary"
-            disabled={!valid || create.isPending}
-            onClick={submit}
-          >
-            {create.isPending ? "…" : "Planifier"}
-          </button>
-        </>
-      }
-    >
-      <div className="space-y-2.5">
-        {error && <Notice tone="error">{error}</Notice>}
+  const needle = search.trim().toLowerCase();
+  const rows = (data?.windows ?? []).filter(
+    (w) =>
+      !needle ||
+      [w.ref, w.title, w.agent, w.team, ...(w.nodes ?? []).map((n) => n.name)]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase()
+        .includes(needle),
+  );
 
-        <QueryBoundary
-          query={sitesQuery}
-          emptyMessage="Aucun site disponible"
-          emptyHint="Le site doit être présent dans l’inventaire avant de planifier une maintenance."
-          compact
-        >
-          {(sites) => (
-            <Field
-              label="Site"
-              required
-              hint="Choisissez d’abord le site auquel la maintenance s’applique."
-            >
-              <select
-                className="select w-full"
-                value={site}
-                onChange={(event) => {
-                  setSite(event.target.value);
-                  setTarget(null);
-                  setSelectedNodeKeys([]);
-                  setSearch("");
-                }}
-                required
-              >
-                <option value="">Sélectionner un site…</option>
-                {sites.map((entry) => (
-                  <option key={entry.site} value={entry.site}>
-                    {entry.site} — {num(entry.nodes, "0")} équipement
-                    {entry.nodes === 1 ? "" : "s"}
-                  </option>
-                ))}
-              </select>
-            </Field>
+  const columns = [
+    {
+      key: "timing",
+      header: "Fenêtre",
+      width: 96,
+      render: (w) => <Badge color={TIMING[w.timing]?.color}>{TIMING[w.timing]?.label}</Badge>,
+    },
+    {
+      key: "title",
+      header: "Maintenance",
+      wrap: true,
+      render: (w) => (
+        <span>
+          <span className="font-medium">{w.title}</span>
+          <span className="block text-[11px]" style={{ color: "var(--ink-3)" }}>
+            {SOURCE[w.kind] ?? w.tool}
+            {w.kind === "change" && w.ref ? ` ${w.ref}` : ""}
+            {w.change_type ? ` · ${w.change_type.replace("Change", "")}` : ""}
+            {w.outage === true ? " · avec interruption de service" : ""}
+          </span>
+        </span>
+      ),
+    },
+    {
+      key: "status",
+      header: "Statut",
+      width: 120,
+      render: (w) => {
+        if (!w.status) return <span style={{ color: "var(--ink-3)" }}>—</span>;
+        const meta = changeStatusMeta(w.status);
+        return <Badge color={meta.color}>{meta.label}</Badge>;
+      },
+    },
+    {
+      key: "dates",
+      header: "Début → fin",
+      width: 230,
+      render: (w) => (
+        <span className="num text-[11.5px]">
+          {dateTime(w.start)} → {w.end ? dateTime(w.end) : "non bornée"}
+          {w.start && w.end && (
+            <span className="block text-[11px]" style={{ color: "var(--ink-3)" }}>
+              durée {duration((new Date(w.end) - new Date(w.start)) / 60000)}
+            </span>
           )}
-        </QueryBoundary>
+        </span>
+      ),
+    },
+    {
+      key: "nodes",
+      header: "Équipements visés",
+      wrap: true,
+      render: (w) =>
+        w.nodes_total ? (
+          <span className="text-[12px]">
+            {w.nodes.slice(0, 3).map((node, index) => (
+              <span key={node.id}>
+                {index > 0 && ", "}
+                <Link
+                  to={`/equipements/${encodeURIComponent(node.id)}`}
+                  style={{ color: "var(--accent-ink)" }}
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  {node.name}
+                </Link>
+              </span>
+            ))}
+            {w.nodes_total > 3 && ` + ${num(w.nodes_total - 3)}`}
+            {w.sites?.length > 0 && (
+              <span className="block text-[11px]" style={{ color: "var(--ink-3)" }}>
+                {w.sites.slice(0, 3).join(" · ")}
+                {w.sites.length > 3 ? " …" : ""}
+              </span>
+            )}
+          </span>
+        ) : (
+          <span className="text-[11.5px]" style={{ color: "var(--sev-medium)" }}>
+            {w.cis?.length
+              ? `${num(w.cis.length)} CI non retrouvé(s) dans la supervision`
+              : "aucun CI rattaché"}
+          </span>
+        ),
+    },
+    {
+      key: "who",
+      header: "Responsable",
+      width: 150,
+      render: (w) =>
+        [w.agent, w.team].filter(Boolean).join(" · ") || <span style={{ color: "var(--ink-3)" }}>—</span>,
+    },
+  ];
 
-        {knownSite && (
-          <Field label="Périmètre de la maintenance" required>
-            <Segmented
-              ariaLabel="Périmètre de la maintenance"
-              value={target}
-              onChange={(value) => {
-                setTarget(value);
-                setSelectedNodeKeys([]);
-                setSearch("");
-              }}
-              options={[
-                { value: "site", label: "Site entier" },
-                { value: "nodes", label: "Équipements sélectionnés" },
-              ]}
-            />
-          </Field>
-        )}
+  return (
+    <div className="space-y-2">
+      <PageHeader
+        title="Maintenances planifiées"
+        subtitle={`Changements iTop et maintenances Zabbix — ${scopeLabel(scope)}`}
+        actions={
+          <Segmented ariaLabel="Fenêtre" options={SCOPES} value={filter} onChange={(v) => setParam("vue", v, "all")} />
+        }
+      />
 
-        {knownSite && target === "nodes" ? (
-          <>
-            <Field
-              label="Rechercher un équipement"
-              required
-              hint={`${selectedNodeKeys.length} sélectionné(s) sur le site ${site}`}
-            >
-              <input
-                className="input"
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Rechercher par nom ou IP…"
-                disabled={!knownSite}
-              />
-            </Field>
-            <div
-              className="panel"
-              style={{
-                maxHeight: 180,
-                overflow: "auto",
-                background: "var(--surface-2)",
-              }}
-            >
-              <QueryBoundary
-                query={nodes}
-                compact
-                empty={(data) => !data?.items?.length}
-                emptyMessage="Aucun équipement trouvé sur ce site"
-                emptyHint="Modifiez la recherche ou sélectionnez un autre site."
-              >
-                {(data) => (
-                  <>
-                    <p
-                      className="px-2.5 py-1 text-[10.5px] border-b"
-                      style={{ color: "var(--ink-3)", borderColor: "var(--border)" }}
-                    >
-                      Équipements du site {site}
-                    </p>
-                    <ul className="divide-y" style={{ borderColor: "var(--border)" }}>
-                      {data.items.map((node) => (
-                        <li key={node.node_id}>
-                          <label className="flex items-center gap-2 px-2.5 py-1.5">
-                            <input
-                              type="checkbox"
-                              checked={selectedNodeKeys.includes(node.node_id)}
-                              onChange={(event) =>
-                                setSelectedNodeKeys((current) =>
-                                  event.target.checked
-                                    ? [...current, node.node_id]
-                                    : current.filter((key) => key !== node.node_id),
-                                )
-                              }
-                            />
-                            <span className="text-[12px]">{node.name}</span>
-                            <span className="text-[10.5px] ml-auto" style={{ color: "var(--ink-3)" }}>
-                              {node.ip || ""}
-                            </span>
-                          </label>
-                        </li>
-                      ))}
-                    </ul>
-                  </>
-                )}
-              </QueryBoundary>
-            </div>
-          </>
-        ) : knownSite && target === "site" ? (
-          <p className="text-[10.5px]" style={{ color: "var(--ink-3)" }}>
-            La fenêtre couvrira tous les équipements du site {site}.
-          </p>
-        ) : knownSite ? (
-          <EmptyState
-            message="Choisissez la portée de la maintenance"
-            hint="La maintenance peut couvrir le site entier ou uniquement des équipements sélectionnés."
-            compact
-          />
-        ) : null}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <Stat
+          label="En cours"
+          value={num(data?.counts?.active)}
+          color={data?.counts?.active ? "var(--state-maintenance)" : undefined}
+        />
+        <Stat label="À venir" value={num(data?.counts?.upcoming)} />
+        <Stat label="Terminées (30 j)" value={num(data?.counts?.past)} />
+        <Stat
+          label="Équipements en maintenance"
+          value={num(data?.nodes_in_maintenance)}
+          hint="neutralisés dans les KPI"
+        />
+      </div>
 
-        <Field label="Motif" required>
-          <input
-            className="input"
-            value={reason}
-            onChange={(event) => setReason(event.target.value)}
-            placeholder="Mise à jour firmware, bascule électrique…"
-          />
-        </Field>
+      {rows.length > 0 && (
+        <Panel title="Frise" subtitle="trait rouge : maintenant · bord pointillé : fin non bornée">
+          <MaintenanceTimeline windows={rows} />
+        </Panel>
+      )}
 
-        <div className="grid grid-cols-2 gap-2">
-          <Field label="Début" required>
-            <input
-              className="input"
-              type="datetime-local"
-              value={startsAt}
-              onChange={(event) => setStartsAt(event.target.value)}
-            />
-          </Field>
-          <Field
-            label="Fin"
-            required
-            error={
-              startsAt && endsAt && new Date(endsAt) <= new Date(startsAt)
-                ? "La fin doit être postérieure au début."
-                : null
+      <Panel title="Fenêtres" flush>
+        <div className="p-2 border-b" style={{ borderColor: "var(--border)" }}>
+          <Toolbar
+            right={
+              <span className="text-[11.5px]" style={{ color: "var(--ink-3)" }}>
+                <span className="num" style={{ color: "var(--ink-2)" }}>{num(rows.length)}</span> maintenance(s)
+              </span>
             }
           >
-            <input
-              className="input"
-              type="datetime-local"
-              value={endsAt}
-              onChange={(event) => setEndsAt(event.target.value)}
+            <SearchField
+              value={search}
+              onChange={(value) => setParam("q", value)}
+              placeholder="Réf., titre, équipement, équipe…"
+              width={240}
+              suggest="maintenance"
             />
-          </Field>
+          </Toolbar>
         </div>
+        <QueryBoundary
+          query={query}
+          skeleton={<SkeletonRows rows={6} columns={6} />}
+          empty={() => rows.length === 0}
+          emptyMessage="Aucune maintenance dans ce périmètre"
+          emptyHint="Les maintenances se planifient dans iTop (changement) ou dans Zabbix."
+        >
+          {() => <DataTable columns={columns} rows={rows} rowKey={(w) => w.key} />}
+        </QueryBoundary>
+      </Panel>
 
-        <label className="flex items-center gap-2 text-[12px]">
-          <input
-            type="checkbox"
-            checked={suppress}
-            onChange={(event) => setSuppress(event.target.checked)}
-          />
-          Neutraliser dans les KPI et le SLA
-        </label>
-        <p className="text-[10.5px]" style={{ color: "var(--ink-3)" }}>
-          Décochez pour enregistrer une intervention à titre documentaire, sans modifier
-          les indicateurs.
-        </p>
-      </div>
-    </Modal>
+      <p className="text-[11px] px-1" style={{ color: "var(--ink-3)" }}>
+        Statuts iTop : {Object.values(CHANGE_STATUS).map((s) => s.label).join(", ")}. Un changement refusé ou
+        non approuvé n'est pas affiché ; un changement clos ne neutralise plus ses équipements.
+      </p>
+    </div>
   );
 }

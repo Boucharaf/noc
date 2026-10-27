@@ -34,8 +34,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import * as api from "../api/noc";
-import { useAuthStore } from "../store/auth";
 import { usePeriodStore, useUiStore } from "../store/ui";
+import { useScopeParams } from "../store/scope";
 
 export const REFRESH = Object.freeze({
   LIVE: 20_000,
@@ -59,10 +59,17 @@ export function usePeriodParams() {
 /* ================================================================== */
 /* Vue d'ensemble — instantané Redis                                   */
 /* ================================================================== */
-export function useOverview() {
+/**
+ * Synthèse du PÉRIMÈTRE courant (barre de périmètre) : parc, alertes des
+ * outils, incidents iTop. `{ global: true }` ignore le périmètre — pour les
+ * compteurs de navigation, qui portent sur tout le réseau.
+ */
+export function useOverview({ global = false } = {}) {
+  const scope = useScopeParams();
+  const params = global ? {} : scope;
   return useQuery({
-    queryKey: ["overview"],
-    queryFn: api.overview.summary,
+    queryKey: ["overview", params],
+    queryFn: () => api.overview.summary(params),
     refetchInterval: useInterval(REFRESH.LIVE),
   });
 }
@@ -76,41 +83,46 @@ export function useOverview() {
  * iTop), et il se lit sur l'équipement.
  */
 export function useSites() {
+  const scope = useScopeParams();
   return useQuery({
-    queryKey: ["sites"],
-    queryFn: api.sites.list,
-    refetchInterval: useInterval(REFRESH.OPERATIONAL),
-  });
-}
-
-export function useOrganisations() {
-  return useQuery({
-    queryKey: ["organisations"],
-    queryFn: api.organisations.list,
+    queryKey: ["sites", scope],
+    queryFn: () => api.sites.list(scope),
     refetchInterval: useInterval(REFRESH.OPERATIONAL),
   });
 }
 
 export function useAlertsBySeverity() {
+  const scope = useScopeParams();
   return useQuery({
-    queryKey: ["alerts", "by-severity"],
-    queryFn: api.overview.alertsBySeverity,
+    queryKey: ["alerts", "by-severity", scope],
+    queryFn: () => api.overview.alertsBySeverity(scope),
     refetchInterval: useInterval(REFRESH.LIVE),
   });
 }
 
 export function useAlertsByTool() {
+  const scope = useScopeParams();
   return useQuery({
-    queryKey: ["alerts", "by-tool"],
-    queryFn: api.overview.alertsByTool,
+    queryKey: ["alerts", "by-tool", scope],
+    queryFn: () => api.overview.alertsByTool(scope),
     refetchInterval: useInterval(REFRESH.LIVE),
   });
 }
 
-export function useHourDistribution() {
+export function useAlertAges() {
+  const scope = useScopeParams();
   return useQuery({
-    queryKey: ["alerts", "hour-distribution"],
-    queryFn: api.overview.hourDistribution,
+    queryKey: ["alerts", "ages", scope],
+    queryFn: () => api.overview.alertAges(scope),
+    refetchInterval: useInterval(REFRESH.ANALYTIC),
+  });
+}
+
+export function useHourDistribution() {
+  const scope = useScopeParams();
+  return useQuery({
+    queryKey: ["alerts", "hour-distribution", scope],
+    queryFn: () => api.overview.hourDistribution(scope),
     refetchInterval: useInterval(REFRESH.ANALYTIC),
   });
 }
@@ -118,10 +130,16 @@ export function useHourDistribution() {
 /* ================================================================== */
 /* Alertes                                                             */
 /* ================================================================== */
+/**
+ * Alertes des OUTILS de supervision, dans le périmètre courant. Les
+ * paramètres explicites de l'écran l'emportent sur le périmètre.
+ */
 export function useAlerts(params = {}) {
+  const scope = useScopeParams();
+  const query = { ...scope, ...params };
   return useQuery({
-    queryKey: ["alerts", "list", params],
-    queryFn: () => api.alerts.list(params),
+    queryKey: ["alerts", "list", query],
+    queryFn: () => api.alerts.list(query),
     refetchInterval: useInterval(REFRESH.LIVE),
   });
 }
@@ -150,25 +168,10 @@ export function useAlertActions() {
     queryClient.invalidateQueries({ queryKey: ["overview"] });
   };
 
+  // Les alertes des outils sont en LECTURE SEULE : acquittement, affectation
+  // et clôture relèvent d'iTop. Restent les signalements manuels (panne
+  // constatée sur le terrain, qu'aucune sonde ne voit).
   return {
-    acknowledge: useMutation({
-      mutationFn: ({ alertKey, note }) => api.alerts.acknowledge(alertKey, note),
-      onSuccess: invalidate,
-    }),
-    assign: useMutation({
-      mutationFn: ({ alertKey, assigneeId, note }) =>
-        api.alerts.assign(alertKey, assigneeId, note),
-      onSuccess: invalidate,
-    }),
-    resolve: useMutation({
-      mutationFn: ({ alertKey, cause, note }) =>
-        api.alerts.resolve(alertKey, cause, note),
-      onSuccess: invalidate,
-    }),
-    addNote: useMutation({
-      mutationFn: ({ alertKey, note }) => api.alerts.addNote(alertKey, note),
-      onSuccess: invalidate,
-    }),
     createManual: useMutation({
       mutationFn: (payload) => api.manualIncidents.create(payload),
       onSuccess: invalidate,
@@ -188,20 +191,12 @@ export function useAlertActions() {
  * `page_size`), et ajoute `items` — les nœuds sous leurs anciens noms de
  * champs (`node_id`, `locality`) — à côté de `nodes`, la forme native.
  */
-export function useNodes(params = {}, options = {}) {
-  const {
-    q,
-    page,
-    page_size: pageSize,
-    locality_id: localityId,
-    enabled = true,
-    ...rest
-  } = params;
-  const query = { ...rest };
-  if (query.site === undefined && localityId !== undefined) {
-    query.site = String(localityId);
-  }
-  if (q !== undefined && query.search === undefined) query.search = q;
+export function useNodes(params = {}) {
+  const { q, page, page_size: pageSize, ...rest } = params;
+  const scope = useScopeParams();
+  const query = { ...scope, ...rest };
+  // La recherche saisie sur l'écran l'emporte sur celle de la barre.
+  if (q !== undefined && q !== "") query.search = q;
   if (pageSize !== undefined && query.limit === undefined) query.limit = pageSize;
   if (page !== undefined && query.offset === undefined) {
     query.offset = (Math.max(1, Number(page)) - 1) * (query.limit ?? 200);
@@ -210,7 +205,6 @@ export function useNodes(params = {}, options = {}) {
   return useQuery({
     queryKey: ["nodes", "list", query],
     queryFn: () => api.nodes.list(query),
-    enabled: options.enabled ?? enabled,
     refetchInterval: useInterval(REFRESH.OPERATIONAL),
     select: (data) =>
       data && {
@@ -255,9 +249,10 @@ export function useNode(nodeId) {
 }
 
 export function useNodeStates() {
+  const scope = useScopeParams();
   return useQuery({
-    queryKey: ["nodes", "states"],
-    queryFn: api.nodes.states,
+    queryKey: ["nodes", "states", scope],
+    queryFn: () => api.nodes.states(scope),
     refetchInterval: useInterval(REFRESH.LIVE),
     select: (data) =>
       data && {
@@ -271,9 +266,10 @@ export function useNodeStates() {
 }
 
 export function useNodeCoverage() {
+  const scope = useScopeParams();
   return useQuery({
-    queryKey: ["nodes", "coverage"],
-    queryFn: api.nodes.coverage,
+    queryKey: ["nodes", "coverage", scope],
+    queryFn: () => api.nodes.coverage(scope),
     refetchInterval: useInterval(REFRESH.OPERATIONAL),
   });
 }
@@ -281,22 +277,54 @@ export function useNodeCoverage() {
 /* ================================================================== */
 /* Réseau                                                              */
 /* ================================================================== */
-export function useNetworkSnapshot({ site, organisation, nodeType } = {}) {
+export function useNetworkSnapshot() {
+  const scope = useScopeParams();
   return useQuery({
-    queryKey: ["network", "snapshot", site, organisation, nodeType],
-    queryFn: () => api.metrics.snapshot({
-      site,
-      organisation,
-      node_type: nodeType,
-    }),
+    queryKey: ["network", "snapshot", scope],
+    queryFn: () => api.metrics.snapshot(scope),
     refetchInterval: useInterval(REFRESH.LIVE),
   });
 }
 
-export function useNodesDown() {
+/**
+ * Mini-courbes des tuiles : l'état du périmètre à chaque cycle des
+ * dernières 24 h. Rend aussi des séries prêtes à tracer.
+ */
+export function useLiveTrend({ global = false } = {}) {
+  const scope = useScopeParams();
+  const params = global ? {} : scope;
   return useQuery({
-    queryKey: ["network", "down"],
-    queryFn: api.metrics.down,
+    queryKey: ["trend", "live", params],
+    queryFn: () => api.metrics.trend(params),
+    refetchInterval: useInterval(REFRESH.LIVE),
+    select: (data) => {
+      const points = data?.points ?? [];
+      const series = (field) => points.map((point) => point[field]);
+      return {
+        ...data,
+        availability: series("availability_pct"),
+        nodesDown: series("nodes_down"),
+        alerts: series("alerts"),
+        alertsCritical: series("alerts_critical"),
+        incidents: series("incidents"),
+        states: {
+          up: series("nodes_up"),
+          degraded: series("nodes_degraded"),
+          down: series("nodes_down"),
+          unknown: series("nodes_unknown"),
+          maintenance: series("nodes_maintenance"),
+        },
+        times: points.map((point) => point.at),
+      };
+    },
+  });
+}
+
+export function useNodesDown() {
+  const scope = useScopeParams();
+  return useQuery({
+    queryKey: ["network", "down", scope],
+    queryFn: () => api.metrics.down(scope),
     select: (nodes) =>
       (nodes ?? []).map((node) => ({
         ...node,
@@ -314,9 +342,10 @@ export function useTopNodes(options = 10) {
   // transmis tel quel, il partait en `limit=[object Object]` et le backend
   // répondait 422.
   const limit = typeof options === "object" ? (options?.limit ?? 10) : options;
+  const scope = useScopeParams();
   return useQuery({
-    queryKey: ["network", "top", limit],
-    queryFn: () => api.metrics.top(limit),
+    queryKey: ["network", "top", limit, scope],
+    queryFn: () => api.metrics.top(limit, scope),
     select: (rows) =>
       (rows ?? []).map((node) => ({
         ...node,
@@ -344,13 +373,7 @@ export function useNodeSeries(nodeId, { metric, period = "24h" } = {}) {
   return useQuery({
     queryKey: ["metrics", "node", nodeId, metric, period],
     queryFn: () => api.metrics.nodeSeries(nodeId, { metric, period }),
-    select: (data) =>
-      metric
-        ? (data?.points ?? []).map((point) => ({
-            ...point,
-            time: point.time ?? point.at,
-          }))
-        : data,
+    select: (data) => metric ? (data?.points ?? []) : data,
     enabled: Boolean(nodeId),
     refetchInterval: false,
     staleTime: 60_000,
@@ -364,6 +387,7 @@ const SERIES_PERIODS = [
   [1, "1h"],
   [6, "6h"],
   [24, "24h"],
+  // Sans cette fenêtre, le choix « 3 j » des écrans était arrondi à 7 jours.
   [72, "3d"],
   [168, "7d"],
   [720, "30d"],
@@ -378,38 +402,42 @@ export function periodFromHours(hours) {
 /**
  * Courbe agrégée du réseau — même avertissement que ci-dessus.
  *
- * Rend une LISTE de points `{ time, value, min, max, nb_nodes }`, la forme
+ * Rend une LISTE de points `{ time, value, nb_nodes }`, la forme
  * que lisent les écrans. Le backend renvoie un objet `{ points, … }` : le
  * passer tel quel faisait planter l'écran entier sur `.map`.
  *
- * `min` et `max` restent vides : la moyenne est calculée sur un échantillon
- * d'équipements et le backend ne publie pas le pire d'entre eux. Recopier la
- * moyenne dans « pire équipement » serait un mensonge graphique.
+ * `nb_nodes` est le nombre d'équipements ayant contribué à cette minute,
+ * qui peut être inférieur à la taille totale de l'échantillon.
  */
 export function useNetworkSeries({ metric, metricType, period, hours, sample, site, organisation, nodeType } = {}) {
   const metricKey = metric ?? metricType ?? "latency_ms";
   const periodKey = period ?? (hours ? periodFromHours(hours) : "24h");
   const sampleSize = sample ?? 12;
-  const queryKey = ["metrics", "network", metricKey, periodKey, sampleSize, site, organisation, nodeType];
+  const scope = useScopeParams();
+  const params = {
+    ...scope,
+    metric: metricKey,
+    period: periodKey,
+    sample: sampleSize,
+    site: site ?? scope.site,
+    organisation,
+    node_type: nodeType,
+  };
   return useQuery({
-    queryKey,
-    queryFn: () => api.metrics.networkSeries({
-      metric: metricKey,
-      period: periodKey,
-      sample: sampleSize,
-      site,
-      organisation,
-      node_type: nodeType,
-    }),
-    select: (data) =>
-      (data?.points ?? []).map((point) => ({
+    queryKey: ["metrics", "network", params],
+    queryFn: () => api.metrics.networkSeries(params),
+    select: (data) => ({
+      points: (data?.points ?? []).map((point) => ({
         time: point.at,
         value: point.value,
-        min: null,
-        max: null,
-        nb_nodes: data.contributing_nodes,
-        sampled_nodes: data.sampled_nodes,
+        nb_nodes: point.contributing_nodes ?? data.contributing_nodes,
       })),
+      sampled_nodes: data?.sampled_nodes ?? 0,
+      population_nodes: data?.population_nodes ?? 0,
+      measurable_nodes: data?.measurable_nodes ?? 0,
+      contributing_nodes: data?.contributing_nodes ?? 0,
+      source_errors: data?.source_errors ?? [],
+    }),
     refetchInterval: false,
     staleTime: 60_000,
     retry: 1,
@@ -430,16 +458,19 @@ export function useNetworkRanking(options = {}) {
   const metricKey = metric ?? metricType ?? "latency_ms";
   const periodKey = period ?? (hours ? periodFromHours(hours) : "24h");
   const sampleSize = sample ?? 12;
+  const scope = useScopeParams();
+  const params = {
+    ...scope,
+    metric: metricKey,
+    period: periodKey,
+    sample: sampleSize,
+    site: site ?? scope.site,
+    organisation,
+    node_type: nodeType,
+  };
   return useQuery({
-    queryKey: ["metrics", "network", metricKey, periodKey, sampleSize, site, organisation, nodeType],
-    queryFn: () => api.metrics.networkSeries({
-      metric: metricKey,
-      period: periodKey,
-      sample: sampleSize,
-      site,
-      organisation,
-      node_type: nodeType,
-    }),
+    queryKey: ["metrics", "network", params],
+    queryFn: () => api.metrics.networkSeries(params),
     select: (data) => data?.node_ranking ?? [],
     refetchInterval: false,
     staleTime: 60_000,
@@ -453,13 +484,18 @@ export function useNetworkRanking(options = {}) {
 export function useKpiTrend(options = {}) {
   const { days = 30, site } =
     typeof options === "number" ? { days: options } : options;
+  // Tendance du PÉRIMÈTRE : agrégats journaliers du site, de la province ou
+  // de la région choisis (la recherche libre ne s'applique pas aux agrégats).
+  const { search: _search, ...place } = useScopeParams();
+  const params = { days, ...place, ...(site ? { site } : {}) };
   return useQuery({
-    queryKey: ["kpi", "trend", days, site],
-    queryFn: () => api.kpi.trend({ days, site }),
+    queryKey: ["kpi", "trend", params],
+    queryFn: () => api.kpi.trend(params),
     select: (rows) =>
       (rows ?? []).map((row) => ({
         ...row,
         label: row.label ?? row.day,
+        average_daily_alerts: row.average_daily_alerts ?? row.alerts,
         total_incidents: row.total_incidents ?? row.alerts,
         resolved: row.resolved ?? null,
       })),
@@ -469,7 +505,8 @@ export function useKpiTrend(options = {}) {
 
 export function useKpiMonthly(params) {
   const period = usePeriodParams();
-  const query = { ...period, ...params };
+  const { search: _search, ...place } = useScopeParams();
+  const query = { ...period, ...place, ...params };
   return useQuery({
     queryKey: ["kpi", "monthly", query],
     queryFn: () => api.kpi.monthly(query),
@@ -479,11 +516,18 @@ export function useKpiMonthly(params) {
       const delta = data.delta ?? {};
       return {
         ...data,
+        // Les agrégats journaliers sont des MOYENNES par cycle de collecte :
+        // nombre moyen d'alertes actives, d'alertes critiques actives et
+        // d'équipements en panne à un instant donné. Ce ne sont pas des
+        // décomptes d'incidents du mois — les nommer « incidents » faisait
+        // lire 3,4 alertes simultanées comme « 3 incidents dans le mois ».
         kpi: {
           network_availability_pct: current.availability_pct,
-          total_incidents: current.avg_alerts,
-          critical: current.avg_critical,
-          open: current.avg_down,
+          avg_active_alerts: current.avg_alerts,
+          avg_active_critical: current.avg_critical,
+          avg_nodes_down: current.avg_down,
+          days_with_data: current.days_with_data,
+          reliable: data.reliable,
           resolution_rate_pct: null,
           avg_mttr_minutes: null,
           avg_mtta_minutes: null,
@@ -491,47 +535,35 @@ export function useKpiMonthly(params) {
           recurrent_nodes: null,
           off_hours_detected: null,
         },
-        vs_previous_month: {
-          availability_delta: delta.availability_pct,
-          incidents_delta: delta.avg_alerts,
-          critical_delta: delta.avg_critical,
-        },
+        // Pas de comparaison avec un mois précédent trop lacunaire : l'écart
+        // mesurerait les trous de collecte, pas l'évolution du réseau.
+        vs_previous_month: data.previous_reliable
+          ? {
+              availability_delta: delta.availability_pct,
+              alerts_delta: delta.avg_alerts,
+              critical_delta: delta.avg_critical,
+            }
+          : {},
       };
     },
     refetchInterval: useInterval(REFRESH.ANALYTIC),
   });
 }
 
-export function useKpiMonthlyTrend({ months = 12, ...params } = {}) {
-  const period = usePeriodParams();
-  const query = { ...period, ...params, months };
+export function useKpiSites({ days = 30, limit = 20, sort = "availability" } = {}) {
+  const { search: _search, ...place } = useScopeParams();
+  const params = { days, limit, sort, ...place };
   return useQuery({
-    queryKey: ["kpi", "monthly-trend", query],
-    queryFn: () => api.kpi.monthlyTrend(query),
+    queryKey: ["kpi", "sites", params],
+    queryFn: () => api.kpi.sites(params),
     refetchInterval: useInterval(REFRESH.ANALYTIC),
   });
 }
 
-export function useKpiSites({ days = 30, limit = 20, year, month } = {}) {
-  const period = usePeriodParams();
-  const resolvedYear = year ?? period.year;
-  const resolvedMonth = month ?? period.month;
-  const query = { days, limit, year: resolvedYear, month: resolvedMonth };
+export function useKpiCauses({ days = 90 } = {}) {
   return useQuery({
-    queryKey: ["kpi", "sites", query],
-    queryFn: () => api.kpi.sites(query),
-    refetchInterval: useInterval(REFRESH.ANALYTIC),
-  });
-}
-
-export function useKpiCauses({ days = 90, year, month } = {}) {
-  const period = usePeriodParams();
-  const resolvedYear = year ?? period.year;
-  const resolvedMonth = month ?? period.month;
-  const query = { days, year: resolvedYear, month: resolvedMonth };
-  return useQuery({
-    queryKey: ["kpi", "causes", query],
-    queryFn: () => api.kpi.causes(query),
+    queryKey: ["kpi", "causes", days],
+    queryFn: () => api.kpi.causes({ days }),
     select: (rows) => {
       const total = (rows ?? []).reduce((sum, row) => sum + (row.count ?? 0), 0);
       return (rows ?? []).map((row) => ({
@@ -546,16 +578,10 @@ export function useKpiCauses({ days = 90, year, month } = {}) {
   });
 }
 
-export function useResolutionTimes({ days = 30, year, month } = {}) {
-  const period = usePeriodParams();
-  // Si year/month sont fournis explicitement, ils priment ; sinon on lit le store
-  // pour que le changement de mois dans le PeriodPicker déclenche un refetch.
-  const resolvedYear = year ?? period.year;
-  const resolvedMonth = month ?? period.month;
-  const query = { days, year: resolvedYear, month: resolvedMonth };
+export function useResolutionTimes({ days = 30 } = {}) {
   return useQuery({
-    queryKey: ["kpi", "resolution", query],
-    queryFn: () => api.kpi.resolutionTimes(query),
+    queryKey: ["kpi", "resolution", days],
+    queryFn: () => api.kpi.resolutionTimes({ days }),
     refetchInterval: useInterval(REFRESH.ANALYTIC),
   });
 }
@@ -563,26 +589,18 @@ export function useResolutionTimes({ days = 30, year, month } = {}) {
 /* ================================================================== */
 /* Engagements de service                                              */
 /* ================================================================== */
-export function useSlaCompliance({ days = 30, year, month } = {}) {
-  const period = usePeriodParams();
-  const resolvedYear = year ?? period.year;
-  const resolvedMonth = month ?? period.month;
-  const query = { days, year: resolvedYear, month: resolvedMonth };
+export function useSlaCompliance({ days = 30 } = {}) {
   return useQuery({
-    queryKey: ["sla", "compliance", query],
-    queryFn: () => api.sla.compliance(query),
+    queryKey: ["sla", "compliance", days],
+    queryFn: () => api.sla.compliance({ days }),
     refetchInterval: useInterval(REFRESH.ANALYTIC),
   });
 }
 
-export function useSlaBreaches({ days = 30, year, month } = {}) {
-  const period = usePeriodParams();
-  const resolvedYear = year ?? period.year;
-  const resolvedMonth = month ?? period.month;
-  const query = { days, year: resolvedYear, month: resolvedMonth };
+export function useSlaBreaches({ days = 30 } = {}) {
   return useQuery({
-    queryKey: ["sla", "breaches", query],
-    queryFn: () => api.sla.breaches(query),
+    queryKey: ["sla", "breaches", days],
+    queryFn: () => api.sla.breaches({ days }),
     refetchInterval: useInterval(REFRESH.ANALYTIC),
   });
 }
@@ -610,14 +628,6 @@ export function useSlaTargets() {
   });
 }
 
-export function useSlaSourceTargets() {
-  return useQuery({
-    queryKey: ["sla", "source-targets"],
-    queryFn: api.sla.sourceTargets,
-    refetchInterval: useInterval(REFRESH.ANALYTIC),
-  });
-}
-
 export function useUpdateSlaTarget() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -631,7 +641,7 @@ export function useUpdateSlaTarget() {
 /* ================================================================== */
 export function useInterop() {
   const nodes = useNodes({ limit: 2000 });
-  const alerts = useAlerts({ limit: 2000 });
+  const alerts = useAlerts({ limit: 5000 });
 
   return useQuery({
     queryKey: ["interop", "status"],
@@ -640,26 +650,57 @@ export function useInterop() {
     // Cet écran doit rester affichable quand tout le reste ne l'est plus :
     // on ne renonce pas au premier échec.
     retry: 3,
-    select: (data) => ({
+    select: (data) => {
+      // Le décompte par outil n'est fiable que sur l'inventaire COMPLET :
+      // tronqué à la page reçue, il sous-compterait les outils sans le dire.
+      const completeInventory =
+        nodes.data && (nodes.data.total ?? 0) <= (nodes.data.items?.length ?? 0);
+      const configuredTools = (data?.tools ?? []).filter((tool) => tool.configured);
+      return {
       ...data,
+      // Lus par la barre du haut et la navigation (AppShell) : absents de la
+      // réponse du backend, ils valaient `undefined` et l'indicateur
+      // « outils en panne » affichait NaN.
+      tools_total: configuredTools.length,
+      tools_healthy: configuredTools.filter((tool) => tool.reachable && !tool.stale).length,
       tools: (data?.tools ?? []).map((tool) => {
         const toolNodes = nodes.data?.items?.filter((node) =>
           (node.source_tools ?? []).includes(tool.tool),
         ).length;
-        const toolAlerts = (alerts.data?.alerts ?? []).filter(
-          (alert) => alert.tool === tool.tool,
+        const sourceAlerts = alerts.data?.alerts ?? [];
+        const toolAlerts = sourceAlerts.filter(
+          (alert) =>
+            alert.tool === tool.tool &&
+            (alert.kind ?? "technical") === "technical",
         ).length;
+        const toolTickets = sourceAlerts.filter(
+          (alert) => alert.tool === tool.tool && alert.kind === "itsm_ticket",
+        ).length;
+        const completeAlertList = alerts.data && !alerts.data.truncated;
         return {
           ...tool,
-          state: tool.reachable ? (tool.stale ? "stale" : "ok") : "error",
+          // Un outil sans URL n'est pas « en erreur » : il n'est pas branché.
+          state: tool.not_configured
+            ? "not_configured"
+            : tool.never_collected
+              ? "unknown"
+              : tool.reachable
+                ? (tool.stale ? "stale" : "ok")
+                : "error",
           last_run_at: tool.checked_at,
-          detail: tool.error ?? tool.version ?? "Aucun détail fourni",
-          nb_nodes: tool.nb_nodes ?? (nodes.data ? toolNodes : null),
-          nb_incidents: tool.nb_incidents ?? (alerts.data ? toolAlerts : null),
+          detail: tool.not_configured
+            ? "URL non renseignée dans .env — connecteur inactif"
+            : tool.error ?? tool.version ?? "Aucun détail fourni",
+          nb_nodes: tool.nb_nodes ?? (completeInventory ? toolNodes : null),
+          nb_technical_alerts:
+            tool.nb_technical_alerts ??
+            (completeAlertList ? toolAlerts : null),
+          nb_itsm_tickets: completeAlertList ? toolTickets : null,
           nb_metrics: tool.nb_metrics ?? null,
         };
       }),
-    }),
+      };
+    },
   });
 }
 
@@ -682,81 +723,58 @@ export function useHealth() {
 /* ================================================================== */
 /* Maintenance                                                         */
 /* ================================================================== */
-export function useMaintenanceWindows(options = "all") {
-  // Les anciens écrans passent `{ onlyActive, limit }` au lieu d'une portée.
-  const scope =
-    typeof options === "object" ? (options?.onlyActive ? "active" : "all") : options;
+/**
+ * Maintenances planifiées — changements iTop et maintenances Zabbix, lus par
+ * le collecteur. Lecture seule : elles se planifient dans ces outils.
+ * Rend `{ windows, counts, nodes_in_maintenance }`, dans le périmètre.
+ */
+export function useMaintenanceWindows(scope = "all", { global = false } = {}) {
+  const place = useScopeParams();
+  const params = { scope, ...(global ? {} : place) };
   return useQuery({
-    queryKey: ["maintenance", scope],
-    queryFn: () => api.maintenance.list(scope),
+    queryKey: ["maintenance", params],
+    queryFn: () => api.maintenance.list(params),
     refetchInterval: useInterval(REFRESH.OPERATIONAL),
   });
 }
 
-export function useMaintenanceActions() {
-  const queryClient = useQueryClient();
-  const invalidate = () => {
-    queryClient.invalidateQueries({ queryKey: ["maintenance"] });
-    // Une fenêtre change l'état affiché des équipements qu'elle couvre.
-    queryClient.invalidateQueries({ queryKey: ["nodes"] });
-    queryClient.invalidateQueries({ queryKey: ["alerts"] });
-  };
-  return {
-    create: useMutation({ mutationFn: api.maintenance.create, onSuccess: invalidate }),
-    remove: useMutation({ mutationFn: api.maintenance.remove, onSuccess: invalidate }),
-  };
-}
+/* ================================================================== */
+/* Suggestions de recherche                                            */
+/* ================================================================== */
+/** Préréglages : ce que chaque barre de recherche propose. */
+export const SUGGEST_KINDS = {
+  global: "region,province,site,node,incident",
+  incident: "incident",
+  alert: "alert,node",
+  node: "node,site",
+  maintenance: "maintenance,node",
+  intervention: "intervention,node",
+};
 
-/* ================================================================== */
-/* Terrain                                                             */
-/* ================================================================== */
-export function useFieldInterventions(params = {}) {
+export function useSuggestions(term, preset) {
+  const kinds = SUGGEST_KINDS[preset] ?? preset;
+  const q = (term ?? "").trim();
   return useQuery({
-    queryKey: ["field", params],
-    queryFn: () => api.field.list(params),
-    refetchInterval: useInterval(REFRESH.OPERATIONAL),
+    queryKey: ["suggest", kinds, q],
+    queryFn: () => api.search.suggest({ q, kinds, limit: 8 }),
+    enabled: Boolean(preset) && q.length >= 2,
+    staleTime: 30_000,
+    placeholderData: (previous) => previous,
+    retry: 0,
   });
 }
 
-export function useFieldActions() {
-  const queryClient = useQueryClient();
-  const currentUserId = useAuthStore((s) => s.user?.id);
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ["field"] });
-  return {
-    // L'équipement est désigné par sa CLÉ (`netxms:464322`), plus par un
-    // entier. Sans agent désigné, l'intervention revient à qui la programme :
-    // l'écran Terrain n'a pas de sélecteur d'agent.
-    create: useMutation({
-      mutationFn: ({ node_id: nodeId, node_key: nodeKey, incident_id: incidentId, alert_key: alertKey, agent_user_id: agentId, scheduled_at: scheduledAt }) =>
-        api.field.create({
-          node_key: nodeKey ?? nodeId,
-          alert_key: alertKey ?? incidentId ?? null,
-          agent_user_id: agentId ?? currentUserId,
-          scheduled_at: scheduledAt ?? null,
-        }),
-      onSuccess: invalidate,
-    }),
-    update: useMutation({
-      mutationFn: ({ id, payload }) => api.field.update(id, payload),
-      onSuccess: invalidate,
-    }),
-    updateStatus: useMutation({
-      mutationFn: ({ id, status }) => api.field.update(id, { status }),
-      onSuccess: invalidate,
-    }),
-    // Le compte rendu CLÔTURE l'intervention : la route n'a qu'un point
-    // d'entrée, le changement de statut, qui porte aussi texte et position.
-    submitReport: useMutation({
-      mutationFn: ({ id, payload }) =>
-        api.field.update(id, {
-          status: "done",
-          report_text: payload.report_text,
-          latitude: payload.checkin_latitude ?? null,
-          longitude: payload.checkin_longitude ?? null,
-        }),
-      onSuccess: invalidate,
-    }),
-  };
+/* ================================================================== */
+/* Interventions — ordres de travail iTop                              */
+/* ================================================================== */
+export function useInterventions(status = "all") {
+  const place = useScopeParams();
+  const params = { status, ...place };
+  return useQuery({
+    queryKey: ["interventions", params],
+    queryFn: () => api.interventions.list(params),
+    refetchInterval: useInterval(REFRESH.OPERATIONAL),
+  });
 }
 
 /* ================================================================== */
@@ -854,9 +872,10 @@ function toIncident(alert) {
 /** Ancien résumé d'alertes, dérivé de l'instantané. */
 export function useAlertSummary() {
   const overview = useOverview();
-  const states = useNodeStates();
   const data = overview.data;
-  const nodeStates = states.data;
+  // Décomptes par état DU PÉRIMÈTRE : /nodes/states porte sur tout le parc,
+  // et mêlerait les équipements de la région choisie à ceux du pays.
+  const nodeStates = data?.nodes_by_state;
 
   return {
     ...overview,
@@ -869,18 +888,24 @@ export function useAlertSummary() {
           medium: data.alerts_by_severity?.medium ?? 0,
           low: data.alerts_by_severity?.low ?? 0,
           total: data.nodes_total ?? 0,
-          up: nodeStates?.up ?? 0,
-          down: nodeStates?.down ?? 0,
-          degraded: nodeStates?.degraded ?? 0,
-          silent: nodeStates?.silent ?? 0,
-          maintenance: nodeStates?.maintenance ?? 0,
-          localities_affected: data.sites_impacted ?? 0,
+          // Décomptes par état : `null` tant que /nodes/states n'a pas
+          // répondu (ou a échoué). Un « 0 en panne » affiché à la place
+          // d'une donnée manquante se lit « tout va bien ».
+          up: nodeStates ? nodeStates.up ?? 0 : null,
+          down: nodeStates ? nodeStates.down ?? 0 : null,
+          degraded: nodeStates ? nodeStates.degraded ?? 0 : null,
+          silent: nodeStates ? nodeStates.silent ?? 0 : null,
+          maintenance: nodeStates ? nodeStates.maintenance ?? 0 : null,
+          localities_affected: data.sites_impacted ?? null,
           // L'ancienneté de la plus vieille alerte non acquittée n'est plus
           // calculée côté serveur : la liste d'alertes est déjà triée par
           // gravité puis par date, l'écran la lit sur sa dernière ligne.
           oldest_unacknowledged_at: null,
           snapshot_age_s: data.snapshot_age_s,
           stale: data.stale,
+          incidents_total: data.incidents_total ?? null,
+          incidents_critical: data.incidents_critical ?? null,
+          incidents_unassigned: data.incidents_unassigned ?? null,
         }
       : undefined,
   };
@@ -899,23 +924,32 @@ export function useOpenAlerts({ limit = 50, ...rest } = {}) {
  * l'instant présent, pas une moyenne glissante. Le calculer sur une fenêtre
  * demanderait d'interroger les outils sources à chaque rafraîchissement.
  */
-export function useNetworkKpi(options = {}) {
-  const filters = typeof options === "string" ? { site: options } : options;
-  const query = useNetworkSnapshot(filters);
+export function useNetworkKpi() {
+  const query = useNetworkSnapshot();
   const data = query.data;
   return {
     ...query,
     data: data
       ? {
           ...data,
-          availability_pct: data.fleet_health_pct,
+          availability_pct: data.fleet_availability_pct,
           // « Remontent » = les équipements dont un outil dit quelque chose.
           // Les muets sont précisément ceux qui ne remontent plus rien.
-          nodes_reporting: (data.nodes_total ?? 0) - (data.nodes_silent ?? 0),
-          // Seule la disponibilité se déduit de l'instantané ; latence,
-          // pertes, CPU se lisent chez les outils sources, sur demande. Les
-          // tuiles correspondantes disent donc « non collectée ».
-          metric_types_available: data.fleet_health_pct != null ? ["availability_pct"] : [],
+          // Un état « inconnu » (conflit entre outils, CMDB seule) ne remonte
+          // pas davantage de mesure qu'un équipement muet.
+          nodes_reporting:
+            data.nodes_total == null
+              ? null
+              : data.nodes_total - (data.nodes_unknown ?? 0),
+          // Disponibilité : déduite de l'état du parc. Latence, pertes,
+          // débits, CPU… : dernières valeurs relevées par le collecteur
+          // auprès des outils qui les fournissent (Zabbix, Centreon), et
+          // listées par le backend. Une métrique absente de la liste n'est
+          // pas à zéro : aucun outil branché ne la mesure dans ce périmètre.
+          metric_types_available: [
+            ...(data.fleet_availability_pct != null ? ["availability_pct"] : []),
+            ...(data.metric_types_available ?? []),
+          ],
         }
       : undefined,
   };
@@ -927,19 +961,39 @@ export function useIncidents(params = {}) {
     page = 1,
     page_size: pageSize = 50,
     severity,
+    kind,
     source_tool: tool,
+    site,
+    locality_id: legacySite,
+    acknowledged,
+    exclude_itsm: excludeItsm = false,
     ...filters
   } = params;
+  const acknowledgedFilter =
+    acknowledged === undefined
+      ? undefined
+      : typeof acknowledged === "boolean"
+        ? acknowledged
+        : acknowledged === "true";
+  const scope = useScopeParams();
   const query = useQuery({
-    queryKey: ["alerts", "incidents", params],
-    queryFn: () => api.alerts.list({ severity, tool, limit: 5000 }),
+    queryKey: ["alerts", "incidents", params, scope],
+    queryFn: () =>
+      api.alerts.list({
+        ...scope,
+        severity,
+        kind,
+        tool,
+        site: site ?? legacySite ?? scope.site,
+        acknowledged: acknowledgedFilter,
+        limit: 5000,
+      }),
     refetchInterval: useInterval(REFRESH.LIVE),
     select: (data) => {
       let rows = (data?.alerts ?? []).map(toIncident);
+      // Écran Alertes : les tickets iTop sont des INCIDENTS, ils ont leur écran.
+      if (excludeItsm) rows = rows.filter((row) => row.kind !== "itsm_ticket");
       if (filters.status) rows = rows.filter((row) => row.status === filters.status);
-      if (filters.node_key) {
-        rows = rows.filter((row) => row.node_key === filters.node_key);
-      }
       if (filters.node_code) {
         const needle = filters.node_code.toLowerCase();
         rows = rows.filter((row) =>
@@ -977,59 +1031,10 @@ export function useIncident(alertKey) {
   return { ...query, data: query.data ? toIncident(query.data) : undefined };
 }
 
-/**
- * Enveloppe une mutation pour traduire les arguments d'un ancien écran vers
- * la signature native. Le reste de l'objet (isPending, error…) est conservé.
- */
-function translated(mutation, translate) {
-  return {
-    ...mutation,
-    mutate: (argument, options) => mutation.mutate(translate(argument), options),
-    mutateAsync: (argument, options) => mutation.mutateAsync(translate(argument), options),
-  };
-}
-
-/**
- * Actions sur incident, sous les anciens noms ET avec les anciens arguments.
- *
- * La fiche d'incident appelle `acknowledge(id)`, `resolve({ id, notes })`,
- * `assign({ id, userId, note })`… alors que les actions natives attendent
- * `{ alertKey, … }`. Sans cette traduction, chaque bouton de la fiche
- * enverrait une requête vers /alerts/undefined.
- */
+/** Signalements manuels — seule action restante sur la file d'alertes. */
 export function useIncidentActions() {
-  const actions = useAlertActions();
-  const keyOf = (argument) =>
-    typeof argument === "object" ? (argument.alertKey ?? argument.id) : argument;
-
-  return {
-    ...actions,
-    acknowledge: translated(actions.acknowledge, (argument) => ({
-      alertKey: keyOf(argument),
-      note: typeof argument === "object" ? argument.note : undefined,
-    })),
-    resolve: translated(actions.resolve, (argument) => ({
-      alertKey: keyOf(argument),
-      cause: argument.cause ?? null,
-      note: argument.note ?? argument.notes ?? null,
-    })),
-    assign: translated(actions.assign, (argument) => ({
-      alertKey: keyOf(argument),
-      assigneeId: argument.assigneeId ?? argument.userId,
-      note: argument.note ?? null,
-    })),
-    // L'escalade n'est plus une action distincte : elle se traduit par une
-    // affectation à quelqu'un d'autre, avec le motif en consigne.
-    escalate: translated(actions.assign, (argument) => ({
-      alertKey: keyOf(argument),
-      assigneeId: argument.assigneeId ?? argument.userId,
-      note: argument.reason ?? argument.note ?? null,
-    })),
-    comment: translated(actions.addNote, (argument) => ({
-      alertKey: keyOf(argument),
-      note: argument.note,
-    })),
-  };
+  const { createManual, resolveManual } = useAlertActions();
+  return { createManual, resolveManual };
 }
 
 export function useCoverage() {
@@ -1043,7 +1048,16 @@ export function useCoverage() {
       ? (() => {
           const inventory = nodes.data.items ?? [];
           const total = nodes.data.total ?? inventory.length;
-          const monitored = inventory.filter((node) => node.source_tools?.length).length;
+          // Calculée sur la page reçue, la couverture n'est juste que si la
+          // page contient tout le parc.
+          const complete = inventory.length >= total;
+          // « Supervisé » = vu par au moins un outil de SUPERVISION. iTop est
+          // un référentiel : un équipement connu de la seule CMDB est
+          // précisément un équipement non supervisé. Compter toute source
+          // donnait une couverture de 100 % par construction.
+          const isMonitored = (node) =>
+            (node.source_tools ?? []).some((tool) => tool !== "itop");
+          const monitored = inventory.filter(isMonitored).length;
           const bySite = Object.values(
             inventory.reduce((groups, node) => {
               const site = node.locality || "Site non renseigné";
@@ -1057,7 +1071,7 @@ export function useCoverage() {
                 unmonitored_assets: 0,
               };
               row.total_assets += 1;
-              if (node.source_tools?.length) row.monitored_assets += 1;
+              if (isMonitored(node)) row.monitored_assets += 1;
               else row.unmonitored_assets += 1;
               groups[site] = row;
               return groups;
@@ -1066,16 +1080,16 @@ export function useCoverage() {
             ...row,
             coverage_pct: row.total_assets
               ? Math.round((1000 * row.monitored_assets) / row.total_assets) / 10
-              : 0,
+              : null,
           }));
           return {
             total_assets: total,
-            monitored_assets: monitored,
-            unmonitored_assets: Math.max(0, total - monitored),
-            coverage_pct: total ? Math.round((1000 * monitored) / total) / 10 : 0,
+            monitored_assets: complete ? monitored : null,
+            unmonitored_assets: complete ? Math.max(0, total - monitored) : null,
+            coverage_pct: complete && total ? Math.round((1000 * monitored) / total) / 10 : null,
             as_of: null,
             source: "instantané de collecte",
-            is_complete_inventory: false,
+            is_complete_inventory: complete,
             by_locality: bySite,
           };
         })()
@@ -1092,12 +1106,15 @@ export function useKpiSummary(params) {
 }
 
 /**
- * Localités, devenues sites. Accepte l'ancien appel `useKpiLocalities(8)`, et
- * rend chaque site sous les anciens noms de champs. Ce que les agrégats
- * journaliers ne portent pas (MTTR, région) reste vide.
+ * Sites, anciennement localités. Les agrégats journaliers portent une
+ * moyenne d'alertes actives, pas un décompte d'incidents historiques.
  */
 export function useKpiLocalities(params = {}) {
-  const query = useKpiSites(typeof params === "number" ? { limit: params } : params);
+  const query = useKpiSites(
+    typeof params === "number"
+      ? { limit: params, sort: "alerts" }
+      : { ...params, sort: params.sort ?? "alerts" },
+  );
   return {
     ...query,
     data: query.data?.map((row) => ({
@@ -1105,27 +1122,22 @@ export function useKpiLocalities(params = {}) {
       locality: row.site,
       locality_id: row.site,
       region: null,
-      total_incidents: row.avg_alerts,
+      average_alerts: row.avg_alerts,
       critical: row.avg_critical ?? null,
-      avg_mttr: null,
     })),
   };
 }
 
 /**
- * Carte des localités — VOLONTAIREMENT VIDE.
- *
- * Le NOC ne tient plus de coordonnées géographiques : elles vivaient dans
- * `dim_locality`, supprimée avec l'entrepôt, et aucun outil source ne les
- * publie. La carte doit être réalimentée par une source explicite — un
- * fichier de référence, ou un champ ajouté aux Location d'iTop. Rendre une
- * liste vide fait apparaître une carte sans points, ce qui est le signal
- * correct ; poser des points au jugé sur le Burkina serait pire.
+ * Carte des sites. Les coordonnées viennent des équipements de
+ * l'instantané lorsqu'un connecteur source les fournit ; elles ne sont
+ * jamais estimées à partir du seul nom du site.
  */
 export function useKpiLocalitiesMap() {
+  const scope = useScopeParams();
   const query = useQuery({
-    queryKey: ["sites", "map"],
-    queryFn: api.sites.list,
+    queryKey: ["sites", "map", scope],
+    queryFn: () => api.sites.list(scope),
     refetchInterval: useInterval(REFRESH.OPERATIONAL),
   });
   return {
@@ -1136,7 +1148,7 @@ export function useKpiLocalitiesMap() {
       locality_id: row.site,
       region: null,
       total_incidents: row.alerts ?? 0,
-      critical: 0,
+      critical: row.critical ?? null,
       nb_nodes: row.nodes ?? 0,
     })),
   };
@@ -1166,59 +1178,31 @@ export function useLocalityNodes(site) {
   return useNodes(site ? { site } : {});
 }
 
-/** Alertes actives d'un équipement — appel direct avec filtre node_key côté serveur.
- *
- * On n'utilise PAS useIncidents ici : ce hook charge TOUT le mur (limit 5000)
- * puis filtre côté client. Sur un parc actif, cela représente plusieurs milliers
- * d'alertes téléchargées pour en garder quelques-unes. On appelle directement
- * api.alerts.list avec node_key, maintenant que le backend l'accepte.
- */
+/** Alertes actives d'un équipement — déjà portées par sa fiche. */
 export function useNodeIncidents(nodeId) {
-  const query = useQuery({
-    queryKey: ["alerts", "node", nodeId],
-    queryFn: () => api.alerts.list({ node_key: nodeId, limit: 200 }),
-    enabled: Boolean(nodeId),
-    refetchInterval: useInterval(REFRESH.LIVE),
-    select: (data) => (data?.alerts ?? []).map(toIncident),
-  });
-  return { ...query, data: query.data ?? [] };
+  const query = useNode(nodeId);
+  // Alertes brutes de l'instantané (`message`, `since`, `tool`) : même
+  // adaptation que la file d'alertes, sans quoi la fiche affiche des tirets.
+  return { ...query, data: (query.data?.active_alerts ?? []).map(toIncident) };
 }
 
 /**
  * Dernière valeur de chaque métrique d'un équipement.
  *
- * Interroge l'outil source via GET /nodes/{id}/metrics?period=1h.
- * Si l'outil source est indisponible (502), on retourne un objet vide {}
- * plutôt que undefined : la page peut ainsi afficher les onglets de métriques
- * (avec "—") au lieu de les cacher entièrement, ce qui laissait croire à une
- * absence totale de supervision.
+ * Interroge l'outil source, et rend la dernière valeur de la série sur une
+ * heure : il n'y a plus de table de « dernières valeurs » côté NOC,
+ * puisqu'aucune métrique n'y est recopiée.
  */
 export function useNodeLatest(nodeId) {
-  const query = useNodeSeries(nodeId, { period: "1h" });
-  const series = query.data?.series;
-  return {
-    ...query,
-    // En cas d'erreur (502 outil source indisponible), on expose {} et non
-    // undefined : l'appelant distingue "données non encore chargées" (undefined)
-    // de "source interrogée mais sans réponse" ({}).
-    data: query.isError
-      ? {}
-      : series
-        ? Object.fromEntries(
-            Object.entries(series).map(([metric, value]) => [
-              metric,
-              value.points?.length
-                ? {
-                    ...value.points[value.points.length - 1],
-                    time:
-                      value.points[value.points.length - 1].time ??
-                      value.points[value.points.length - 1].at,
-                  }
-                : null,
-            ]),
-          )
-        : undefined,
-  };
+  return useQuery({
+    queryKey: ["metrics", "node", nodeId, "latest"],
+    queryFn: () => api.metrics.nodeLatest(nodeId),
+    select: (data) => data?.latest,
+    enabled: Boolean(nodeId),
+    refetchInterval: false,
+    staleTime: 60_000,
+    retry: 1,
+  });
 }
 
 /**
@@ -1227,119 +1211,38 @@ export function useNodeLatest(nodeId) {
  * Le backend rend, par gravité, les délais moyens et si l'objectif est tenu
  * EN MOYENNE ; les dépassements individuels viennent de /sla/breaches. Les
  * taux de conformité sont recalculés ici à partir de ces deux sources. Les
- * La conformité TTR vient de /sla/compliance. La disponibilité est croisée
- * avec l'agrégat mensuel et la cible configurée la plus exigeante ; la
- * latence reste absente faute de source de données.
+ * « indicateurs de service » réseau (latence, disponibilité contractuelle)
+ * n'ont plus de source : la liste est vide plutôt qu'inventée.
  */
 export function useSla(params = {}) {
-  const period = usePeriodParams();
-  const query = { ...period, ...params };
-  const compliance = useSlaCompliance(query);
-  const availability = useKpiMonthly(query);
-  const targets = useSlaTargets();
+  const compliance = useSlaCompliance(params);
+  const breaches = useSlaBreaches(params);
   const data = compliance.data;
-  const resolved = data?.resolved_total ?? 0;
-  const totalBreached = data?.breached_total ?? 0;
-  const availabilityTargets = (targets.data ?? []).filter(
-    (target) => target.availability_target_pct != null,
-  );
-  const availabilityTarget = availabilityTargets.length
-    ? Math.max(...availabilityTargets.map((target) => target.availability_target_pct))
-    : null;
-  const availabilityPct = availability.data?.current?.availability_pct ?? null;
-  const isLoading = compliance.isLoading || availability.isLoading || targets.isLoading;
-  const isError = compliance.isError || availability.isError || targets.isError;
+  const breachList = Array.isArray(breaches.data) ? breaches.data : [];
 
+  // Taux et dépassements viennent du backend, comptés alerte par alerte en
+  // base. Les recalculer ici à partir de /sla/breaches — une liste PLAFONNÉE
+  // à 50 lignes — et d'un dénominateur incluant les alertes non résolues
+  // surestimait le respect des engagements.
   return {
     ...compliance,
-    isLoading,
-    isError,
-    error: compliance.error ?? availability.error ?? targets.error,
-    refetch: () => Promise.all([
-      compliance.refetch(),
-      availability.refetch(),
-      targets.refetch(),
-    ]),
+    breaches: breachList,
     data: data
       ? {
           ...data,
-          global_compliance_pct: resolved
-            ? Math.max(0, ((resolved - totalBreached) / resolved) * 100)
-            : null,
-          total_breached: totalBreached,
-          availability_target_pct: availabilityTarget,
-          indicators: availabilityTargets.map((target) => ({
-            metric: "Disponibilité du parc",
-            severity: target.severity,
-            value: availabilityPct,
-            target: target.availability_target_pct,
-            unit: "%",
-            status:
-              availabilityPct == null
-                ? "unavailable"
-                : availabilityPct >= target.availability_target_pct
-                  ? "met"
-                  : "missed",
+          global_compliance_pct: data.global_compliance_pct ?? null,
+          total_breached: data.breached_total ?? null,
+          indicators: [],
+          by_severity: (data.by_severity ?? []).map((row) => ({
+            ...row,
+            total_incidents: row.alerts,
+            avg_mtta_minutes: row.mtta_minutes,
+            avg_mttr_minutes: row.mttr_minutes,
+            breached: row.breached ?? null,
+            ttr_compliance_pct: row.ttr_compliance_pct ?? null,
           })),
-          by_severity: (data.by_severity ?? []).map((row) => {
-            const breached = row.breached ?? 0;
-            return {
-              ...row,
-              total_incidents: row.alerts,
-              avg_mtta_minutes: row.mtta_minutes,
-              avg_mttr_minutes: row.mttr_minutes,
-              breached,
-              ttr_compliance_pct: row.resolved_with_target
-                ? Math.max(0, ((row.resolved_with_target - breached) / row.resolved_with_target) * 100)
-                : null,
-            };
-          }),
         }
       : undefined,
-  };
-}
-
-/**
- * Charge par opérateur.
- *
- * Reconstituée depuis les alertes affectées : le backend ne tient plus
- * d'agrégat dédié, et le calcul est trivial sur une liste déjà chargée par
- * l'écran.
- */
-export function useWorkload(params = {}) {
-  const query = useAlerts({ limit: 1000, ...params });
-  const rows = query.data?.alerts ?? [];
-  const now = Date.now();
-  const byAssignee = new Map();
-  for (const alert of rows) {
-    if (alert.resolved_at) continue;
-    // `assigned_to` porte le NOM de l'intervenant (alerts_service) : il sert
-    // de clé. `user_id: null` désigne la ligne « non affecté », que l'écran
-    // met en tête et en couleur d'alerte.
-    const who = alert.assigned_to ?? null;
-    const entry = byAssignee.get(who) ?? {
-      user_id: who,
-      full_name: who ?? "Non affecté",
-      role: null,
-      open_incidents: 0,
-      critical: 0,
-      unacknowledged: 0,
-      oldest_age_minutes: 0,
-    };
-    entry.open_incidents += 1;
-    if (alert.severity === "critical") entry.critical += 1;
-    if (!alert.acknowledged) entry.unacknowledged += 1;
-    const since = alert.since ? Date.parse(alert.since) : NaN;
-    if (!Number.isNaN(since)) {
-      entry.oldest_age_minutes = Math.max(entry.oldest_age_minutes, (now - since) / 60_000);
-    }
-    byAssignee.set(who, entry);
-  }
-  return {
-    ...query,
-    data: [...byAssignee.values()].sort(
-      (a, b) => (a.user_id === null ? -1 : b.user_id === null ? 1 : b.open_incidents - a.open_incidents),
-    ),
   };
 }
 
@@ -1367,4 +1270,101 @@ export function useReference() {
       ministries: [],
     },
   };
+}
+
+/* ================================================================== */
+/* Territoire — région > province > site > nœud                        */
+/* ================================================================== */
+export function useGeoOptions() {
+  return useQuery({
+    queryKey: ["geo", "options"],
+    queryFn: api.geo.options,
+    refetchInterval: useInterval(REFRESH.OPERATIONAL),
+    staleTime: 60_000,
+  });
+}
+
+/**
+ * Le périmètre et ses subdivisions immédiates (régions, provinces, sites
+ * ou équipements selon la profondeur). `scope` explicite pour afficher un
+ * autre niveau que celui de la barre (fil d'Ariane, survol de carte).
+ */
+export function useGeoBreakdown(scopeOverride) {
+  const current = useScopeParams();
+  const params = scopeOverride ?? current;
+  return useQuery({
+    queryKey: ["geo", "breakdown", params],
+    queryFn: () => api.geo.breakdown(params),
+    refetchInterval: useInterval(REFRESH.LIVE),
+  });
+}
+
+export function useGeoSite(site) {
+  return useQuery({
+    queryKey: ["geo", "site", site],
+    queryFn: () => api.geo.site(site),
+    enabled: Boolean(site),
+    refetchInterval: useInterval(REFRESH.LIVE),
+  });
+}
+
+/* ================================================================== */
+/* Incidents iTop                                                      */
+/* ================================================================== */
+export function useItopIncidents(params = {}, { global = false } = {}) {
+  const scope = useScopeParams();
+  const query = { ...(global ? {} : scope), ...params };
+  return useQuery({
+    queryKey: ["incidents", "list", query],
+    queryFn: () => api.itopIncidents.list(query),
+    refetchInterval: useInterval(REFRESH.LIVE),
+  });
+}
+
+/**
+ * Historique iTop paginé (tickets ouverts sur la période, clos ou non).
+ * `params` à null : requête désactivée (onglet non affiché).
+ */
+export function useItopIncidentHistory(params = {}) {
+  const scope = useScopeParams();
+  const query = { ...scope, ...params };
+  return useQuery({
+    queryKey: ["incidents", "history", query],
+    queryFn: () => api.itopIncidents.history(query),
+    enabled: params !== null,
+    refetchInterval: useInterval(REFRESH.ANALYTIC),
+    placeholderData: (previous) => previous,
+    staleTime: 60_000,
+    retry: 1,
+  });
+}
+
+export function useItopIncident(incidentKey) {
+  return useQuery({
+    queryKey: ["incidents", "detail", incidentKey],
+    queryFn: () => api.itopIncidents.get(incidentKey),
+    enabled: Boolean(incidentKey),
+    refetchInterval: useInterval(REFRESH.OPERATIONAL),
+  });
+}
+
+/**
+ * SLA des incidents iTop, ventilés par région, province, site ou nœud.
+ * ⚠️ Lit l'historique chez iTop : régime ANALYTIC, pas de sondage rapide.
+ */
+export function useSlaIncidents({ groupBy = "region", days = 30, global = false } = {}) {
+  const scope = useScopeParams();
+  const { search: _search, ...place } = scope;
+  const params = { group_by: groupBy, days, ...(global ? {} : place) };
+  return useQuery({
+    queryKey: ["sla", "incidents", params],
+    queryFn: () => api.itopIncidents.sla(params),
+    refetchInterval: useInterval(REFRESH.ANALYTIC),
+    // Changer de période ne vide pas l'écran le temps qu'iTop réponde : les
+    // chiffres précédents restent affichés (isPlaceholderData) et la page
+    // signale la mise à jour.
+    placeholderData: (previous) => previous,
+    staleTime: 120_000,
+    retry: 1,
+  });
 }

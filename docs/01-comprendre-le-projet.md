@@ -58,7 +58,7 @@ niveaux de lecture**. Chacun correspond à un rôle et à un écran d'accueil.
 | 1 — Décideur | **Directeur** | `/direction` — Pilotage | Disponibilité globale, incidents critiques, SLA, MTTR, top 10 des sites, tendances, rapports. **Aucun geste d'exploitation.** |
 | 2 — Chef NOC | **Chef NOC** | `/supervision` — Salle de supervision | État du réseau, alertes en cours, charge de chaque intervenant, santé de la collecte, équipements hors service, maintenances. **Gère aussi les comptes.** |
 | 3 — Agent NOC | **Technicien** | `/console` — Console d'exploitation | La file des alertes à traiter, les sites touchés, les actions en cours. |
-| 4 — Terrain | **Agent terrain** | `/terrain` — Tournée | Ses interventions sur site, les comptes rendus, le signalement d'une panne qu'aucune sonde ne voit. |
+| 4 — Terrain | **Agent terrain** | `/interventions` | Les interventions (ordres de travail iTop) et le signalement d'une panne qu'aucune sonde ne voit. |
 
 À côté des écrans d'accueil, des **écrans transverses** sont partagés selon
 les droits :
@@ -67,15 +67,15 @@ les droits :
 |---|---|---|
 | Incidents | `/incidents` | Le mur de toutes les alertes, filtrable |
 | Équipements | `/equipements` | L'inventaire fusionné, et la fiche de chaque équipement |
-| Carte des sites | `/carte` | Les sites et leur état |
 | Performance réseau | `/performance` | Courbes de latence, pertes, trafic |
 | SLA & disponibilité | `/sla` | Respect des engagements de service |
 | Rapports | `/rapports` | Rapport mensuel PDF / DOCX |
-| Maintenances | `/maintenances` | Fenêtres de coupure programmée |
+| Maintenances | `/maintenances` | Maintenances planifiées lues dans iTop (changements) et Zabbix — lecture seule |
+| Interventions | `/interventions` | Ordres de travail iTop — lecture seule |
 | Collecte ETL | `/integrations` | L'état de la lecture de chaque outil |
 | Utilisateurs | `/utilisateurs` | Gestion des comptes (Chef NOC) |
 | Mon compte | `/compte` | Ses identifiants et préférences |
-| Mur d'écrans | `/mur` | Affichage plein écran pour la salle |
+| Mur d'écrans | `/mur` | Résumé plein écran des incidents iTop (tout le réseau) pour la salle |
 
 ## Le cycle de vie d'une panne
 
@@ -129,9 +129,9 @@ même circuit.
 | **Escalader** | Passer une alerte à un niveau supérieur (dans cette version : l'affecter à quelqu'un d'autre avec un motif). |
 | **MTTA** | *Mean Time To Acknowledge* — délai moyen entre détection et acquittement. |
 | **MTTR** | *Mean Time To Resolve* — délai moyen entre détection et résolution. |
-| **SLA** | *Service Level Agreement* — engagement de service : délais cibles par gravité, disponibilité minimale. |
-| **Fenêtre de maintenance** | Période de coupure programmée sur un équipement ou un site ; les alertes y sont marquées et exclues des indicateurs. |
-| **Intervention** | Un déplacement d'agent terrain sur un site, avec statut (programmée, en route, sur site, terminée) et compte rendu. |
+| **SLA** | *Service Level Agreement* — engagements mesurés par les délais cibles TTA/TTR et par gravité. La disponibilité réseau est un KPI, mais n'est pas évaluée comme une cible SLA configurable. |
+| **Maintenance planifiée** | Un changement iTop (ou une maintenance Zabbix) avec ses dates et ses CI : pendant la fenêtre, les équipements visés passent en « maintenance », leurs alertes sont marquées et exclues des indicateurs. Elle se planifie dans iTop, pas dans le NOC. |
+| **Intervention** | Un ordre de travail iTop, rattaché au ticket qui le motive (équipe, agent, dates). Il s'affecte et se clôture dans iTop. |
 | **CMDB** | Base de gestion des configurations : l'inventaire de référence (iTop). |
 | **ITSM** | Gestion des services informatiques : les tickets (iTop). |
 | **Dump** | Une copie complète d'une base de données, sous forme de fichier SQL. |

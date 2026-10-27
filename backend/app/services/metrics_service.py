@@ -18,81 +18,110 @@ ce serait rendre au parc de production la charge qu'on vient de lui retirer.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
+
+from sqlalchemy.orm import Session
 
 from app.core.config import METRIC_TYPES
-from app.services import history_service, live_service
+from app.services import history_service, live_service, node_service
 
 logger = logging.getLogger(__name__)
 
 
 async def network_snapshot(
-    site: str | None = None,
-    organisation: str | None = None,
-    node_type: str | None = None,
+    db: Session, nodes: list[dict] | None = None, records: list[dict] | None = None
 ) -> dict:
-    """Santé du réseau à l'instant présent, depuis l'instantané."""
-    nodes = await live_service.get_nodes()
-    alerts = await live_service.get_alerts()
-    if site:
-        nodes = [node for node in nodes if node.get("site") == site]
-    if organisation:
-        nodes = [node for node in nodes if node.get("organisation") == organisation]
-    if node_type:
-        nodes = [node for node in nodes if node.get("node_type") == node_type]
-
-    if site or organisation or node_type:
-        node_sources = {
-            f"{tool}:{reference}"
-            for node in nodes
-            for tool, reference in (node.get("sources") or {}).items()
-        }
-        alerts = [
-            alert
-            for alert in alerts
-            if f"{alert.get('tool')}:{alert.get('node_ref')}" in node_sources
-        ]
-
-    nodes_by_state: dict[str, int] = {}
-    for node in nodes:
-        state = node.get("state", "unknown")
-        nodes_by_state[state] = nodes_by_state.get(state, 0) + 1
-
-    alerts_by_severity: dict[str, int] = {}
-    for alert in alerts:
-        severity = alert.get("severity", "unknown")
-        alerts_by_severity[severity] = alerts_by_severity.get(severity, 0) + 1
-
-    total = len(nodes)
-    nodes_up = nodes_by_state.get("up", 0)
+    """Santé du réseau à l'instant présent, sur le périmètre fourni."""
+    nodes = await node_service.nodes_with_maintenance(db) if nodes is None else nodes
+    summary = await live_service.fleet_summary(nodes, records)
 
     return {
-        "nodes_total": total,
-        "nodes_up": nodes_up,
-        "nodes_down": nodes_by_state.get("down", 0),
-        "nodes_degraded": nodes_by_state.get("degraded", 0),
+        "nodes_total": summary["nodes_total"],
+        "nodes_up": summary["nodes_by_state"].get("up", 0),
+        "nodes_down": summary["nodes_by_state"].get("down", 0),
+        "nodes_degraded": summary["nodes_by_state"].get("degraded", 0),
         # « silent » n'est pas « up ». Un équipement dont l'outil ne dit plus
         # rien est un trou de supervision, et le compter comme sain est la
         # façon la plus sûre de rater une panne.
-        "nodes_silent": nodes_by_state.get("silent", 0),
-        "nodes_maintenance": nodes_by_state.get("maintenance", 0),
-        "fleet_health_pct": round(100.0 * nodes_up / total, 2) if total else None,
-        "alerts_total": len(alerts),
-        "alerts_critical": alerts_by_severity.get("critical", 0),
+        "nodes_silent": summary["nodes_by_state"].get("silent", 0),
+        "nodes_maintenance": summary["nodes_by_state"].get("maintenance", 0),
+        "nodes_unknown": summary["nodes_by_state"].get("unknown", 0),
+        "fleet_health_pct": summary["fleet_health_pct"],
+        "fleet_availability_pct": summary["fleet_availability_pct"],
+        "alerts_total": summary["alerts_total"],
+        "alerts_critical": summary["alerts_by_severity"].get("critical", 0),
         "tools_covering": len(
             {tool for node in nodes for tool in (node.get("sources") or {})}
         ),
+        # Latence, pertes, débits, CPU… : dernières valeurs relevées par le
+        # collecteur, moyennées sur le périmètre.
+        **_fleet_averages(nodes, await live_service.get_latest()),
         "snapshot_age_s": await live_service.snapshot_age_s(),
         "stale": await live_service.is_stale(),
     }
 
 
-async def nodes_down() -> list[dict]:
+# Ordre de préférence quand plusieurs outils mesurent le même équipement —
+# le même que history_service.fetch_node_series.
+_LATEST_ORDER = ("zabbix", "centreon", "netxms", "nagios", "nsp")
+
+# Moyennes du parc publiées dans l'instantané réseau : champ de la réponse
+# pour chaque type de métrique.
+_FLEET_AVERAGES = {
+    "latency_ms": "avg_latency_ms",
+    "packet_loss_pct": "packet_loss_pct",
+    "bandwidth_in_mbps": "avg_bandwidth_in_mbps",
+    "bandwidth_out_mbps": "avg_bandwidth_out_mbps",
+    "cpu_pct": "avg_cpu_pct",
+    "ram_pct": "avg_ram_pct",
+    "disk_pct": "avg_disk_pct",
+    "uptime": "avg_uptime",
+}
+
+
+def _fleet_averages(nodes: list[dict], latest: dict[str, dict[str, float]]) -> dict:
+    """Moyennes des dernières valeurs sur le périmètre.
+
+    Chaque équipement compte UNE fois par métrique (premier outil qui la
+    mesure, dans l'ordre de préférence) ; la moyenne porte sur les seuls
+    équipements qui la mesurent, et ce nombre est publié à côté
+    (`metric_nodes`) : une latence moyenne sur 6 équipements d'un parc de
+    1 300 ne se lit pas comme une latence du parc.
+    """
+    sums: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    reporting = 0
+    for node in nodes:
+        sources = node.get("sources") or {}
+        seen: dict[str, float] = {}
+        for tool in _LATEST_ORDER:
+            ref = sources.get(tool)
+            values = latest.get(f"{tool}:{ref}") if ref else None
+            for metric, value in (values or {}).items():
+                seen.setdefault(metric, value)
+        if seen:
+            reporting += 1
+        for metric, value in seen.items():
+            if metric in _FLEET_AVERAGES:
+                sums[metric] = sums.get(metric, 0.0) + value
+                counts[metric] = counts.get(metric, 0) + 1
+    result = {
+        field: (round(sums[metric] / counts[metric], 3) if counts.get(metric) else None)
+        for metric, field in _FLEET_AVERAGES.items()
+    }
+    result["metric_types_available"] = sorted(counts)
+    result["metric_nodes"] = counts
+    result["nodes_measured"] = reporting
+    return result
+
+
+async def nodes_down(db: Session, nodes: list[dict] | None = None) -> list[dict]:
     """Équipements en panne ou muets, les plus critiques d'abord."""
-    nodes = await live_service.get_nodes()
-    affected = [n for n in nodes if n.get("state") in ("down", "degraded", "silent")]
-    order = {"down": 0, "degraded": 1, "silent": 2}
+    nodes = await node_service.nodes_with_maintenance(db) if nodes is None else nodes
+    affected = [n for n in nodes if n.get("state") in ("down", "degraded", "unknown")]
+    order = {"down": 0, "degraded": 1, "unknown": 2}
     affected.sort(
         key=lambda n: (order.get(n.get("state"), 9), -n.get("alerts", 0), n.get("name", ""))
     )
@@ -112,14 +141,14 @@ async def nodes_down() -> list[dict]:
     ]
 
 
-async def top_nodes(limit: int = 10) -> list[dict]:
+async def top_nodes(limit: int, db: Session, nodes: list[dict] | None = None) -> list[dict]:
     """Équipements les plus alertants.
 
     Classement fait sur l'instantané et non sur un historique : la question
     posée est « qui me pose problème MAINTENANT », pas « qui m'a posé
     problème ce mois-ci » — celle-là est dans les KPI.
     """
-    nodes = await live_service.get_nodes()
+    nodes = await node_service.nodes_with_maintenance(db) if nodes is None else nodes
     ranked = sorted(nodes, key=lambda n: -n.get("alerts", 0))
     return [
         {
@@ -199,6 +228,18 @@ async def node_all_series(
     }
 
 
+async def node_latest(node_id: str) -> dict:
+    node = await live_service.get_node(node_id)
+    if node is None:
+        return {"error": "Équipement inconnu de l'instantané courant", "latest": {}}
+    result = await history_service.fetch_node_latest(node)
+    return {
+        "node_id": node_id,
+        "node_name": node.get("name"),
+        **result,
+    }
+
+
 async def network_series(
     metric_type: str,
     period: str | None = None,
@@ -206,25 +247,47 @@ async def network_series(
     site: str | None = None,
     organisation: str | None = None,
     node_type: str | None = None,
+    nodes: list[dict] | None = None,
 ) -> dict:
     """Courbe agrégée du réseau, sur un ÉCHANTILLON d'équipements.
 
     Interroger tout le parc produirait autant d'appels qu'il y a
     d'équipements — exactement ce que cette architecture évite. On échantillonne
-    les équipements les plus significatifs (ceux qui portent des alertes,
-    puis les autres), et l'écran indique sur combien d'équipements la courbe
-    porte. Une moyenne sur douze équipements annoncée comme telle vaut mieux
-    qu'une moyenne sur tout le parc qui met une minute à s'afficher.
+    un échantillon stable réparti sans privilégier les équipements en alerte.
+    L'écran indique la taille de l'échantillon et combien d'équipements ont
+    réellement fourni des mesures; ce résultat ne prétend pas être le parc
+    entier.
     """
-    nodes = await live_service.get_nodes()
+    # `nodes` : le périmètre déjà filtré (région, province, site, recherche).
+    nodes = await live_service.get_nodes() if nodes is None else nodes
     if site:
         nodes = [node for node in nodes if node.get("site") == site]
     if organisation:
         nodes = [node for node in nodes if node.get("organisation") == organisation]
     if node_type:
         nodes = [node for node in nodes if node.get("node_type") == node_type]
-    ranked = sorted(nodes, key=lambda n: -n.get("alerts", 0))[:sample]
     window_start, window_end = history_service.resolve_window(period, None, None)
+    population = len(nodes)
+    # On n'échantillonne que les équipements qu'un outil À COURBES voit : la
+    # base NetXMS, Nagios et iTop n'en fournissent pas. Tirer parmi tout le
+    # parc rendait des courbes vides sur un périmètre dominé par NetXMS, même
+    # quand Zabbix y mesurait des équipements.
+    measurable_tools = {
+        tool
+        for node in nodes
+        for tool in (node.get("sources") or {})
+    }
+    measurable_tools = {tool for tool in measurable_tools if history_service.serves_history(tool)}
+    candidates = [
+        node for node in nodes
+        if measurable_tools.intersection((node.get("sources") or {}).keys())
+    ]
+    ranked = sorted(
+        candidates,
+        key=lambda node: hashlib.sha256(
+            f"{period or '24h'}|{metric_type}|{node.get('id', '')}".encode()
+        ).digest(),
+    )[:sample]
 
     results = await asyncio.gather(
         *(
@@ -234,14 +297,22 @@ async def network_series(
         return_exceptions=True,
     )
 
-    # Moyenne par horodatage. Les points ne tombent pas forcément aux mêmes
-    # instants d'un équipement à l'autre : on regroupe à la minute, ce qui
-    # est plus fin que le pas de collecte de n'importe quelle sonde.
-    buckets: dict[str, list[float]] = {}
+    # Moyenne par minute et par équipement, puis entre équipements. Sans
+    # cette étape, une source qui publie plus de points pèse davantage dans
+    # la moyenne qu'une source moins fréquente.
+    buckets: dict[str, dict[str, list[float]]] = {}
     contributing = 0
     node_ranking = []
+    source_errors = []
     for node, result in zip(ranked, results):
-        if isinstance(result, BaseException) or not result.get("points"):
+        if isinstance(result, BaseException):
+            source_errors.append(
+                {"node_id": node["id"], "error": str(result)}
+            )
+            continue
+        for error in result.get("errors", []):
+            source_errors.append({"node_id": node["id"], **error})
+        if not result.get("points"):
             continue
         contributing += 1
         values = [float(point["value"]) for point in result["points"]]
@@ -256,19 +327,41 @@ async def network_series(
             }
         )
         for point in result["points"]:
-            minute = str(point["at"])[:16]
-            buckets.setdefault(minute, []).append(float(point["value"]))
+            at = datetime.fromisoformat(point["at"]).astimezone(timezone.utc)
+            minute = at.replace(second=0, microsecond=0).isoformat()
+            buckets.setdefault(minute, {}).setdefault(node["id"], []).append(
+                float(point["value"])
+            )
 
     points = [
-        {"at": minute, "value": round(sum(values) / len(values), 3)}
-        for minute, values in sorted(buckets.items())
+        {
+            "at": minute,
+            "contributing_nodes": len(node_values),
+            "value": round(
+                sum(sum(values) / len(values) for values in node_values.values())
+                / len(node_values),
+                3,
+            ),
+        }
+        for minute, node_values in sorted(buckets.items())
     ]
 
     return {
         "metric_type": metric_type,
         "points": points,
         "sampled_nodes": len(ranked),
+        "population_nodes": population,
+        # Équipements du périmètre vus par un outil qui fournit des courbes.
+        "measurable_nodes": len(candidates),
         "contributing_nodes": contributing,
+        "sample_coverage_pct": (
+            round(100.0 * len(ranked) / len(candidates), 1) if candidates else 0.0
+        ),
+        "sampled_contribution_pct": (
+            round(100.0 * contributing / len(ranked), 1) if ranked else 0.0
+        ),
+        "sampling_method": "stable_hash_sample",
+        "source_errors": source_errors,
         "node_ranking": node_ranking,
         "start": window_start.isoformat(),
         "end": window_end.isoformat(),
