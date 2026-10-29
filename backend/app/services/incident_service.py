@@ -250,6 +250,11 @@ async def list_incidents(
             sev: sum(1 for r in rows if r["severity"] == sev) for sev in SEVERITIES
         },
         "unassigned": sum(1 for r in rows if not r["agent"]),
+        # « Critiques non traités » du document métier (cible : 0) — un
+        # critique sans agent est un critique dont personne ne s'occupe.
+        "critical_unassigned": sum(
+            1 for r in rows if r["severity"] == "critical" and not r["agent"]
+        ),
         "sla_breached": sum(1 for r in rows if r["sla"]["ttr_status"] == "breached"),
         "unlocated": sum(1 for r in rows if not r["node_key"]),
         # Formes de la file, sur TOUS les tickets filtrés (pas la seule page).
@@ -304,8 +309,21 @@ async def get_incident(db: Session, key: str) -> dict | None:
     row = _incident_row(record, node, alerts, index, sla_service.targets(db),
                         datetime.now(timezone.utc))
     supervised = [node, *index.namesakes(node)] if node else []
+    # Événement Zabbix à l'origine du ticket (champ ITOP_ZBX_EVENT_FIELD) :
+    # le lien certain, là où le rattachement par équipement n'est qu'un
+    # rapprochement. `active` : le problème est encore ouvert dans Zabbix.
+    event = str((record.get("details") or {}).get("zbx_event") or "").strip()
+    trigger = None
+    if event and event != "0":
+        trigger_key = f"zabbix:{event}"
+        trigger = {
+            "ref": event,
+            "key": trigger_key,
+            "active": any(alert.get("key") == trigger_key for alert in alerts),
+        }
     return {
         **row,
+        "trigger": trigger,
         "itop": record.get("details") or {},
         "node": (
             {
@@ -338,6 +356,50 @@ async def get_incident(db: Session, key: str) -> dict | None:
         ],
         "alerts": _related_alerts(node, alerts, index)[:100],
     }
+
+
+async def at_risk(
+    db: Session,
+    region: str | None = None,
+    province: str | None = None,
+    site: str | None = None,
+) -> list[dict]:
+    """Incidents iTop OUVERTS qui vont manquer leur objectif de résolution,
+    ou l'ont déjà manqué — le seul indicateur SLA qui laisse encore agir.
+
+    Seuil à 25 % du budget restant : assez tôt pour agir, assez tard pour ne
+    pas noyer l'écran sous les tickets qui viennent d'être ouverts.
+    """
+    listing = await list_incidents(db, region, province, site, limit=5000)
+    rows = []
+    for row in listing["incidents"]:
+        sla = row["sla"]
+        target = sla.get("ttr_target_minutes")
+        if not target or sla["ttr_status"] not in ("running", "breached"):
+            continue
+        remaining = round(target - (sla["elapsed_minutes"] or 0), 1)
+        if remaining > target * 0.25:
+            continue
+        rows.append(
+            {
+                "key": row["key"],
+                "ref": row["ref"],
+                "title": row["title"],
+                "severity": row["severity"],
+                "status": row["status"],
+                "agent": row["agent"],
+                "team": row["team"],
+                "node_name": row["node_name"],
+                "site": row["site"],
+                "opened_at": row["opened_at"],
+                "elapsed_minutes": sla["elapsed_minutes"],
+                "target_minutes": target,
+                "remaining_minutes": remaining,
+                "breached": remaining < 0,
+            }
+        )
+    rows.sort(key=lambda r: r["remaining_minutes"])
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +437,69 @@ async def _history(start: datetime, end: datetime) -> list[dict]:
     ]
     await store.set_history(fingerprint, serialised, _HISTORY_TTL_S)
     return serialised
+
+
+_SLT_UNIT_MINUTES = {"minutes": 1, "minute": 1, "hours": 60, "hour": 60, "days": 1440, "day": 1440}
+
+
+async def contract_targets() -> dict:
+    """Engagements de service (SLT) déclarés dans iTop, en minutes.
+
+    C'est iTop qui porte le contrat : ces seuils sont affichés à côté des
+    objectifs du NOC (ops_sla_target), sans les remplacer — un écart entre
+    les deux se voit, il ne se corrige pas en silence. Lus à la demande,
+    avec le même cache court que l'historique des tickets.
+    """
+    store = get_store()
+    fingerprint = hashlib.sha256(b"itop-slt").hexdigest()[:32]
+    cached = await store.get_history(fingerprint)
+    if cached is not None:
+        return cached
+    try:
+        client = history_service._client("itop")
+    except history_service.HistoryUnavailable as exc:
+        raise IncidentsUnavailable(exc.detail) from exc
+    try:
+        raw = await client.fetch_sla_targets()
+    except ToolUnavailable as exc:
+        # Module iTop des contrats absent : pas une panne, une instance sans SLT.
+        if getattr(client, "_is_unknown_class", lambda _exc: False)(exc):
+            result = {"available": False, "reason": "classe SLT absente de cette instance iTop",
+                      "targets": [], "by_severity": {}}
+            await store.set_history(fingerprint, result, _HISTORY_TTL_S)
+            return result
+        raise IncidentsUnavailable(str(exc)) from exc
+
+    targets = []
+    by_severity: dict[str, dict[str, float]] = {}
+    for slt in raw:
+        metric = str(slt.get("metric") or "").lower()
+        factor = _SLT_UNIT_MINUTES.get(str(slt.get("unit") or "").lower())
+        try:
+            minutes = float(slt.get("value")) * factor if factor else None
+        except (TypeError, ValueError):
+            minutes = None
+        sev = normalise_severity("itop", slt.get("priority"))
+        targets.append({
+            "ref": slt.get("ref"),
+            "name": slt.get("name"),
+            "metric": metric,
+            "minutes": minutes,
+            "priority": slt.get("priority"),
+            "severity": sev,
+            "request_type": slt.get("request_type"),
+        })
+        # Plusieurs contrats peuvent fixer un seuil pour la même priorité :
+        # le plus exigeant est retenu pour la comparaison.
+        if minutes is not None and metric in ("tto", "ttr") and slt.get("request_type") in (
+            None, "", "incident",
+        ):
+            current = by_severity.setdefault(sev, {}).get(metric)
+            if current is None or minutes < current:
+                by_severity[sev][metric] = minutes
+    result = {"available": True, "reason": None, "targets": targets, "by_severity": by_severity}
+    await store.set_history(fingerprint, result, _HISTORY_TTL_S)
+    return result
 
 
 async def incident_history(
@@ -655,4 +780,205 @@ async def sla_by_group(
             sev: {"tto": goal.tta_target_minutes, "ttr": goal.ttr_target_minutes}
             for sev, goal in goals.items()
         },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Indicateurs d'incidents du document métier
+# ---------------------------------------------------------------------------
+# Statuts iTop d'un ticket traité. Un ticket qui porte une date de résolution
+# sans être dans l'un d'eux a été rouvert.
+_DONE_STATUSES = ("resolved", "closed")
+
+# Un équipement est « récurrent » à partir de ce nombre de tickets sur la
+# période : deux pannes peuvent être une coïncidence, trois sont un motif.
+RECURRENT_MIN_TICKETS = 3
+
+
+async def incident_kpis(
+    db: Session,
+    days: int = 30,
+    region: str | None = None,
+    province: str | None = None,
+    site: str | None = None,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+) -> dict:
+    """Volumes, résolution, récurrence, causes et organisations des tickets
+    iTop ouverts sur la période — les indicateurs « incidents » de la grille
+    de l'agence qui ne se lisent pas sur la seule file en cours.
+
+    Même source et même périmètre que `sla_by_group` : l'historique iTop, lu
+    à la demande et jamais recopié. Bornes explicites (`start_at`, `end_at`)
+    pour un mois de rapport ; sinon les `days` derniers jours.
+    """
+    now = datetime.now(timezone.utc)
+    end = end_at or now
+    start = start_at or (end - timedelta(days=days))
+    tickets = await _history(start, end)
+
+    nodes, _alerts, _incidents, index = await geo_service.snapshot(db)
+    scoped_ids = (
+        {n["id"] for n in geo_service.scope_nodes(nodes, region, province, site)}
+        if (region or province or site)
+        else None
+    )
+    goals = sla_service.targets(db)
+
+    breaches: list[dict] = []
+    total = resolved = reopened = 0
+    by_severity: Counter = Counter()
+    causes: Counter = Counter()
+    resolved_without_cause = 0
+    cause_available = False
+    per_equipment: dict[str, dict] = {}
+    per_site: dict[str, dict] = {}
+    per_org: dict[str, dict] = defaultdict(
+        lambda: {"incidents": 0, "resolved": 0, "evaluated": 0, "breached": 0}
+    )
+
+    for ticket in tickets:
+        ci = (ticket.get("cis") or [{}])[0] if ticket.get("cis") else {}
+        node = index.find("itop", ci.get("ref"), ci.get("name"))
+        if scoped_ids is not None and (node is None or node["id"] not in scoped_ids):
+            continue
+        severity = ticket.get("severity") or normalise_severity("itop", ticket.get("priority"))
+        status = ticket.get("status")
+        is_resolved = bool(ticket.get("resolution_date"))
+        state = _sla_state(
+            severity,
+            _parse(ticket.get("start_date")),
+            _parse(ticket.get("assignment_date")),
+            _parse(ticket.get("resolution_date")),
+            goals,
+            # État à l'instant, comme sla_by_group : un ticket du mois dernier
+            # encore ouvert aujourd'hui a continué de dépasser.
+            now,
+        )
+        if state["ttr_status"] == "breached":
+            elapsed = state["ttr_minutes"] or state["elapsed_minutes"]
+            breaches.append(
+                {
+                    "ref": ticket.get("ref"),
+                    "title": ticket.get("title"),
+                    "severity": severity,
+                    "node_name": (node or {}).get("name") or ci.get("name"),
+                    "site": (node or {}).get("site"),
+                    # Encore ouvert : le dépassement continue de courir.
+                    "open": not ticket.get("resolution_date"),
+                    "ttr_minutes": elapsed,
+                    "target_minutes": state["ttr_target_minutes"],
+                    "overrun_minutes": round(elapsed - state["ttr_target_minutes"], 1),
+                }
+            )
+
+        total += 1
+        by_severity[severity] += 1
+        if is_resolved and status in _DONE_STATUSES:
+            resolved += 1
+            code = ticket.get("resolution_code")
+            if code is not None:
+                cause_available = True
+                if code:
+                    causes[code] += 1
+                else:
+                    resolved_without_cause += 1
+        elif is_resolved:
+            reopened += 1
+
+        org = per_org[ticket.get("organisation") or "Organisation non renseignée"]
+        org["incidents"] += 1
+        org["resolved"] += int(is_resolved and status in _DONE_STATUSES)
+        org["evaluated"] += int(state["ttr_status"] in ("met", "breached"))
+        org["breached"] += int(state["ttr_status"] == "breached")
+
+        name = (node or {}).get("name") or ci.get("name")
+        if name:
+            key = node["id"] if node else f"ci:{name.casefold()}"
+            item = per_equipment.setdefault(
+                key,
+                {
+                    "node_key": node["id"] if node else None,
+                    "name": name,
+                    "site": (node or {}).get("site"),
+                    "incidents": 0,
+                    "critical": 0,
+                    "last_opened_at": None,
+                },
+            )
+            item["incidents"] += 1
+            item["critical"] += int(severity == "critical")
+            item["last_opened_at"] = max(
+                filter(None, (item["last_opened_at"], ticket.get("start_date"))), default=None
+            )
+        site_name = (node or {}).get("site")
+        if site_name:
+            entry = per_site.setdefault(
+                site_name,
+                {"site": site_name, "region": node.get("region"), "incidents": 0,
+                 "critical": 0, "breached": 0},
+            )
+            entry["incidents"] += 1
+            entry["critical"] += int(severity == "critical")
+            entry["breached"] += int(state["ttr_status"] == "breached")
+
+    recurrent = sorted(
+        (item for item in per_equipment.values() if item["incidents"] >= RECURRENT_MIN_TICKETS),
+        key=lambda item: (-item["incidents"], -item["critical"], item["name"].lower()),
+    )
+    causes_total = sum(causes.values())
+    breaches.sort(key=lambda row: -row["overrun_minutes"])
+    return {
+        "days": max(1, (end - start).days),
+        "start_at": start.isoformat(),
+        "end_at": end.isoformat(),
+        "total": total,
+        "breached": len(breaches),
+        # Les plus longs dépassements : la liste de la revue de service.
+        "breaches": breaches[:15],
+        "resolved": resolved,
+        "resolution_rate_pct": round(100.0 * resolved / total, 1) if total else None,
+        "by_severity": {sev: by_severity.get(sev, 0) for sev in SEVERITIES},
+        "reopened": reopened,
+        "reopened_pct": round(100.0 * reopened / total, 1) if total else None,
+        "recurrent_threshold": RECURRENT_MIN_TICKETS,
+        "recurrent_nodes": len(recurrent),
+        "recurrent_incidents": sum(item["incidents"] for item in recurrent),
+        "recurrent": recurrent[:10],
+        # None : l'instance iTop ne publie pas de code de résolution. Un
+        # zéro ferait croire que toutes les causes sont renseignées.
+        "cause_available": cause_available,
+        "without_cause": resolved_without_cause if cause_available else None,
+        "without_cause_pct": (
+            round(100.0 * resolved_without_cause / resolved, 1)
+            if cause_available and resolved
+            else None
+        ),
+        "causes": [
+            {
+                "cause": cause,
+                "count": count,
+                "share_pct": round(100.0 * count / causes_total, 1),
+            }
+            for cause, count in causes.most_common(10)
+        ],
+        "top_sites": sorted(
+            per_site.values(), key=lambda s: (-s["incidents"], -s["critical"], s["site"])
+        )[:10],
+        "by_organisation": sorted(
+            (
+                {
+                    "organisation": name,
+                    **bucket,
+                    "compliance_pct": (
+                        round(100.0 * (bucket["evaluated"] - bucket["breached"])
+                              / bucket["evaluated"], 1)
+                        if bucket["evaluated"]
+                        else None
+                    ),
+                }
+                for name, bucket in per_org.items()
+            ),
+            key=lambda row: (-row["incidents"], row["organisation"]),
+        )[:15],
     }

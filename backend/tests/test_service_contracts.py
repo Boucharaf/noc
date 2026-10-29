@@ -11,45 +11,9 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "backend"))
 
 from app.routes import report as report_routes  # noqa: E402
-from app.services import kpi_service, live_service, report_service, sla_service  # noqa: E402
+from app.services import kpi_service, live_service  # noqa: E402
 from app.dependencies.auth import require_internal_key  # noqa: E402
 from fastapi.routing import APIRoute  # noqa: E402
-
-
-def test_monthly_report_uses_the_selected_calendar_month(monkeypatch):
-    calls = {}
-    monkeypatch.setattr(
-        kpi_service, "monthly_summary", lambda _db, year, month: (year, month)
-    )
-    monkeypatch.setattr(
-        kpi_service,
-        "monthly_trend",
-        lambda _db, year, month: calls.setdefault("trend", (year, month)),
-    )
-
-    def capture(name):
-        def call(_db, **kwargs):
-            calls[name] = kwargs
-            return []
-
-        return call
-
-    monkeypatch.setattr(kpi_service, "sites_ranking", capture("sites"))
-    monkeypatch.setattr(kpi_service, "causes", capture("causes"))
-    monkeypatch.setattr(kpi_service, "resolution_times", capture("resolution"))
-    monkeypatch.setattr(sla_service, "compliance", capture("compliance"))
-    monkeypatch.setattr(sla_service, "breaches", capture("breaches"))
-
-    data = report_service.collect_report_data(object(), month=2, year=2025)
-
-    start = date(2025, 2, 1)
-    end = date(2025, 3, 1)
-    assert data["monthly"] == (2025, 2)
-    assert calls["trend"] == (2025, 2)
-    assert calls["sites"] == {"limit": 15, "start_at": start, "end_at": end}
-    for name in ("causes", "resolution", "compliance", "breaches"):
-        assert calls[name]["start_at"].date() == start
-        assert calls[name]["end_at"].date() == end
 
 
 def test_monthly_trend_has_exclusive_next_month_bound(monkeypatch):

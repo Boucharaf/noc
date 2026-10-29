@@ -97,6 +97,14 @@ export default function ItopIncidentDrawer({ incidentKey, open, onClose }) {
             <DefRow label="Demandeur">{incident.caller}</DefRow>
             <DefRow label="Équipe">{incident.team}</DefRow>
             <DefRow label="Agent">{incident.agent ?? "non affecté"}</DefRow>
+            {incident.trigger && (
+              <DefRow label="Événement Zabbix" mono>
+                {incident.trigger.ref}
+                <span className="ml-1.5 text-[11px]" style={{ color: "var(--ink-3)" }}>
+                  {incident.trigger.active ? "problème en cours" : "problème clos dans Zabbix"}
+                </span>
+              </DefRow>
+            )}
           </Section>
 
           <Section title="Délais et engagement">
@@ -226,7 +234,14 @@ export default function ItopIncidentDrawer({ incidentKey, open, onClose }) {
                         <td>
                           <ToolTag tool={alert.tool} />
                         </td>
-                        <td className="wrap">{alert.message}</td>
+                        <td className="wrap">
+                          {alert.message}
+                          {alert.key === incident.trigger?.key && (
+                            <Badge color="var(--accent-ink)" className="ml-1.5">
+                              à l'origine du ticket
+                            </Badge>
+                          )}
+                        </td>
                         <td>{smartTime(alert.since)}</td>
                       </tr>
                     ))}

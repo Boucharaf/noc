@@ -159,9 +159,9 @@ def update_self(db: Session, user: User, payload: dict) -> dict:
 def deactivate_user(db: Session, user_id: int) -> None:
     """Désactivation, jamais suppression.
 
-    Un compte supprimé emporterait ses lignes de ops_alert_timeline et
-    ops_field_intervention, ou en casserait les clés étrangères : la
-    traçabilité « qui a résolu cet incident » disparaîtrait avec lui.
+    Un compte supprimé laisserait des lignes anonymes dans le journal
+    d'audit (ops_audit_log) : la traçabilité « qui a fait quoi »
+    disparaîtrait avec lui.
     """
     user = db.get(User, user_id)
     if user is None:

@@ -1,9 +1,8 @@
 """
 Notifications sortantes sur alerte grave : SMS (Twilio) et courriel.
 
-DEUX APPELANTS : le canal temps réel (services/realtime_service.py) pour les
-alertes que le collecteur découvre chez les outils, et la création d'un
-incident signalé à la main (routes/operations.py). Ne lève jamais : une
+APPELANT : le canal temps réel (services/realtime_service.py), pour les
+alertes que le collecteur découvre chez les outils. Ne lève jamais : une
 notification qui échoue ne doit interrompre ni la diffusion WebSocket ni les
 alertes suivantes — l'alerte est de toute façon déjà visible à l'écran.
 
@@ -19,23 +18,38 @@ backends derrière un répartiteur reçoivent tous deux la publication Redis ;
 c'est l'insertion dans `ops_alert_notified` qui départage, et le perdant
 n'envoie rien. Un verrou en mémoire ne survivrait pas à un redémarrage et
 laisserait repartir toutes les notifications.
+
+UN ENVOI ÉCHOUÉ N'EST PAS PERDU. Le verrou ci-dessus est pris AVANT l'envoi :
+sans autre mécanisme, un serveur SMTP indisponible pendant une panne
+critique faisait que personne n'était jamais prévenu. L'envoi échoué est
+donc rangé dans `ops_notification_retry` et retenté par `retry_loop`
+(1, 5, 15, 30 puis 60 minutes), tant que l'alerte est active, dans la
+limite de NOTIFY_RETRY_MAX_ATTEMPTS tentatives et de NOTIFY_RETRY_MAX_AGE_MIN
+minutes. Un envoi abandonné est journalisé et signalé par /api/health.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import html
 import json
 import logging
 import smtplib
 import ssl
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 
-from sqlalchemy import or_
+from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 
 from app.core.config import (
     DASHBOARD_URL,
     NOC_EMAIL_RECIPIENTS,
     NOC_SMS_RECIPIENTS,
     NOTIFICATIONS_ENABLED,
+    NOTIFY_BURST_MAX,
+    NOTIFY_RETRY_MAX_AGE_MIN,
+    NOTIFY_RETRY_MAX_ATTEMPTS,
     NOTIFY_SEVERITIES,
     REPORT_ORGANISATION,
     SMTP_FROM,
@@ -54,7 +68,7 @@ from app.core.config import (
     TWILIO_FROM_NUMBER,
 )
 from app.db.session import SessionLocal
-from app.models import AlertNotified, NotificationLog, User
+from app.models import AlertNotified, NotificationLog, NotificationRetry, User
 
 logger = logging.getLogger(__name__)
 
@@ -120,35 +134,62 @@ def _twilio_client():
     return Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 
+def _sms_configured() -> bool:
+    return bool(TWILIO_ACCOUNT_SID and TWILIO_FROM_NUMBER)
+
+
+def _send_sms_to(numbers: list[str], body: str) -> dict[str, str]:
+    """Envoie le SMS numéro par numéro ; rend {numéro: erreur} des échecs.
+
+    Numéro par numéro : si la passerelle refuse le troisième, les deux
+    premiers ont reçu le message et ne doivent pas le recevoir à nouveau
+    lors de la prochaine tentative.
+    """
+    try:
+        client = _twilio_client()
+    except Exception as exc:  # noqa: BLE001 — bibliothèque absente ou mal configurée
+        return {number: str(exc) for number in numbers}
+    failures: dict[str, str] = {}
+    for number in numbers:
+        kwargs = {"from_": TWILIO_FROM_NUMBER, "to": number}
+        if TWILIO_CONTENT_SID:
+            # Un compte d'essai Twilio refuse tout corps libre
+            # (erreur 400/572006) et n'accepte que des modèles
+            # prédéfinis : le modèle est donc requis tant que le
+            # compte n'est pas passé en production.
+            kwargs["content_sid"] = TWILIO_CONTENT_SID
+            # json.dumps et non une chaîne formatée : un guillemet dans
+            # le message d'une sonde casserait le JSON, ou y ajouterait
+            # des variables.
+            kwargs["content_variables"] = json.dumps({"1": body[:100]}, ensure_ascii=False)
+        else:
+            kwargs["body"] = body[:320]
+        try:
+            client.messages.create(**kwargs)
+        except Exception as exc:  # noqa: BLE001
+            failures[number] = str(exc)
+    return failures
+
+
 def send_sms(alert_key: str, body: str) -> None:
-    if not (TWILIO_ACCOUNT_SID and TWILIO_FROM_NUMBER and NOC_SMS_RECIPIENTS):
+    if not (_sms_configured() and NOC_SMS_RECIPIENTS):
         logger.info("SMS non configuré, envoi ignoré")
         return
 
-    try:
-        client = _twilio_client()
-        for number in NOC_SMS_RECIPIENTS:
-            kwargs = {"from_": TWILIO_FROM_NUMBER, "to": number}
-            if TWILIO_CONTENT_SID:
-                # Un compte d'essai Twilio refuse tout corps libre
-                # (erreur 400/572006) et n'accepte que des modèles
-                # prédéfinis : le modèle est donc requis tant que le
-                # compte n'est pas passé en production.
-                kwargs["content_sid"] = TWILIO_CONTENT_SID
-                # json.dumps et non une chaîne formatée : un guillemet dans
-                # le message d'une sonde casserait le JSON, ou y ajouterait
-                # des variables.
-                kwargs["content_variables"] = json.dumps({"1": body[:100]}, ensure_ascii=False)
-            else:
-                kwargs["body"] = body[:320]
-            client.messages.create(**kwargs)
+    numbers = list(NOC_SMS_RECIPIENTS)
+    failures = _send_sms_to(numbers, body)
+    sent = [number for number in numbers if number not in failures]
+    if sent:
         _log_notification(
-            alert_key, "sms", "sent", f"{len(NOC_SMS_RECIPIENTS)} destinataire(s)",
-            ", ".join(NOC_SMS_RECIPIENTS),
+            alert_key, "sms", "sent", f"{len(sent)} destinataire(s)", ", ".join(sent)
         )
-    except Exception as exc:
-        logger.error("Envoi SMS échoué pour l'alerte %s : %s", alert_key, exc)
-        _log_notification(alert_key, "sms", "failed", str(exc))
+    if failures:
+        error = next(iter(failures.values()))
+        logger.error("Envoi SMS échoué pour l'alerte %s : %s", alert_key, error)
+        _log_notification(alert_key, "sms", "failed", error, ", ".join(failures))
+        _schedule_retry(
+            alert_key, "sms", text_body=body, recipients=list(failures), error=error
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +290,10 @@ def send_email(
     except Exception as exc:
         logger.error("Envoi courriel échoué pour l'alerte %s : %s", alert_key, exc)
         _log_notification(alert_key, "email", "failed", str(exc), ", ".join(recipients))
+        _schedule_retry(
+            alert_key, "email", subject=subject, text_body=text_body,
+            html_body=html_body, site=site, error=str(exc),
+        )
 
 
 def send_test_email(recipients: list[str], requested_by: str) -> None:
@@ -387,34 +432,48 @@ def notify_alert(
     send_email(alert_key, title, html_body, text_body, site=site)
 
 
-def notify_manual_incident(
-    *,
-    incident_id: int,
-    title: str,
-    severity: str,
-    description: str | None,
-    node_name: str | None,
-    site: str | None,
-    reported_by: str,
-) -> None:
-    """Incident signalé à la main : même chemin qu'une alerte d'outil.
+def notify_burst(alerts: list[dict]) -> None:
+    """Un seul message pour une rafale d'alertes graves.
 
-    Exécuté en tâche de fond, après la réponse HTTP : l'agent qui signale une
-    panne depuis son téléphone n'a pas à attendre le serveur SMTP.
+    Chaque alerte est réservée comme pour un envoi unitaire
+    (`ops_alert_notified`) : un second backend, ou un cycle suivant, ne la
+    notifie pas une seconde fois. Seules celles que ce backend a réservées
+    figurent dans le récapitulatif.
     """
-    if severity not in NOTIFY_SEVERITIES:
+    claimed = [
+        alert for alert in alerts
+        if _claim(f"{alert.get('tool')}:{alert.get('ref')}")
+    ]
+    if not claimed:
         return
-    try:
-        notify_alert(
-            alert_key=f"manual:{incident_id}",
-            node_name=node_name or site or "Incident signalé",
-            site=site,
-            severity=severity,
-            message=f"{title} — {description}" if description else title,
-            source=f"signalement manuel par {reported_by}",
-        )
-    except Exception:  # noqa: BLE001 — voir l'en-tête : ne lève jamais.
-        logger.exception("Notification de l'incident manuel %s en échec", incident_id)
+    count = len(claimed)
+    critical = sum(1 for alert in claimed if alert.get("severity") == "critical")
+    title = _one_line(f"[NOC] {count} nouvelles alertes graves dont {critical} critiques")
+    lines = [
+        f"{_SEVERITY_LABEL.get(a.get('severity'), a.get('severity'))} — "
+        f"{a.get('node_name') or 'équipement inconnu'} ({a.get('site') or 'site non renseigné'}) : "
+        f"{_one_line(a.get('message') or '')[:120]}"
+        for a in claimed[:50]
+    ]
+    if count > 50:
+        lines.append(f"… et {count - 50} autre(s), voir le NOC.")
+    link = f"{DASHBOARD_URL}/alertes" if DASHBOARD_URL else ""
+    text_body = "\n".join(
+        [title, "", *lines] + (["", f"Ouvrir le NOC : {link}"] if link else [])
+        + ["", f"— {REPORT_ORGANISATION}"]
+    )
+    esc = html.escape
+    html_body = (
+        '<html><body style="font-family:Arial,sans-serif;color:#222;">'
+        f'<h2 style="color:#c0392b;">{esc(title)}</h2><ul>'
+        + "".join(f"<li>{esc(line)}</li>" for line in lines)
+        + "</ul>"
+        + (f'<p><a href="{esc(link, quote=True)}">Ouvrir le NOC</a></p>' if link else "")
+        + f'<p style="color:#777;font-size:12px;">{esc(REPORT_ORGANISATION)}</p></body></html>'
+    )
+    key = f"digest:{_now().strftime('%Y%m%dT%H%M%S')}"
+    send_sms(key, f"{title}. Voir le NOC.")
+    send_email(key, title, html_body, text_body)
 
 
 async def notify_new_alerts(alerts: list[dict]) -> None:
@@ -432,6 +491,9 @@ async def notify_new_alerts(alerts: list[dict]) -> None:
     import asyncio
 
     def _send_all() -> None:
+        if len(alerts) > NOTIFY_BURST_MAX:
+            notify_burst(alerts)
+            return
         for alert in alerts:
             try:
                 notify_alert(
@@ -447,3 +509,238 @@ async def notify_new_alerts(alerts: list[dict]) -> None:
                 logger.exception("Notification en échec pour %s", alert.get("ref"))
 
     await asyncio.to_thread(_send_all)
+
+
+# ---------------------------------------------------------------------------
+# Nouvelles tentatives
+# ---------------------------------------------------------------------------
+# Délai avant la tentative suivante, selon le nombre de tentatives déjà
+# faites : 1 -> 1 min, 2 -> 5 min, … ; au-delà, toutes les heures.
+RETRY_DELAYS_MIN = (1, 5, 15, 30, 60)
+RETRY_INTERVAL_S = 60
+_RETRY_BATCH = 20
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _aware(value: datetime | None) -> datetime | None:
+    """SQLite (tests) rend des dates sans fuseau ; PostgreSQL, en UTC."""
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _delay(attempts: int) -> timedelta:
+    return timedelta(minutes=RETRY_DELAYS_MIN[min(attempts, len(RETRY_DELAYS_MIN)) - 1])
+
+
+def _schedule_retry(
+    alert_key: str,
+    channel: str,
+    *,
+    text_body: str,
+    error: str,
+    subject: str | None = None,
+    html_body: str | None = None,
+    site: str | None = None,
+    recipients: list[str] | None = None,
+) -> None:
+    """Range un envoi échoué pour une nouvelle tentative. Ne lève jamais."""
+    if NOTIFY_RETRY_MAX_ATTEMPTS <= 1:
+        return
+    db = SessionLocal()
+    try:
+        db.add(
+            NotificationRetry(
+                alert_key=alert_key,
+                channel=channel,
+                subject=subject,
+                text_body=text_body,
+                html_body=html_body,
+                site=site,
+                recipients=",".join(recipients) if recipients else None,
+                attempts=1,
+                status="pending",
+                last_error=error[:500],
+                next_attempt_at=_now() + _delay(1),
+                created_at=_now(),
+                updated_at=_now(),
+            )
+        )
+        db.commit()
+    except IntegrityError:
+        # Déjà en attente pour cette alerte et ce canal.
+        db.rollback()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        logger.error(
+            "Nouvelle tentative non enregistrée pour %s (%s) : %s", alert_key, channel, exc
+        )
+    finally:
+        db.close()
+
+
+def _attempt(job: NotificationRetry) -> tuple[bool, str, list[str]]:
+    """Une tentative : (réussi, erreur, destinataires restants).
+
+    Destinataires restants : pour le SMS, les numéros encore en échec ;
+    pour le courriel, vide (relus à chaque tentative)."""
+    if job.channel == "email":
+        if not SMTP_HOST:
+            return False, "courriel désactivé (SMTP_HOST vide)", []
+        recipients = email_recipients(job.site)
+        if not recipients:
+            return False, "aucun destinataire courriel", []
+        try:
+            _deliver(
+                job.subject or "[NOC] Alerte", job.html_body or job.text_body,
+                job.text_body, recipients,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc), []
+        _log_notification(
+            job.alert_key, "email", "sent",
+            f"{len(recipients)} destinataire(s), tentative {job.attempts + 1}",
+            ", ".join(recipients),
+        )
+        return True, "", []
+
+    numbers = [n for n in (job.recipients or "").split(",") if n]
+    if not (_sms_configured() and numbers):
+        return False, "SMS désactivé ou sans destinataire", []
+    failures = _send_sms_to(numbers, job.text_body)
+    sent = [number for number in numbers if number not in failures]
+    if sent:
+        _log_notification(
+            job.alert_key, "sms", "sent",
+            f"{len(sent)} destinataire(s), tentative {job.attempts + 1}", ", ".join(sent),
+        )
+    if failures:
+        return False, next(iter(failures.values())), list(failures)
+    return True, "", []
+
+
+def retry_due(active_keys: set[str] | None = None, now: datetime | None = None) -> dict:
+    """Retente les envois échus. Rend les comptes {sent, failed, abandoned}.
+
+    `active_keys` : clés des alertes encore actives dans l'instantané ; une
+    alerte close n'est plus notifiée. None quand l'instantané est illisible :
+    on retente alors sans ce filtre plutôt que de tout abandonner.
+
+    Chaque ligne est prise dans sa propre transaction, avec FOR UPDATE SKIP
+    LOCKED : deux backends ne retentent jamais le même envoi, et un envoi
+    lent ne bloque pas les autres backends.
+    """
+    now = now or _now()
+    counts = {"sent": 0, "failed": 0, "abandoned": 0}
+    for _ in range(_RETRY_BATCH):
+        db = SessionLocal()
+        try:
+            job = (
+                db.query(NotificationRetry)
+                .filter(
+                    NotificationRetry.status == "pending",
+                    NotificationRetry.next_attempt_at <= now,
+                )
+                .order_by(NotificationRetry.next_attempt_at)
+                .with_for_update(skip_locked=True)
+                .first()
+            )
+            if job is None:
+                return counts
+
+            reason = None
+            created = _aware(job.created_at) or now
+            if now - created > timedelta(minutes=NOTIFY_RETRY_MAX_AGE_MIN):
+                reason = f"alerte trop ancienne (plus de {NOTIFY_RETRY_MAX_AGE_MIN} min)"
+            elif (
+                active_keys is not None
+                and not job.alert_key.startswith("digest:")
+                and job.alert_key not in active_keys
+            ):
+                reason = "alerte close entre-temps"
+
+            if reason is None:
+                ok, error, remaining = _attempt(job)
+                job.attempts += 1
+                if ok:
+                    job.status = "sent"
+                    job.last_error = None
+                    counts["sent"] += 1
+                else:
+                    job.last_error = error[:500]
+                    if remaining:
+                        job.recipients = ",".join(remaining)
+                    if job.attempts >= NOTIFY_RETRY_MAX_ATTEMPTS:
+                        reason = f"{job.attempts} tentatives échouées : {error}"
+                    else:
+                        job.next_attempt_at = now + _delay(job.attempts)
+                        counts["failed"] += 1
+                        _log_notification(
+                            job.alert_key, job.channel, "failed",
+                            f"tentative {job.attempts}/{NOTIFY_RETRY_MAX_ATTEMPTS} : {error}",
+                        )
+            if reason is not None:
+                job.status = "abandoned"
+                counts["abandoned"] += 1
+                logger.error(
+                    "Notification abandonnée pour %s (%s) : %s",
+                    job.alert_key, job.channel, reason,
+                )
+                _log_notification(job.alert_key, job.channel, "abandoned", reason)
+            job.updated_at = now
+            db.commit()
+        except Exception:  # noqa: BLE001 — une ligne en erreur ne bloque pas les autres
+            db.rollback()
+            logger.exception("Nouvelle tentative de notification en erreur")
+            return counts
+        finally:
+            db.close()
+    return counts
+
+
+def retry_status(now: datetime | None = None) -> dict:
+    """État des envois à retenter, pour /api/health et la supervision."""
+    now = now or _now()
+    db = SessionLocal()
+    try:
+        pending = db.query(func.count(NotificationRetry.id)).filter(
+            NotificationRetry.status == "pending"
+        ).scalar()
+        abandoned = db.query(func.count(NotificationRetry.id)).filter(
+            NotificationRetry.status == "abandoned",
+            NotificationRetry.updated_at >= now - timedelta(hours=24),
+        ).scalar()
+        return {"pending": pending or 0, "abandoned_24h": abandoned or 0}
+    finally:
+        db.close()
+
+
+async def retry_loop(stop: asyncio.Event) -> None:
+    """Toutes les minutes, retente les envois échus.
+
+    Les envois sont faits dans un THREAD, comme les premiers envois : SMTP
+    et Twilio sont synchrones et bloqueraient la boucle asyncio.
+    """
+    from app.services import live_service
+
+    while not stop.is_set():
+        try:
+            try:
+                active = {f"{a['tool']}:{a['ref']}" for a in await live_service.get_alerts()}
+            except live_service.SnapshotUnavailable:
+                active = None
+            counts = await asyncio.to_thread(retry_due, active)
+            if any(counts.values()):
+                logger.info(
+                    "Notifications retentées : %d envoyée(s), %d en échec, %d abandonnée(s)",
+                    counts["sent"], counts["failed"], counts["abandoned"],
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — la boucle ne meurt jamais
+            logger.exception("Boucle de nouvelles tentatives en erreur")
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=RETRY_INTERVAL_S)

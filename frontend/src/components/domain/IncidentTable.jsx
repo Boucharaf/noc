@@ -156,9 +156,7 @@ export default function IncidentTable({
               ? `Périmé · ${row.kind === "itsm_ticket" ? "ITSM" : "supervision"}`
               : row.kind === "itsm_ticket"
                 ? "Ticket ITSM"
-                : row.kind === "manual_incident"
-                  ? "Incident signalé"
-                  : "Alerte technique"}
+                : "Alerte technique"}
           </span>
         </div>
       ),

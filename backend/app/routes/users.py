@@ -5,7 +5,7 @@ salle : le Chef NOC est seul à les faire. Chaque utilisateur garde en
 revanche la main sur SES identifiants depuis « Mon compte » (PATCH
 /api/auth/me et /api/auth/me/password, routes/auth.py) — jamais sur son rôle.
 """
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from app.core import session_store
@@ -20,7 +20,7 @@ from app.schemas.users import (
     UserSummary,
     UserUpdate,
 )
-from app.services import auth_service, user_service
+from app.services import audit_service, auth_service, user_service
 
 router = APIRouter(prefix="/api/users", tags=["utilisateurs"])
 
@@ -46,6 +46,11 @@ def _forbid_self_lockout(user_id: int, admin: User) -> None:
         )
 
 
+def _username(db: Session, user_id: int) -> str | None:
+    user = db.get(User, user_id)
+    return user.username if user is not None else None
+
+
 @router.get("")
 def list_users(
     db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
@@ -62,16 +67,23 @@ def list_users(
 @router.post("", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 def create_user(
     payload: UserCreate,
+    request: Request,
     db: Session = Depends(get_db),
-    _admin: User = Depends(require_role(*_MANAGE_USERS)),
+    admin: User = Depends(require_role(*_MANAGE_USERS)),
 ):
-    return user_service.create_user(db, payload.model_dump())
+    created = user_service.create_user(db, payload.model_dump())
+    audit_service.record(
+        db, "user.created", actor=admin, target=created["username"],
+        detail={"user_id": created["id"], "role": created["role"]}, request=request,
+    )
+    return created
 
 
 @router.patch("/{user_id}", response_model=UserOut)
 def update_user(
     user_id: int,
     payload: UserUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     admin: User = Depends(require_role(*_MANAGE_USERS)),
 ):
@@ -86,7 +98,16 @@ def update_user(
     if access_changes:
         _forbid_self_lockout(user_id, admin)
 
-    updated = user_service.update_user(db, user_id, payload.model_dump(exclude_unset=True))
+    previous_role = target.role if target is not None else None
+    changes = payload.model_dump(exclude_unset=True)
+    updated = user_service.update_user(db, user_id, changes)
+    detail = {"user_id": user_id, "fields": sorted(changes)}
+    if role_changes:
+        detail["role"] = {"from": previous_role, "to": updated["role"]}
+    audit_service.record(
+        db, "user.updated", actor=admin, target=updated["username"], detail=detail,
+        request=request,
+    )
     # Un changement de rôle doit prendre effet tout de suite : les jetons
     # en cours portent l'ancien rôle et get_current_user les rejettera,
     # mais couper les sessions évite d'attendre ce rejet.
@@ -98,30 +119,41 @@ def update_user(
 @router.post("/{user_id}/deactivate", status_code=status.HTTP_204_NO_CONTENT)
 def deactivate_user(
     user_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     admin: User = Depends(require_role(*_MANAGE_USERS)),
 ):
     _forbid_self_lockout(user_id, admin)
     user_service.deactivate_user(db, user_id)
     session_store.revoke_all_sessions(user_id)
+    audit_service.record(
+        db, "user.deactivated", actor=admin, target=_username(db, user_id),
+        detail={"user_id": user_id}, request=request,
+    )
 
 
 @router.post("/{user_id}/reset-pin", status_code=status.HTTP_204_NO_CONTENT)
 def reset_pin(
     user_id: int,
     payload: PinResetPayload,
+    request: Request,
     db: Session = Depends(get_db),
-    _admin: User = Depends(require_role(*_MANAGE_USERS)),
+    admin: User = Depends(require_role(*_MANAGE_USERS)),
 ):
     auth_service.set_pin(db, user_id, payload.new_pin)
+    audit_service.record(
+        db, "user.pin_reset", actor=admin, target=_username(db, user_id),
+        detail={"user_id": user_id}, request=request,
+    )
 
 
 @router.post("/{user_id}/reset-password", status_code=status.HTTP_204_NO_CONTENT)
 def reset_password(
     user_id: int,
     payload: PasswordResetPayload,
+    request: Request,
     db: Session = Depends(get_db),
-    _admin: User = Depends(require_role(*_MANAGE_USERS)),
+    admin: User = Depends(require_role(*_MANAGE_USERS)),
 ):
     """Mot de passe oublié : le Chef NOC en fixe un provisoire.
 
@@ -131,3 +163,7 @@ def reset_password(
     """
     auth_service.set_password(db, user_id, payload.new_password)
     session_store.revoke_all_sessions(user_id)
+    audit_service.record(
+        db, "user.password_reset", actor=admin, target=_username(db, user_id),
+        detail={"user_id": user_id}, request=request,
+    )

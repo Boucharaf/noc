@@ -20,9 +20,7 @@ import { useAlertAges, useAlertsByTool, useIncidents } from "../hooks/queries";
  * Alertes des OUTILS de supervision — Zabbix, Centreon, NetXMS, Nagios, NSP.
  *
  * Ce ne sont pas des incidents : un incident est un ticket iTop (écran
- * Incidents iTop). Les tickets iTop sont donc exclus de cette liste. Les
- * signalements manuels (panne constatée sur le terrain, sans sonde) y
- * restent : ce sont des signaux, comme les alertes des outils.
+ * Incidents iTop). Les tickets iTop sont donc exclus de cette liste.
  *
  * Le périmètre (région, province, site, recherche) vient de la barre
  * commune ; la localité n'est donc plus un filtre propre à cet écran.
@@ -68,7 +66,6 @@ export default function AlertsPage() {
       page,
       page_size: PAGE_SIZE,
       severity: params.get("severity") || undefined,
-      kind: params.get("kind") || undefined,
       site: params.get("site") || params.get("locality_id") || undefined,
       acknowledged: params.has("acknowledged") ? params.get("acknowledged") : undefined,
       node_code: params.get("q") || undefined,
@@ -82,7 +79,7 @@ export default function AlertsPage() {
 
   const query = useIncidents(filters);
 
-  const activeFilterCount = ["severity", "kind", "acknowledged", "q", "source_tool", "from", "to"].filter(
+  const activeFilterCount = ["severity", "acknowledged", "q", "source_tool", "from", "to"].filter(
     (key) => params.get(key),
   ).length;
 
@@ -248,17 +245,6 @@ export default function AlertsPage() {
                 value: severity,
                 label: severityMeta(severity).label,
               }))}
-            />
-            <FilterSelect
-              label="Catégorie"
-              value={params.get("kind")}
-              onChange={(value) => setParam("kind", value)}
-              allLabel="Toutes les catégories"
-              width={175}
-              options={[
-                { value: "technical", label: "Alerte technique" },
-                { value: "manual_incident", label: "Signalement manuel" },
-              ]}
             />
             <FilterSelect
               label="Acquittement"

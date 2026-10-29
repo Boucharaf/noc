@@ -173,8 +173,16 @@ async def get_node(db: Session, node_id: str) -> dict | None:
 
     from app.services import geo_service  # geo_service importe ce module
 
+    facts = [item for item in (node.get("details") or {}).values() if isinstance(item, dict)]
+    down_since = next((item["down_since"] for item in facts if item.get("down_since")), None)
     return {
         **node,
+        # Heure de la panne, quand l'outil la date (NetXMS). Montrée seulement
+        # si l'équipement n'est pas en service : un « hors service depuis »
+        # sur un équipement disponible serait une contradiction à l'écran.
+        "down_since": down_since if node.get("measured_state", node.get("state"))
+        in ("down", "unknown") else None,
+        "boot_time": next((item["boot_time"] for item in facts if item.get("boot_time")), None),
         "position": geo_service.position(node, nodes),
         "tools": sorted((node.get("sources") or {}).keys()),
         "active_alerts": alerts,

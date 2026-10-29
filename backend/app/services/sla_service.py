@@ -1,17 +1,14 @@
 """
-Respect des engagements de service.
+Objectifs de service (SLA) par gravité : délai de prise en charge (TTO) et
+de résolution (TTR).
 
-CE QUE LE NOC MESURE, ET CE QU'IL NE MESURE PAS.
-
-Il mesure SON délai de réaction : entre le moment où une alerte est apparue
-et celui où un exploitant l'a prise en charge (TTA), puis clôturée (TTR).
-Ces deux durées se lisent dans `ops_alert_state`, la table que le NOC
-remplit lui-même.
+Ce module ne porte que les OBJECTIFS. Le respect des engagements se mesure
+sur les tickets iTop (incident_service.sla_by_group, at_risk, incident_kpis) :
+c'est dans iTop que les incidents sont pris en charge et résolus.
 
 Il ne mesure PAS le délai de détection de l'outil de supervision — le temps
 entre la panne réelle et l'alerte. Cette question appartient à Zabbix ou à
-Centreon, qui la connaissent mieux que nous, et la faire remonter ici
-donnerait un chiffre dont personne ne saurait dire ce qu'il recouvre.
+Centreon, qui la connaissent mieux que nous.
 
 POURQUOI LES CIBLES VIVENT EN BASE ET NON DANS LE CODE. Un engagement de
 service se négocie, se révise et doit pouvoir être modifié par le chef du
@@ -21,17 +18,11 @@ une valeur par défaut, pas des données fictives.
 """
 from __future__ import annotations
 
-import logging
-from datetime import datetime, timedelta, timezone
-
-from sqlalchemy import and_, case, func, null, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import SEVERITIES
-from app.models import AlertState, SlaTarget
-from app.services import live_service
-
-logger = logging.getLogger(__name__)
+from app.models import SlaTarget
 
 
 def targets(db: Session) -> dict[str, SlaTarget]:
@@ -82,238 +73,3 @@ def update_target(
         "tta_target_minutes": row.tta_target_minutes,
         "ttr_target_minutes": row.ttr_target_minutes,
     }
-
-
-def compliance(
-    db: Session,
-    days: int = 30,
-    start_at: datetime | None = None,
-    end_at: datetime | None = None,
-) -> dict:
-    """Taux de respect, par gravité, sur la période.
-
-    Le calcul est fait EN SQL et non en Python : compter des alertes tenues
-    et non tenues est exactement ce qu'une base de données fait bien, et
-    remonter toutes les lignes pour les compter côté application serait
-    gratuitement coûteux le jour où la table grossira.
-
-    Une alerte non encore clôturée n'entre dans aucun des deux camps — elle
-    n'a pas encore de délai de résolution. La compter comme non tenue
-    dégraderait le taux à cause d'alertes qu'on est peut-être en train de
-    traiter dans les délais.
-    """
-    since = start_at or (datetime.now(timezone.utc) - timedelta(days=days))
-    goals = targets(db)
-
-    # Dépassements comptés EN BASE, alerte par alerte. Les déduire de la
-    # liste /sla/breaches (plafonnée) ou d'une moyenne par gravité donnait un
-    # taux de respect surestimé dès que les dépassements dépassaient la page.
-    target_s = _ttr_target_case(goals)
-    elapsed = func.extract("epoch", AlertState.resolved_at - AlertState.detected_at)
-
-    query = (
-        select(
-            AlertState.severity_at_pickup.label("severity"),
-            func.count().label("total"),
-            func.count(
-                case((and_(AlertState.resolved_at.isnot(None), target_s.isnot(None)), 1))
-            ).label("resolved_with_target"),
-            func.count(case((elapsed > target_s, 1))).label("breached"),
-            func.count(AlertState.acknowledged_at).label("acknowledged"),
-            func.count(AlertState.resolved_at).label("resolved"),
-            func.avg(
-                func.extract("epoch", AlertState.acknowledged_at - AlertState.detected_at)
-            ).label("tta_s"),
-            func.avg(
-                func.extract("epoch", AlertState.resolved_at - AlertState.detected_at)
-            ).label("ttr_s"),
-        )
-        .where(AlertState.detected_at >= since)
-    )
-    if end_at is not None:
-        query = query.where(AlertState.detected_at < end_at)
-    rows = db.execute(query.group_by(AlertState.severity_at_pickup)).all()
-
-    results = []
-    for row in rows:
-        severity = row.severity or "unknown"
-        goal = goals.get(severity)
-        tta_minutes = round(row.tta_s / 60, 1) if row.tta_s is not None else None
-        ttr_minutes = round(row.ttr_s / 60, 1) if row.ttr_s is not None else None
-
-        results.append(
-            {
-                "severity": severity,
-                "alerts": row.total,
-                "acknowledged": row.acknowledged,
-                "resolved": row.resolved,
-                # Seules les alertes RÉSOLUES et dotées d'un objectif entrent
-                # dans le taux : une alerte en cours n'a pas encore de délai.
-                "resolved_with_target": row.resolved_with_target,
-                "breached": row.breached,
-                "ttr_compliance_pct": _rate(row.resolved_with_target, row.breached),
-                "mtta_minutes": tta_minutes,
-                "mttr_minutes": ttr_minutes,
-                "tta_target_minutes": goal.tta_target_minutes if goal else None,
-                "ttr_target_minutes": goal.ttr_target_minutes if goal else None,
-                "tta_met": (
-                    tta_minutes <= goal.tta_target_minutes
-                    if goal and tta_minutes is not None
-                    else None
-                ),
-                "ttr_met": (
-                    ttr_minutes <= goal.ttr_target_minutes
-                    if goal and ttr_minutes is not None
-                    else None
-                ),
-            }
-        )
-
-    results.sort(key=lambda r: SEVERITIES.index(r["severity"]) if r["severity"] in SEVERITIES else 99)
-    return {
-        "period_days": (
-            max(1, (end_at - since).days) if end_at is not None else days
-        ),
-        "start_at": since.isoformat() if start_at else None,
-        "end_at": end_at.isoformat() if end_at else None,
-        "by_severity": results,
-        "handled_total": sum(r["alerts"] for r in results),
-        "resolved_total": sum(r["resolved_with_target"] for r in results),
-        "breached_total": sum(r["breached"] for r in results),
-        "global_compliance_pct": _rate(
-            sum(r["resolved_with_target"] for r in results),
-            sum(r["breached"] for r in results),
-        ),
-    }
-
-
-def _ttr_target_case(goals: dict):
-    """Objectif de résolution de chaque ligne, en secondes (NULL sans objectif)."""
-    whens = [
-        (AlertState.severity_at_pickup == severity, goal.ttr_target_minutes * 60)
-        for severity, goal in goals.items()
-        if goal.ttr_target_minutes is not None
-    ]
-    if not whens:
-        return null()
-    return case(*whens, else_=None)
-
-
-def _rate(evaluated: int, breached: int) -> float | None:
-    if not evaluated:
-        return None
-    return round(100.0 * (evaluated - breached) / evaluated, 1)
-
-
-def breaches(
-    db: Session,
-    days: int = 30,
-    limit: int = 50,
-    start_at: datetime | None = None,
-    end_at: datetime | None = None,
-) -> list[dict]:
-    """Alertes ayant dépassé leur objectif de résolution.
-
-    C'est la liste que le chef du NOC regarde en revue de service : pas un
-    pourcentage, mais les cas précis, avec leur cause quand elle a été
-    renseignée.
-    """
-    since = start_at or (datetime.now(timezone.utc) - timedelta(days=days))
-    goals = targets(db)
-    if not goals:
-        return []
-
-    # L'objectif dépend de la gravité : on construit un CASE qui associe à
-    # chaque ligne son seuil, plutôt que de faire une requête par gravité.
-    target_case = _ttr_target_case(goals)
-    elapsed = func.extract("epoch", AlertState.resolved_at - AlertState.detected_at)
-
-    query = (
-        select(
-            AlertState.alert_key,
-            AlertState.node_name,
-            AlertState.severity_at_pickup,
-            AlertState.message_at_pickup,
-            AlertState.detected_at,
-            AlertState.resolved_at,
-            AlertState.cause,
-            elapsed.label("elapsed_s"),
-            target_case.label("target_s"),
-        )
-        .where(
-            AlertState.resolved_at.isnot(None),
-            AlertState.detected_at >= since,
-            elapsed > target_case,
-        )
-    )
-    if end_at is not None:
-        query = query.where(AlertState.detected_at < end_at)
-    rows = db.execute(
-        query.order_by((elapsed - target_case).desc()).limit(limit)
-    ).all()
-
-    return [
-        {
-            "alert_key": row.alert_key,
-            "node_name": row.node_name,
-            "severity": row.severity_at_pickup,
-            "message": row.message_at_pickup,
-            "detected_at": row.detected_at.isoformat() if row.detected_at else None,
-            "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
-            "cause": row.cause,
-            "ttr_minutes": round(row.elapsed_s / 60, 1),
-            "target_minutes": round(row.target_s / 60, 1),
-            "overrun_minutes": round((row.elapsed_s - row.target_s) / 60, 1),
-        }
-        for row in rows
-    ]
-
-
-async def at_risk(db: Session) -> list[dict]:
-    """Alertes EN COURS qui vont manquer leur objectif.
-
-    Le plus utile des trois indicateurs de ce module : les deux autres
-    racontent le passé, celui-ci permet encore d'agir. Calculé sur
-    l'instantané — donc sur les alertes réellement actives — croisé avec les
-    objectifs par gravité.
-    """
-    goals = targets(db)
-    now = datetime.now(timezone.utc)
-    alerts = await live_service.get_alerts()
-
-    at_risk_rows = []
-    for alert in alerts:
-        goal = goals.get(alert.get("severity", ""))
-        if goal is None or not alert.get("since"):
-            continue
-        try:
-            since = datetime.fromisoformat(alert["since"])
-        except (TypeError, ValueError):
-            continue
-        if since.tzinfo is None:
-            since = since.replace(tzinfo=timezone.utc)
-
-        elapsed_minutes = (now - since).total_seconds() / 60
-        remaining = goal.ttr_target_minutes - elapsed_minutes
-        # Seuil à 25 % du budget restant : assez tôt pour agir, assez tard
-        # pour ne pas noyer l'écran d'alertes qui viennent de tomber.
-        if remaining > goal.ttr_target_minutes * 0.25:
-            continue
-
-        at_risk_rows.append(
-            {
-                "alert_key": f"{alert['tool']}:{alert['ref']}",
-                "tool": alert.get("tool"),
-                "severity": alert.get("severity"),
-                "message": alert.get("message"),
-                "node_name": alert.get("node_name"),
-                "since": alert.get("since"),
-                "elapsed_minutes": round(elapsed_minutes, 1),
-                "target_minutes": goal.ttr_target_minutes,
-                "remaining_minutes": round(remaining, 1),
-                "breached": remaining < 0,
-            }
-        )
-
-    at_risk_rows.sort(key=lambda row: row["remaining_minutes"])
-    return at_risk_rows

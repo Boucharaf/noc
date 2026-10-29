@@ -276,7 +276,8 @@ export function Sparkline({ values, color = "var(--accent)", width = 80, height 
  * d'œil sans axe à décoder.
  */
 export function HourHeatmap({ data, color = "var(--sev-high)", height = 34 }) {
-  const byHour = new Map((data ?? []).map((row) => [row.hour, row.total_incidents]));
+  // Forme de GET /alerts/hour-distribution : { hour, count }.
+  const byHour = new Map((data ?? []).map((row) => [row.hour, row.count]));
   const values = Array.from({ length: 24 }, (_, hour) => byHour.get(hour) ?? 0);
   const max = Math.max(...values, 1);
 
@@ -287,7 +288,7 @@ export function HourHeatmap({ data, color = "var(--sev-high)", height = 34 }) {
           <div
             key={hour}
             className="flex-1 rounded-[2px]"
-            title={`${String(hour).padStart(2, "0")} h — ${value} incident${value > 1 ? "s" : ""}`}
+            title={`${String(hour).padStart(2, "0")} h — ${value} alerte${value > 1 ? "s" : ""}`}
             style={{
               background:
                 value === 0

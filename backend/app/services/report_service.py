@@ -7,13 +7,12 @@ pour l'occasion. Un chiffre imprimé et un chiffre affiché à l'écran qui
 divergent d'un point sont le meilleur moyen de faire perdre toute confiance
 dans les deux.
 
-CE QUE LE RAPPORT PEUT DIRE, ET CE QU'IL NE PEUT PLUS. Les agrégats
-journaliers (`kpi_daily`) donnent l'évolution, les moyennes et le classement
-des sites. Ils ne permettent PAS de lister les incidents d'un mois un par
-un : cet historique appartient aux outils sources, qui le conservent mieux
-que nous. Le rapport porte donc sur ce que le NOC mesure — sa disponibilité,
-ses délais, ses causes — et non sur un inventaire d'événements que Zabbix
-sait déjà produire.
+DEUX SOURCES. Les agrégats journaliers (`kpi_daily`) donnent la
+disponibilité du parc, ses moyennes et le classement des sites. Les tickets
+iTop du mois, lus à la demande comme sur l'écran SLA, donnent les volumes,
+les délais (MTTO, MTTR), le respect des engagements, les causes (code de
+résolution) et les dépassements. Si iTop ne répond pas, le rapport est
+quand même produit et le dit dans les sections concernées.
 
 C'est un rapport d'EXPLOITATION, pas un journal d'événements. La distinction
 est assumée, et elle est écrite dans le document lui-même.
@@ -27,7 +26,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.core.config import REPORT_ORGANISATION, REPORT_OUTPUT_DIR
-from app.services import kpi_service, sla_service
+from app.services import incident_service, kpi_service, live_service
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +40,49 @@ def month_label(month: int, year: int) -> str:
     return f"{MONTHS_FR[month - 1]} {year}"
 
 
-def collect_report_data(db: Session, month: int, year: int) -> dict:
+# Codes de résolution iTop (UserRequest / Incident ITIL), comme à l'écran
+# (frontend/src/lib/itop.js).
+RESOLUTION_CODES = {
+    "assistance": "Assistance",
+    "bug fixed": "Correction d'anomalie",
+    "hardware repair": "Réparation matérielle",
+    "other": "Autre",
+    "software patch": "Correctif logiciel",
+    "system update": "Mise à jour système",
+    "training": "Formation",
+}
+
+SEVERITY_LABELS = {
+    "critical": "Critique",
+    "high": "Majeure",
+    "medium": "Moyenne",
+    "low": "Mineure",
+    "info": "Information",
+    "unknown": "Inconnue",
+}
+
+
+async def collect_report_data(db: Session, month: int, year: int) -> dict:
     """Rassemble les données du rapport depuis les services du dashboard."""
     monthly = kpi_service.monthly_summary(db, year, month)
     period_start, period_end = kpi_service.month_bounds(year, month)
     start_at = datetime.combine(period_start, datetime.min.time(), tzinfo=timezone.utc)
     end_at = datetime.combine(period_end, datetime.min.time(), tzinfo=timezone.utc)
+
+    sla = incidents = None
+    itop_error = None
+    try:
+        sla = await incident_service.sla_by_group(
+            db, "region", start_at=start_at, end_at=end_at
+        )
+        incidents = await incident_service.incident_kpis(
+            db, start_at=start_at, end_at=end_at
+        )
+    except (incident_service.IncidentsUnavailable, live_service.SnapshotUnavailable) as exc:
+        # Le rapport reste produit : la disponibilité et les sites viennent
+        # de kpi_daily. Les sections iTop disent pourquoi elles sont vides.
+        logger.warning("Rapport %02d/%d : tickets iTop indisponibles (%s)", month, year, exc)
+        itop_error = "Tickets iTop indisponibles au moment de la génération."
 
     return {
         "organisation": REPORT_ORGANISATION,
@@ -59,17 +95,107 @@ def collect_report_data(db: Session, month: int, year: int) -> dict:
         "sites": kpi_service.sites_ranking(
             db, limit=15, start_at=period_start, end_at=period_end
         ),
-        "causes": kpi_service.causes(db, start_at=start_at, end_at=end_at),
-        "resolution": kpi_service.resolution_times(
-            db, start_at=start_at, end_at=end_at
-        ),
-        "sla": sla_service.compliance(
-            db, start_at=start_at, end_at=end_at
-        ),
-        "breaches": sla_service.breaches(
-            db, limit=15, start_at=start_at, end_at=end_at
-        ),
+        "sla": sla,
+        "incidents": incidents,
+        "itop_error": itop_error,
     }
+
+
+def _duration(minutes) -> str:
+    """Durée lisible : 47 min, 2 h 15, 3 j 4 h."""
+    if minutes is None:
+        return "—"
+    total = max(0, round(float(minutes)))
+    if total < 60:
+        return f"{total} min"
+    if total < 1440:
+        hours, rest = divmod(total, 60)
+        return f"{hours} h {rest:02d}" if rest else f"{hours} h"
+    days, rest = divmod(total, 1440)
+    hours = rest // 60
+    return f"{days} j {hours} h" if hours else f"{days} j"
+
+
+def _pct(value) -> str:
+    return "—" if value is None else f"{value:.1f} %"
+
+
+def incident_rows(data: dict) -> list[list[str]]:
+    """Section 2 : volumes et délais des tickets iTop du mois."""
+    totals = (data["sla"] or {}).get("totals") or {}
+    kpis = data["incidents"] or {}
+    return [
+        ["Incidents ouverts dans le mois", _fmt(kpis.get("total"))],
+        ["Incidents résolus", _fmt(kpis.get("resolved"))],
+        ["Taux de résolution", _pct(kpis.get("resolution_rate_pct"))],
+        ["Délai moyen de prise en charge (MTTO)", _duration(totals.get("mtto_minutes"))],
+        ["Délai moyen de résolution (MTTR)", _duration(totals.get("mttr_minutes"))],
+        ["Respect des SLA", _pct(totals.get("compliance_pct"))],
+        ["Incidents hors délai", _fmt(totals.get("breached"))],
+        [
+            f"Équipements récurrents (≥ {kpis.get('recurrent_threshold', 3)} tickets)",
+            _fmt(kpis.get("recurrent_nodes")),
+        ],
+        ["Incidents résolus sans cause identifiée", _pct(kpis.get("without_cause_pct"))],
+        ["Incidents rouverts", _fmt(kpis.get("reopened"))],
+    ]
+
+
+def severity_rows(data: dict) -> list[list[str]]:
+    """Section 3 : engagements par gravité."""
+    sla = data["sla"] or {}
+    targets = sla.get("targets") or {}
+    return [
+        [
+            SEVERITY_LABELS.get(row["severity"], row["severity"]),
+            _fmt(row.get("incidents")),
+            _duration(row.get("mtto_minutes")),
+            _duration(row.get("mttr_minutes")),
+            _duration((targets.get(row["severity"]) or {}).get("ttr")),
+            _pct(row.get("compliance_pct")),
+        ]
+        for row in sla.get("by_severity") or []
+    ]
+
+
+def cause_rows(data: dict) -> list[list[str]]:
+    """Section 5 : causes retenues à la clôture des tickets."""
+    return [
+        [RESOLUTION_CODES.get(row["cause"], row["cause"]), str(row["count"]), _pct(row["share_pct"])]
+        for row in (data["incidents"] or {}).get("causes") or []
+    ]
+
+
+def breach_rows(data: dict) -> list[list[str]]:
+    """Section 6 : les plus longs dépassements d'objectif."""
+    return [
+        [
+            row.get("ref") or "—",
+            row.get("node_name") or "—",
+            SEVERITY_LABELS.get(row["severity"], row["severity"]),
+            _duration(row["ttr_minutes"]) + (" (en cours)" if row.get("open") else ""),
+            _duration(row["target_minutes"]),
+            _duration(row["overrun_minutes"]),
+        ]
+        for row in (data["incidents"] or {}).get("breaches") or []
+    ]
+
+
+def _no_cause_note(data: dict) -> str:
+    if data["itop_error"]:
+        return data["itop_error"]
+    if not (data["incidents"] or {}).get("cause_available"):
+        return "L'instance iTop ne publie pas de code de résolution : causes non disponibles."
+    return "Aucune cause renseignée dans iTop sur les tickets résolus du mois."
+
+
+METHOD_NOTE = (
+    "Méthode : disponibilité et sites viennent des relevés de collecte du NOC "
+    "(moyennes journalières, maintenances planifiées exclues) ; incidents, "
+    "délais, causes et dépassements viennent des tickets iTop ouverts dans le "
+    "mois. Le détail événement par événement reste consultable dans les outils "
+    "de supervision et dans iTop, qui en sont les sources de référence."
+)
 
 
 def _ensure_output_dir() -> str:
@@ -100,10 +226,10 @@ def _fmt(value, suffix: str = "", default: str = "—") -> str:
 # ---------------------------------------------------------------------------
 # PDF
 # ---------------------------------------------------------------------------
-def generate_pdf(db: Session, month: int, year: int) -> str:
+def render_pdf(data: dict) -> str:
     from fpdf import FPDF
 
-    data = collect_report_data(db, month, year)
+    month, year = data["month"], data["year"]
 
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -181,30 +307,24 @@ def generate_pdf(db: Session, month: int, year: int) -> str:
         )
         pdf.set_font("Helvetica", "", 10)
 
-    # -- 2. Délais --------------------------------------------------------
-    _section("2. Délais de traitement")
-    resolution = data["resolution"]
-    _row([(110, "Délai moyen de prise en charge (MTTA)", "L"),
-          (60, _fmt(resolution.get("mtta_minutes"), " min"), "L")])
-    _row([(110, "Délai moyen de résolution (MTTR)", "L"),
-          (60, _fmt(resolution.get("mttr_minutes"), " min"), "L")])
-    _row([(110, "Alertes traitées par le NOC", "L"),
-          (60, _fmt(resolution.get("handled_alerts")), "L")])
+    # -- 2. Incidents -----------------------------------------------------
+    _section("2. Incidents iTop du mois")
+    if data["itop_error"]:
+        _line(data["itop_error"])
+    else:
+        for label, value in incident_rows(data):
+            _row([(120, label, "L"), (60, value, "L")])
 
     # -- 3. Respect des engagements ---------------------------------------
     _section("3. Respect des engagements de service")
-    _row([(30, "Gravité", "L"), (30, "Alertes", "R"), (35, "MTTA", "R"),
-          (35, "MTTR", "R"), (40, "Objectif MTTR", "R")], border=1)
-    for row in data["sla"]["by_severity"]:
-        _row(
-            [
-                (30, row["severity"], "L"),
-                (30, str(row["alerts"]), "R"),
-                (35, _fmt(row.get("mtta_minutes"), " min"), "R"),
-                (35, _fmt(row.get("mttr_minutes"), " min"), "R"),
-                (40, _fmt(row.get("ttr_target_minutes"), " min"), "R"),
-            ]
-        )
+    rows = severity_rows(data)
+    if rows:
+        _row([(30, "Gravité", "L"), (25, "Incidents", "R"), (30, "MTTO", "R"),
+              (30, "MTTR", "R"), (35, "Objectif MTTR", "R"), (30, "Respect", "R")], border=1)
+        for row in rows:
+            _row(list(zip((30, 25, 30, 30, 35, 30), row, ("L", "R", "R", "R", "R", "R"))))
+    else:
+        _line(data["itop_error"] or "Aucun incident iTop sur la période.")
 
     # -- 4. Sites ---------------------------------------------------------
     _section("4. Sites les plus affectés")
@@ -224,44 +344,30 @@ def generate_pdf(db: Session, month: int, year: int) -> str:
         _line("Aucune donnée par site sur la période.")
 
     # -- 5. Causes --------------------------------------------------------
-    _section("5. Causes retenues par les exploitants")
-    if data["causes"]:
-        for cause in data["causes"]:
-            _row([(120, cause["cause"], "L"),
-                  (30, str(cause["count"]), "R"),
-                  (30, f"{cause['share_pct']} %", "R")])
+    _section("5. Causes (code de résolution iTop)")
+    rows = cause_rows(data)
+    if rows:
+        for cause, count, share in rows:
+            _row([(120, cause, "L"), (30, count, "R"), (30, share, "R")])
     else:
-        _line(
-            "Aucune cause renseignée sur la période. La cause est saisie à la "
-            "clôture d'une alerte ; c'est la seule donnée d'analyse dont le "
-            "NOC est propriétaire."
-        )
+        _line(_no_cause_note(data))
 
     # -- 6. Dépassements --------------------------------------------------
     _section("6. Dépassements d'objectif")
-    if data["breaches"]:
-        for breach in data["breaches"]:
-            _line(
-                f"{breach['node_name'] or '—'} — {breach['severity']} — "
-                f"{breach['ttr_minutes']} min (objectif {breach['target_minutes']} min, "
-                f"dépassement {breach['overrun_minutes']} min)",
-                5,
-            )
+    rows = breach_rows(data)
+    if rows:
+        _row([(25, "Ticket", "L"), (55, "Équipement", "L"), (22, "Gravité", "L"),
+              (30, "Résolution", "R"), (28, "Objectif", "R"), (30, "Dépassement", "R")], border=1)
+        for row in rows:
+            _row(list(zip((25, 55, 22, 30, 28, 30), row, ("L", "L", "L", "R", "R", "R"))), 5)
     else:
-        _line("Aucun dépassement enregistré sur la période.")
+        _line(data["itop_error"] or "Aucun dépassement sur la période.")
 
     # -- Note de méthode --------------------------------------------------
     pdf.ln(4)
     pdf.set_font("Helvetica", "I", 8)
     pdf.set_text_color(110, 110, 110)
-    _line(
-        "Méthode : ce rapport porte sur ce que le NOC mesure — disponibilité "
-        "du parc, délais de traitement, causes retenues. Le détail événement "
-        "par événement reste consultable dans les outils de supervision "
-        "(Zabbix, Centreon) et dans l'ITSM (iTop), qui en sont les sources "
-        "de référence.",
-        4,
-    )
+    _line(METHOD_NOTE, 4)
     pdf.set_text_color(0, 0, 0)
 
     path = _filename(month, year, "pdf")
@@ -273,11 +379,11 @@ def generate_pdf(db: Session, month: int, year: int) -> str:
 # ---------------------------------------------------------------------------
 # DOCX
 # ---------------------------------------------------------------------------
-def generate_docx(db: Session, month: int, year: int) -> str:
+def render_docx(data: dict) -> str:
     from docx import Document
     from docx.shared import Pt
 
-    data = collect_report_data(db, month, year)
+    month, year = data["month"], data["year"]
     document = Document()
 
     document.add_heading(f"Rapport d'exploitation NOC — {data['period']}", level=0)
@@ -322,31 +428,18 @@ def generate_docx(db: Session, month: int, year: int) -> str:
         )
         warning.runs[0].italic = True
 
-    document.add_heading("2. Délais de traitement", level=1)
-    resolution = data["resolution"]
-    _table(
-        ["Indicateur", "Valeur"],
-        [
-            ["Délai moyen de prise en charge (MTTA)", _fmt(resolution.get("mtta_minutes"), " min")],
-            ["Délai moyen de résolution (MTTR)", _fmt(resolution.get("mttr_minutes"), " min")],
-            ["Alertes traitées par le NOC", _fmt(resolution.get("handled_alerts"))],
-        ],
-    )
+    document.add_heading("2. Incidents iTop du mois", level=1)
+    if data["itop_error"]:
+        document.add_paragraph(data["itop_error"])
+    else:
+        _table(["Indicateur", "Valeur"], incident_rows(data))
 
     document.add_heading("3. Respect des engagements de service", level=1)
-    _table(
-        ["Gravité", "Alertes", "MTTA", "MTTR", "Objectif MTTR"],
-        [
-            [
-                row["severity"],
-                row["alerts"],
-                _fmt(row.get("mtta_minutes"), " min"),
-                _fmt(row.get("mttr_minutes"), " min"),
-                _fmt(row.get("ttr_target_minutes"), " min"),
-            ]
-            for row in data["sla"]["by_severity"]
-        ],
-    )
+    rows = severity_rows(data)
+    if rows:
+        _table(["Gravité", "Incidents", "MTTO", "MTTR", "Objectif MTTR", "Respect"], rows)
+    else:
+        document.add_paragraph(data["itop_error"] or "Aucun incident iTop sur la période.")
 
     document.add_heading("4. Sites les plus affectés", level=1)
     if data["sites"]:
@@ -365,43 +458,21 @@ def generate_docx(db: Session, month: int, year: int) -> str:
     else:
         document.add_paragraph("Aucune donnée par site sur la période.")
 
-    document.add_heading("5. Causes retenues par les exploitants", level=1)
-    if data["causes"]:
-        _table(
-            ["Cause", "Occurrences", "Part"],
-            [[c["cause"], c["count"], f"{c['share_pct']} %"] for c in data["causes"]],
-        )
+    document.add_heading("5. Causes (code de résolution iTop)", level=1)
+    rows = cause_rows(data)
+    if rows:
+        _table(["Cause", "Occurrences", "Part"], rows)
     else:
-        document.add_paragraph(
-            "Aucune cause renseignée sur la période. La cause est saisie à la "
-            "clôture d'une alerte ; c'est la seule donnée d'analyse dont le NOC "
-            "est propriétaire."
-        )
+        document.add_paragraph(_no_cause_note(data))
 
     document.add_heading("6. Dépassements d'objectif", level=1)
-    if data["breaches"]:
-        _table(
-            ["Équipement", "Gravité", "MTTR", "Objectif", "Dépassement"],
-            [
-                [
-                    b["node_name"] or "—",
-                    b["severity"],
-                    f"{b['ttr_minutes']} min",
-                    f"{b['target_minutes']} min",
-                    f"{b['overrun_minutes']} min",
-                ]
-                for b in data["breaches"]
-            ],
-        )
+    rows = breach_rows(data)
+    if rows:
+        _table(["Ticket", "Équipement", "Gravité", "Résolution", "Objectif", "Dépassement"], rows)
     else:
-        document.add_paragraph("Aucun dépassement enregistré sur la période.")
+        document.add_paragraph(data["itop_error"] or "Aucun dépassement sur la période.")
 
-    note = document.add_paragraph(
-        "Méthode : ce rapport porte sur ce que le NOC mesure — disponibilité du "
-        "parc, délais de traitement, causes retenues. Le détail événement par "
-        "événement reste consultable dans les outils de supervision (Zabbix, "
-        "Centreon) et dans l'ITSM (iTop), qui en sont les sources de référence."
-    )
+    note = document.add_paragraph(METHOD_NOTE)
     note.runs[0].font.size = Pt(8)
     note.runs[0].italic = True
 
@@ -411,9 +482,8 @@ def generate_docx(db: Session, month: int, year: int) -> str:
     return path
 
 
-def generate(db: Session, month: int, year: int, output_format: str) -> str:
-    if output_format == "pdf":
-        return generate_pdf(db, month, year)
-    if output_format == "docx":
-        return generate_docx(db, month, year)
-    raise ValueError(f"Format inconnu : {output_format}")
+async def generate(db: Session, month: int, year: int, output_format: str) -> str:
+    if output_format not in ("pdf", "docx"):
+        raise ValueError(f"Format inconnu : {output_format}")
+    data = await collect_report_data(db, month, year)
+    return render_pdf(data) if output_format == "pdf" else render_docx(data)

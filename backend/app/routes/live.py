@@ -114,9 +114,15 @@ async def sites(
 
 
 @router.get("/organisations")
-async def organisations(current_user: User = Depends(get_current_user)):
+async def organisations(
+    scope: Scope,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Disponibilité par organisation (ministère, structure) du périmètre."""
     try:
-        return await live_service.summarise_organisations()
+        nodes, _alerts, _incidents = await geo_service.scoped(db, **scope)
+        return await live_service.summarise_organisations(nodes)
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
 
@@ -176,7 +182,7 @@ async def hour_distribution(
 async def list_alerts(
     severity: str | None = Query(None, pattern=_one_of(SEVERITIES)),
     kind: str | None = Query(
-        None, pattern="^(technical|itsm_ticket|manual_incident)$"
+        None, pattern="^(technical|itsm_ticket)$"
     ),
     tool: str | None = Query(None, max_length=100),
     region: str | None = Query(None, max_length=200),
@@ -188,12 +194,10 @@ async def list_alerts(
     acknowledged: bool | None = None,
     include_maintenance: bool = True,
     limit: int = Query(500, ge=1, le=5000),
-    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     try:
         return await alerts_service.list_alerts(
-            db,
             severity=severity,
             tool=tool,
             kind=kind,
@@ -214,21 +218,20 @@ async def list_alerts(
 @router.get("/alerts/{alert_key:path}")
 async def get_alert(
     alert_key: ResourceKey,
-    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Fiche d'une alerte.
+    """Fiche d'une alerte active.
 
     `:path` sur le paramètre parce qu'une clé d'alerte contient un
     deux-points (`zabbix:1042`) — sans lui, FastAPI n'accepterait que la
     partie avant le séparateur et la route serait introuvable.
     """
     try:
-        alert = await alerts_service.get_alert(db, alert_key)
+        alert = await alerts_service.get_alert(alert_key)
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
     if alert is None:
-        raise HTTPException(404, "Alerte inconnue.")
+        raise HTTPException(404, "Alerte inconnue ou close à la source.")
     return alert
 
 

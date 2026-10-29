@@ -68,6 +68,10 @@ _TICKET_FIELDS = (
     + ",urgency,impact,caller_id_friendlyname,agent_id_friendlyname,"
     "team_id_friendlyname,assignment_date,resolution_date,close_date"
 )
+# Code de résolution (UserRequest, et Incident sur la plupart des instances) :
+# la cause retenue à la clôture. Demandé à part pour qu'une classe qui ne le
+# porte pas garde quand même ses champs de prise en charge.
+_TICKET_FULL_FIELDS = _TICKET_FIELDS + ",resolution_code"
 _PAGE_SIZE = 500
 _MAX_PAGES = 200
 
@@ -315,7 +319,7 @@ class ITopClient(SourceClient):
         (« invalid attribute »). Le socle suffit à compter et rattacher les
         tickets ; la perte de détail est signalée, pas la classe entière.
         """
-        for fields in (_TICKET_FIELDS, _TICKET_MINIMAL_FIELDS):
+        for fields in (_TICKET_FULL_FIELDS, _TICKET_FIELDS, _TICKET_MINIMAL_FIELDS):
             if self.zbx_event_field:
                 fields = f"{fields},{self.zbx_event_field}"
             try:
@@ -333,7 +337,11 @@ class ITopClient(SourceClient):
                     self.collection_warnings.append(warning)
                     logger.warning("iTop : %s (%s)", warning, exc)
                     return None
-                if "invalid attribute" in str(exc).lower() and fields.startswith(_TICKET_FIELDS):
+                refused = "invalid attribute" in str(exc).lower()
+                if refused and fields.startswith(_TICKET_FULL_FIELDS):
+                    logger.info("iTop : tickets %s sans code de résolution (%s)", cls, exc)
+                    continue
+                if refused and fields.startswith(_TICKET_FIELDS):
                     warning = f"tickets {cls} : détails de prise en charge indisponibles"
                     self.collection_warnings.append(warning)
                     logger.info("iTop : %s (%s)", warning, exc)
@@ -380,6 +388,11 @@ class ITopClient(SourceClient):
             "resolution_date": sql_to_dt(f.get("resolution_date"), self.tz),
             "close_date": sql_to_dt(f.get("close_date"), self.tz),
             "last_update": sql_to_dt(f.get("last_update"), self.tz),
+            # None : la classe ne porte pas le champ ; "" : cause non saisie.
+            # La différence compte pour la part d'incidents sans cause.
+            "resolution_code": (
+                str(f["resolution_code"] or "") if "resolution_code" in f else None
+            ),
             "cis": cis,
             "zbx_event": f.get(self.zbx_event_field) if self.zbx_event_field else None,
         }

@@ -10,10 +10,17 @@ d'importance :
                clés expirent au bout de trois cycles et le tableau de bord
                s'éteint. Un backend « vivant » devant un instantané périmé
                est inutile, et la sonde doit le dire.
-  base       — les comptes et le travail d'exploitation. Sa perte empêche
-               de se connecter et d'acquitter, mais l'affichage temps réel
+  base       — les comptes, les objectifs SLA, le journal d'audit. Sa perte
+               empêche de se connecter, mais l'affichage temps réel
                continue de fonctionner : c'est une dégradation, pas une
                panne totale.
+
+Deux informations de plus, pour la supervision du NOC par Zabbix
+(monitoring/zabbix/) — jamais bloquantes :
+
+  sources        — outils sources en échec au dernier cycle ;
+  notifications  — envois en attente de nouvelle tentative, et envois
+                   abandonnés sur 24 h (personne n'a été prévenu).
 
 La distinction `degraded` / `error` suit cette hiérarchie, et c'est elle qui
 décide si le conteneur est retiré du répartiteur de charge.
@@ -26,7 +33,7 @@ from fastapi import APIRouter, Depends, Response
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.core.config import COLLECT_INTERVAL_S
+from app.core.config import COLLECT_INTERVAL_S, NOTIFICATIONS_ENABLED
 from app.db.redis_client import redis_sync
 from app.db.session import get_db
 from app.services import live_service
@@ -85,7 +92,7 @@ async def health(response: Response, db: Session = Depends(get_db)):
             text(
                 """
                 SELECT count(*) FROM information_schema.tables
-                WHERE table_name IN ('noc_user', 'ops_alert_state', 'kpi_daily')
+                WHERE table_name IN ('noc_user', 'ops_audit_log', 'kpi_daily')
                 """
             )
         ).scalar()
@@ -103,6 +110,46 @@ async def health(response: Response, db: Session = Depends(get_db)):
     except Exception as exc:  # noqa: BLE001
         logger.warning("Santé : base du NOC injoignable (%s)", exc)
         checks["database"] = {"status": "error", "detail": "Base du NOC injoignable."}
+
+    # -- Outils sources --------------------------------------------------
+    # Une source en panne ne rend pas le NOC inutilisable (ses dernières
+    # données restent affichées, marquées périmées) : « degraded », jamais
+    # « error ». Noms des outils seulement — leurs messages d'erreur, qui
+    # peuvent citer une adresse interne, restent sur l'écran Collecte ETL.
+    try:
+        meta = await live_service.get_meta()
+        failed = sorted(meta.get("tools_failed") or [])
+        checks["sources"] = {
+            "status": "degraded" if failed else "ok",
+            "ok": len(meta.get("tools_ok") or []),
+            "failed": len(failed),
+            "failed_tools": failed,
+        }
+    except live_service.SnapshotUnavailable:
+        checks["sources"] = {"status": "unknown", "detail": "Aucun instantané."}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Santé : état des sources illisible (%s)", exc)
+        checks["sources"] = {"status": "unknown", "detail": "État des sources illisible."}
+
+    # -- Notifications ----------------------------------------------------
+    # Un envoi abandonné (après toutes ses tentatives) est une alerte grave
+    # dont personne n'a été prévenu : la supervision du NOC doit le voir.
+    if NOTIFICATIONS_ENABLED:
+        try:
+            from app.services.notification_service import retry_status
+
+            status = retry_status()
+            checks["notifications"] = {
+                "status": "degraded" if status["abandoned_24h"] else "ok",
+                **status,
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Santé : file des notifications illisible (%s)", exc)
+            checks["notifications"] = {
+                "status": "unknown", "detail": "File des notifications illisible.",
+            }
+    else:
+        checks["notifications"] = {"status": "disabled"}
 
     if any(c.get("status") == "error" for c in checks.values()):
         overall = "error"

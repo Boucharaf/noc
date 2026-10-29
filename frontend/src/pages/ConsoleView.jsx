@@ -1,11 +1,10 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { PlusCircle } from "lucide-react";
 
 import AlertDrawer from "../components/domain/AlertDrawer";
 import IncidentTable from "../components/domain/IncidentTable";
-import ManualIncidentModal from "../components/domain/ManualIncidentModal";
 import NetworkVitals from "../components/domain/NetworkVitals";
+import SlaAtRisk from "../components/domain/SlaAtRisk";
 import { DashboardSummary } from "../components/domain/FleetInsights";
 import Panel from "../components/ui/Panel";
 import Stat from "../components/ui/Stat";
@@ -14,7 +13,6 @@ import { PageHeader } from "../components/layout/TopBar";
 import { Segmented } from "../components/ui/Controls";
 import { StateDot } from "../components/ui/Badge";
 import { ageFrom, num } from "../lib/format";
-import { PERMISSIONS } from "../lib/permissions";
 import { severityMeta } from "../lib/vocabulary";
 import {
   useAlertSummary,
@@ -23,7 +21,6 @@ import {
   useNodesDown,
   useOpenAlerts,
 } from "../hooks/queries";
-import { usePermission } from "../hooks/useSession";
 
 /**
  * Console d'exploitation — NIVEAU 3 du document métier
@@ -42,11 +39,9 @@ import { usePermission } from "../hooks/useSession";
  * exactement l'ordre de traitement, calculé par PostgreSQL.
  */
 export default function ConsoleView() {
-  const canCreateManual = usePermission(PERMISSIONS.CREATE_MANUAL_INCIDENT);
 
   const [queue, setQueue] = useState("todo");
   const [selectedId, setSelectedId] = useState(null);
-  const [manualOpen, setManualOpen] = useState(false);
 
   // Toutes les alertes techniques, acquittées ou non : les files se filtrent ici.
   const alertsQuery = useOpenAlerts({ limit: 150, acknowledged: undefined, kind: "technical" });
@@ -87,13 +82,6 @@ export default function ConsoleView() {
       <PageHeader
         title="Console d'exploitation"
         subtitle="Alertes en cours, file de traitement et état du réseau en direct"
-        actions={
-          canCreateManual && (
-            <button type="button" className="btn btn-sm" onClick={() => setManualOpen(true)}>
-              <PlusCircle size={13} /> Signaler une panne
-            </button>
-          )
-        }
       />
 
       <DashboardSummary />
@@ -198,6 +186,9 @@ export default function ConsoleView() {
 
         {/* --- Contexte --- */}
         <div className="space-y-2.5 min-w-0">
+          {/* En tête : les tickets à traiter avant qu'ils ne passent hors délai. */}
+          <SlaAtRisk limit={5} />
+
           <Panel
             title="Équipements hors service"
             accent="var(--state-down)"
@@ -290,7 +281,6 @@ export default function ConsoleView() {
         open={Boolean(selectedId)}
         onClose={() => setSelectedId(null)}
       />
-      <ManualIncidentModal open={manualOpen} onClose={() => setManualOpen(false)} />
     </div>
   );
 }

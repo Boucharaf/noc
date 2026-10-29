@@ -248,10 +248,45 @@ docker compose --profile itop up -d
 
 ## Ce qui n'est pas dans le laboratoire
 
-**Nokia NSP.** Son connecteur est écrit et câblé (`integrations/nsp.py`,
-variables `NSP_*` passées au collecteur et au backend) : renseigner
-`NSP_API_URL`, le compte et `NSP_FM_MODE` dans `.env` suffit à l'activer.
-Nokia ne distribue pas NSP publiquement, il n'existe donc aucun laboratoire.
+**Nokia NSP — un simulateur, pas un vrai NSP.** Nokia ne distribue pas NSP :
+aucune instance ne peut être montée. Un **simulateur** (`tools/nsp-sim`,
+profil `nsp`) répond aux requêtes du connecteur (`integrations/nsp.py`) dans
+les deux modes, pour voir des données NSP dans le NOC :
+
+```bash
+docker compose --profile nsp up -d --build nsp-sim
+# .env :
+#   NSP_API_URL=http://nsp-sim:8080
+#   NSP_API_USER=admin
+#   NSP_API_PASSWORD=NspLab!2026
+#   NSP_FM_MODE=yang            # ou classic : alarmes seules, sans inventaire
+docker compose up -d collector backend
+```
+
+* **Scénario** : `tools/nsp-sim/scenario.json`, relu à chaud quand il change.
+  Il contient 8 équipements du réseau de transport (1830 PSS, 7750 SR,
+  7705 SAR, Wavence), tous préfixés `LAB-`, et 5 alarmes, dont une
+  « cleared » que le NOC doit ignorer. `LAB-GAOUA-WAVENCE-01` tombe seul
+  15 minutes au début de chaque heure, avec son alarme (`flap`).
+* **Pilotage** (port local 8086, sans authentification) :
+
+  ```bash
+  curl http://localhost:8086/_sim/state                       # état courant
+  curl -X POST http://localhost:8086/_sim/alarms -H 'Content-Type: application/json' \
+       -d '{"ne_id":"LAB-NSP-7","severity":"critical","text":"Coupure fibre"}'
+  curl -X DELETE http://localhost:8086/_sim/alarms/<id>      # effacer
+  curl -X POST http://localhost:8086/_sim/ne/LAB-NSP-3/state -H 'Content-Type: application/json' \
+       -d '{"state":"down"}'
+  ```
+
+  Une alarme levée à la main disparaît au redémarrage du conteneur.
+* **Limite** : le simulateur a été écrit d'après ce que le connecteur
+  attend. Il montre comment le NOC affiche, fusionne et alerte sur des
+  données NSP ; il **ne prouve pas** que le connecteur fonctionne avec le NSP
+  de l'agence. Cette preuve vient du diagnostic sur l'instance réelle
+  (`python -m collector.probe nsp`, documentation chapitre 9).
+* Les équipements simulés n'ont ni site ni région : le connecteur NSP ne lit
+  aucune localité, ils sont comptés sous « Région non renseignée ».
 
 **Un serveur NetXMS.** Le connecteur API (`integrations/netxms.py`) reste
 dans le code, mais le laboratoire ne monte plus de serveur NetXMS : seule la

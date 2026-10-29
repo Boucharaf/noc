@@ -61,6 +61,26 @@ GRANT SELECT (id, node_id) ON public.interfaces TO noc_reader;
 -- Appartenance aux conteneurs NetXMS : aucune donnée sensible.
 GRANT SELECT ON public.container_members TO noc_reader;
 
+-- Fiche d'équipement (integrations/netxms_db.py, lectures complémentaires) :
+-- inventaire matériel, dernier démarrage, panne en cours ; disponibilité
+-- calculée par l'agence (attributs personnalisés) ; état et débit nominal des
+-- interfaces, et leurs drapeaux d'objet pour l'état attendu. Sans ces droits,
+-- le connecteur ignore ces lectures. Jamais : community, usm_*_password,
+-- secret, agent_cert_*, ssh_* — les colonnes secrètes de `nodes`.
+GRANT SELECT (boot_time, down_since, vendor, product_name, serial_number)
+    ON public.nodes TO noc_reader;
+-- Les attributs personnalisés peuvent porter n'importe quoi, y compris des
+-- identifiants : le compte ne lit que ceux de la disponibilité, par une vue,
+-- jamais la table (un droit par colonne ne filtre pas les lignes).
+CREATE OR REPLACE VIEW public.noc_availability_attributes AS
+SELECT object_id, attr_name, attr_value
+FROM public.object_custom_attributes
+WHERE attr_name IN ('perAvailability', 'mttr', 'mtbf', 'NumFailures',
+                    'TotalDowntime', 'TimeStamp');
+GRANT SELECT ON public.noc_availability_attributes TO noc_reader;
+GRANT SELECT (admin_state, oper_state, speed) ON public.interfaces TO noc_reader;
+GRANT SELECT (flags) ON public.object_properties TO noc_reader;
+
 -- Référentiel de sites PROPRE À L'AGENCE (colonne siteadmin_id ajoutée à
 -- object_properties, schéma donnebase). Accordé seulement s'il existe : ce
 -- fichier reste applicable à une base NetXMS standard.

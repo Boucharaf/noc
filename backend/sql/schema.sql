@@ -14,23 +14,16 @@
 --       équipement retiré de la supervision.
 --   L'extension timescaledb elle-même — plus rien ne l'utilise.
 --
--- CE QUI RESTE tient en une règle : on ne persiste QUE ce qu'aucun outil
--- source ne saurait nous redonner. Un technicien qui acquitte à 3 h 12
--- avec un commentaire produit une information qui n'existe nulle part
--- ailleurs ; la perdre serait irrattrapable.
+-- CE QUI RESTE tient en une règle : on ne persiste QUE ce que le NOC
+-- produit lui-même. Toutes les données affichées — équipements, alertes,
+-- incidents, maintenances, interventions — viennent des API des outils
+-- (Zabbix, Centreon, NetXMS, Nagios, NSP, iTop). La base porte les comptes,
+-- les objectifs SLA, le journal d'audit, la trace des notifications et les
+-- bilans journaliers de la collecte.
 --
--- LE CHANGEMENT DE CLÉ, à comprendre avant de lire la suite. L'ancien
--- schéma désignait un incident par `fact_incident.id`, un entier de SA
--- table. Cette table n'existe plus : une alerte est maintenant identifiée
--- par la clé que le collecteur lui donne, `<outil>:<référence>` — par
--- exemple `zabbix:1042`. De même pour un équipement, `<outil>:<réf>` de
--- l'outil qui a servi de pivot à la fusion. Toutes les colonnes de liaison
--- sont donc du TEXTE et non des entiers, et il n'y a PAS de clé étrangère
--- vers l'objet désigné : celui-ci vit dans Redis, ou chez l'outil source.
---
--- Conséquence assumée : une note peut survivre à l'alerte qu'elle
--- commente. C'est voulu — l'historique d'exploitation du NOC doit
--- persister même quand Zabbix a purgé l'événement d'origine.
+-- Ce fichier se rejoue sans danger sur une base en service, et c'est ainsi
+-- qu'on la met à jour :
+--   docker compose exec -T postgres psql -U noc -d noc < backend/sql/schema.sql
 
 -- ---------------------------------------------------------------------
 -- Comptes
@@ -68,91 +61,11 @@ CREATE TABLE IF NOT EXISTS noc_user (
 
 -- Colonnes apparues après la première mise en service. CREATE TABLE IF NOT
 -- EXISTS ne modifie pas une table existante : sans ces ALTER, une base créée
--- avant leur ajout resterait sans elles. Ce fichier se rejoue donc sans
--- danger sur une base en service, et c'est ainsi qu'on la met à jour :
---   docker compose exec -T postgres psql -U noc -d noc < backend/sql/schema.sql
+-- avant leur ajout resterait sans elles.
 ALTER TABLE noc_user ADD COLUMN IF NOT EXISTS email TEXT;
 ALTER TABLE noc_user ADD COLUMN IF NOT EXISTS notify_email BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE INDEX IF NOT EXISTS idx_noc_user_role ON noc_user(role) WHERE is_active;
-
--- ---------------------------------------------------------------------
--- Travail du NOC sur une alerte
--- ---------------------------------------------------------------------
--- Une ligne par alerte que le NOC a touchée. Les alertes jamais touchées
--- n'ont PAS de ligne ici : la table ne double pas l'instantané Redis,
--- elle ne porte que la valeur ajoutée humaine.
-CREATE TABLE IF NOT EXISTS ops_alert_state (
-    alert_key            TEXT PRIMARY KEY,
-    -- Recopiés au moment de la prise en charge pour que la fiche reste
-    -- lisible quand l'alerte a disparu de l'instantané. C'est la SEULE
-    -- duplication tolérée, et elle est figée : on ne la rafraîchit jamais.
-    node_key             TEXT,
-    node_name            TEXT,
-    severity_at_pickup   TEXT,
-    message_at_pickup    TEXT,
-    detected_at          TIMESTAMPTZ,
-
-    acknowledged_by      INTEGER REFERENCES noc_user(id) ON DELETE SET NULL,
-    acknowledged_at      TIMESTAMPTZ,
-    assigned_to          INTEGER REFERENCES noc_user(id) ON DELETE SET NULL,
-    assigned_at          TIMESTAMPTZ,
-    escalation_level     INTEGER NOT NULL DEFAULT 0,
-    escalated_at         TIMESTAMPTZ,
-    -- Cause retenue par l'exploitant. Aucun outil ne la connaît : c'est un
-    -- diagnostic humain, et c'est la donnée la plus précieuse de ce schéma.
-    cause                TEXT,
-    resolution_note      TEXT,
-    resolved_at          TIMESTAMPTZ,
-    -- Ticket ITSM ouvert depuis le NOC, quand il l'a été.
-    ticket_ref           TEXT,
-    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_ops_alert_state_assigned
-    ON ops_alert_state(assigned_to) WHERE resolved_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_ops_alert_state_detected
-    ON ops_alert_state(detected_at DESC);
-
--- Journal des actions. Séparé de l'état ci-dessus parce que l'état répond
--- à « où en est-on ? » et le journal à « que s'est-il passé ? » — deux
--- questions distinctes, l'une écrasée à chaque changement, l'autre jamais.
-CREATE TABLE IF NOT EXISTS ops_alert_timeline (
-    id          SERIAL PRIMARY KEY,
-    alert_key   TEXT NOT NULL,
-    user_id     INTEGER REFERENCES noc_user(id) ON DELETE SET NULL,
-    action      TEXT NOT NULL,
-    note        TEXT,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_ops_timeline_alert
-    ON ops_alert_timeline(alert_key, created_at DESC);
-
--- ---------------------------------------------------------------------
--- Incidents signalés à la main
--- ---------------------------------------------------------------------
--- Un agent de terrain constate une coupure qu'aucune sonde ne voit
--- (câble sectionné sur un site sans supervision, groupe électrogène en
--- panne). Ces incidents n'ont pas d'outil source : ils vivent ici, et le
--- backend les fusionne avec les alertes de l'instantané au moment de
--- servir le mur d'alertes.
-CREATE TABLE IF NOT EXISTS ops_manual_incident (
-    id              SERIAL PRIMARY KEY,
-    node_key        TEXT,
-    node_name       TEXT,
-    site            TEXT,
-    severity        TEXT NOT NULL DEFAULT 'medium',
-    title           TEXT NOT NULL,
-    description     TEXT,
-    detected_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    resolved_at     TIMESTAMPTZ,
-    created_by      INTEGER REFERENCES noc_user(id) ON DELETE SET NULL,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_ops_manual_open
-    ON ops_manual_incident(detected_at DESC) WHERE resolved_at IS NULL;
 
 -- ---------------------------------------------------------------------
 -- Engagements de service
@@ -177,57 +90,6 @@ VALUES
     ('medium',   120, 1440, 99.0),
     ('low',      480, 4320, 98.0)
 ON CONFLICT (severity) DO NOTHING;
-
--- ---------------------------------------------------------------------
--- Maintenances planifiées
--- ---------------------------------------------------------------------
--- Les alertes qui tombent dans une fenêtre active sont marquées comme
--- telles et exclues des indicateurs : une coupure voulue n'est pas une
--- panne, et la compter fausse à la fois le volume d'incidents et le SLA.
-CREATE TABLE IF NOT EXISTS ops_maintenance_window (
-    id              SERIAL PRIMARY KEY,
-    node_key        TEXT,
-    site            TEXT,
-    reason          TEXT NOT NULL,
-    starts_at       TIMESTAMPTZ NOT NULL,
-    ends_at         TIMESTAMPTZ NOT NULL,
-    suppress_alerts BOOLEAN NOT NULL DEFAULT TRUE,
-    created_by      INTEGER REFERENCES noc_user(id) ON DELETE SET NULL,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    -- Une fenêtre doit couvrir un équipement OU un site, jamais ni l'un ni
-    -- l'autre : sans cette contrainte, une fenêtre vide s'appliquerait à
-    -- tout le parc et éteindrait la supervision entière.
-    CONSTRAINT ops_maintenance_scope
-        CHECK (node_key IS NOT NULL OR site IS NOT NULL),
-    CONSTRAINT ops_maintenance_period CHECK (ends_at > starts_at)
-);
-
-CREATE INDEX IF NOT EXISTS idx_ops_maintenance_active
-    ON ops_maintenance_window(starts_at, ends_at);
-
--- ---------------------------------------------------------------------
--- Interventions de terrain
--- ---------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS ops_field_intervention (
-    id                  SERIAL PRIMARY KEY,
-    alert_key           TEXT,
-    node_key            TEXT NOT NULL,
-    node_name           TEXT,
-    agent_user_id       INTEGER NOT NULL REFERENCES noc_user(id) ON DELETE CASCADE,
-    status              TEXT NOT NULL DEFAULT 'scheduled',
-    scheduled_at        TIMESTAMPTZ,
-    started_at          TIMESTAMPTZ,
-    completed_at        TIMESTAMPTZ,
-    -- Position relevée au pointage, pour attester la présence sur site.
-    checkin_latitude    DOUBLE PRECISION,
-    checkin_longitude   DOUBLE PRECISION,
-    report_text         TEXT,
-    photo_urls          JSONB NOT NULL DEFAULT '[]'::jsonb,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_ops_field_agent
-    ON ops_field_intervention(agent_user_id, status);
 
 -- ---------------------------------------------------------------------
 -- Notifications
@@ -264,6 +126,34 @@ CREATE TABLE IF NOT EXISTS ops_alert_notified (
     notified_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Envois échoués en attente d'une nouvelle tentative (serveur SMTP ou
+-- passerelle SMS indisponible). ops_alert_notified décide QUI envoie ; cette
+-- table garde ce qui n'est pas parti. Un backend prend une ligne échue
+-- avec FOR UPDATE SKIP LOCKED : deux backends ne retentent jamais le même
+-- envoi. Courriel : destinataires relus à chaque tentative ; SMS : seuls
+-- les numéros encore en échec sont gardés.
+CREATE TABLE IF NOT EXISTS ops_notification_retry (
+    id              SERIAL PRIMARY KEY,
+    alert_key       TEXT NOT NULL,
+    channel         TEXT NOT NULL CHECK (channel IN ('email', 'sms')),
+    subject         TEXT,
+    text_body       TEXT NOT NULL,
+    html_body       TEXT,
+    site            TEXT,
+    recipients      TEXT,
+    attempts        INTEGER NOT NULL DEFAULT 1,
+    status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'sent', 'abandoned')),
+    last_error      TEXT,
+    next_attempt_at TIMESTAMPTZ NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (alert_key, channel)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ops_notification_retry_due
+    ON ops_notification_retry(status, next_attempt_at);
+
 -- ---------------------------------------------------------------------
 -- Journal d'audit
 -- ---------------------------------------------------------------------
@@ -279,6 +169,10 @@ CREATE TABLE IF NOT EXISTS ops_audit_log (
 
 CREATE INDEX IF NOT EXISTS idx_ops_audit_created
     ON ops_audit_log(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ops_audit_user
+    ON ops_audit_log(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ops_audit_action
+    ON ops_audit_log(action, created_at DESC);
 
 -- ---------------------------------------------------------------------
 -- Agrégats journaliers
@@ -324,3 +218,84 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_kpi_daily_day_site
 
 CREATE INDEX IF NOT EXISTS idx_kpi_daily_site
     ON kpi_daily(site, day DESC);
+
+-- ---------------------------------------------------------------------
+-- Journal historique (collector/history.py)
+-- ---------------------------------------------------------------------
+-- La seule exception, assumée, à « ne rien recopier » : non pas les
+-- mesures, mais les CHANGEMENTS d'état. Une ligne par période d'état d'un
+-- équipement ou d'un lien, une ligne par alerte (ouverture, fermeture).
+-- Quelques Mo par mois. C'est ce qui donne la disponibilité par équipement
+-- et par lien sur la durée, le MTTR technique, et le recalcul des bilans
+-- journaliers manquants.
+--
+-- Une période ouverte a ended_at NULL. last_seen_at est la dernière
+-- observation : au-delà de trois cycles sans observation (collecteur
+-- arrêté, outil muet), la période est close à sa dernière observation et le
+-- temps qui suit est compté « non observé », jamais « disponible ».
+CREATE TABLE IF NOT EXISTS hist_state (
+    id              BIGSERIAL PRIMARY KEY,
+    subject_kind    TEXT NOT NULL CHECK (subject_kind IN ('node', 'link')),
+    subject_id      TEXT NOT NULL,
+    node_id         TEXT NOT NULL,
+    name            TEXT,
+    site            TEXT,
+    province        TEXT,
+    region          TEXT,
+    tools           TEXT,
+    state           TEXT NOT NULL,
+    measured_state  TEXT,
+    started_at      TIMESTAMPTZ NOT NULL,
+    ended_at        TIMESTAMPTZ,
+    last_seen_at    TIMESTAMPTZ NOT NULL
+);
+
+-- Une seule période ouverte par sujet : deux collecteurs lancés par erreur
+-- ne peuvent pas ouvrir deux périodes concurrentes.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hist_state_open
+    ON hist_state(subject_id) WHERE ended_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_hist_state_subject
+    ON hist_state(subject_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_hist_state_node
+    ON hist_state(node_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_hist_state_window
+    ON hist_state(subject_kind, started_at, ended_at);
+
+CREATE TABLE IF NOT EXISTS hist_alert (
+    id              BIGSERIAL PRIMARY KEY,
+    alert_key       TEXT NOT NULL,
+    tool            TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    node_id         TEXT,
+    node_name       TEXT,
+    site            TEXT,
+    province        TEXT,
+    region          TEXT,
+    severity        TEXT NOT NULL,
+    message         TEXT,
+    opened_at       TIMESTAMPTZ NOT NULL,
+    first_seen_at   TIMESTAMPTZ NOT NULL,
+    last_seen_at    TIMESTAMPTZ NOT NULL,
+    closed_at       TIMESTAMPTZ
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hist_alert_open
+    ON hist_alert(alert_key) WHERE closed_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_hist_alert_node
+    ON hist_alert(node_id, opened_at DESC);
+CREATE INDEX IF NOT EXISTS idx_hist_alert_window
+    ON hist_alert(opened_at, closed_at);
+
+-- ---------------------------------------------------------------------
+-- Tables retirées
+-- ---------------------------------------------------------------------
+-- Toutes les données d'exploitation viennent désormais des outils : les
+-- alertes s'acquittent et se résolvent dans l'outil ou dans iTop, les
+-- incidents ne se signalent plus à la main, maintenances et interventions
+-- se lisent dans iTop et Zabbix. Supprimées ici pour qu'une base existante
+-- soit mise à jour en rejouant ce fichier (migration 0004 pour Alembic).
+DROP TABLE IF EXISTS ops_alert_timeline;
+DROP TABLE IF EXISTS ops_alert_state;
+DROP TABLE IF EXISTS ops_manual_incident;
+DROP TABLE IF EXISTS ops_maintenance_window;
+DROP TABLE IF EXISTS ops_field_intervention;

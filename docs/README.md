@@ -17,13 +17,15 @@ Pour **installer et lancer** la plateforme, voir le
 | 1 | [Comprendre le projet](01-comprendre-le-projet.md) | À quoi sert la plateforme, pour qui, et avec quel vocabulaire ? |
 | 2 | [Architecture](02-architecture.md) | Quels sont les composants, et comment circule une donnée ? |
 | 3 | [Organisation du code](03-organisation-du-code.md) | Où se trouve quoi dans le dépôt, et où modifier pour faire X ? |
-| 4 | [Sources de données](04-sources-de-donnees.md) | Comment la plateforme lit Zabbix, Centreon, iTop, NetXMS… et fusionne leurs équipements ? |
+| 4 | [Sources de données](04-sources-de-donnees.md) | Comment la plateforme lit Zabbix, Centreon, iTop, NetXMS… par leurs API, fusionne leurs équipements, et comment visualiser en local les exports de production ? |
 | 5 | [Comptes, rôles et sécurité](05-comptes-roles-securite.md) | Qui a le droit de faire quoi, et comment l'accès est protégé ? |
-| 6 | [Alertes et notifications](06-alertes-et-notifications.md) | Quand et comment un incident est-il signalé par courriel ou SMS ? |
+| 6 | [Alertes et notifications](06-alertes-et-notifications.md) | Quand et comment une alerte grave est-elle signalée par courriel, SMS ou notification navigateur ? |
 | 7 | [Backend (API)](07-backend.md) | Comment est construite l'API, quelles routes, quelle base de données ? |
 | 8 | [Frontend (interface)](08-frontend.md) | Comment est construite l'interface, et comment ajouter un écran ? |
 | 9 | [Exploitation et dépannage](09-exploitation.md) | Comment faire tourner, surveiller, sauvegarder et réparer la plateforme ? |
 | 10 | [État du projet](10-etat-du-projet.md) | Qu'est-ce qui marche, qu'est-ce qui reste à faire, quelles limites connaître ? |
+| 11 | [Données et indicateurs](11-donnees-et-indicateurs.md) | D'où vient chaque chiffre affiché, quand change-t-il, comment est-il calculé ? |
+| 12 | [Reprendre le projet](12-reprise-du-projet.md) | Une nouvelle équipe arrive : quoi récupérer, comment démarrer, quels pièges éviter ? |
 
 Deux documents historiques restent à la racine et sont cités par les
 chapitres : [ARCHITECTURE.md](../ARCHITECTURE.md) (le raisonnement complet
@@ -33,6 +35,9 @@ de laboratoire).
 ---
 
 ## Par où commencer ?
+
+**Vous reprenez le projet (nouvelle équipe)** : 12, qui donne l'ordre de
+lecture de tous les autres chapitres.
 
 **Vous découvrez le projet (tout profil)** — 30 minutes :
 1 → 2 → 10. Vous saurez ce que fait la plateforme, comment elle tient
@@ -44,7 +49,9 @@ outils de supervision. Lire le chapitre 10 avant de commencer : il liste les
 pièges et la dette technique.
 
 **Vous allez exploiter la plateforme (installation, supervision, support)** :
-le [README](../README.md), puis 9 → 5 → 6.
+le [README](../README.md), puis 9 → 11 → 5 → 6.
+
+**Un utilisateur demande « pourquoi ce chiffre ? »** : 11.
 
 **Vous devez présenter le projet à l'agence ou à l'équipe sécurité** :
 1 → 2 (section « Principes ») → 5 → 4 (section « Garanties envers la

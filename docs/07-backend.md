@@ -30,10 +30,14 @@ Les routes sont séparées selon ce qu'elles touchent :
 
 - `live.py` — **lecture de l'instantané Redis** : rapide, sans écriture, sans
   appel sortant (sauf les courbes, qui interrogent l'outil source) ;
-- `operations.py` — **écriture dans PostgreSQL** : acquittements, maintenances,
-  SLA, et lecture des agrégats journaliers ;
-- les autres (`auth`, `users`, `field`, `notifications`, `report`, `ws`,
-  `health`) ont chacune une contrainte propre.
+- `territory.py` — **périmètre territorial et incidents iTop** : découpage
+  région → province → site, incidents, SLA et indicateurs d'incidents (ces
+  derniers interrogent iTop, avec cache) ;
+- `operations.py` — maintenances et interventions (lues dans l'instantané),
+  **objectifs SLA** (seule écriture métier en base) et agrégats journaliers ;
+- `audit.py` — lecture du journal d'audit ;
+- les autres (`auth`, `users`, `notifications`, `report`, `ws`, `health`) ont
+  chacune une contrainte propre.
 
 ## Les routes
 
@@ -65,35 +69,49 @@ elle est fermée par défaut.
 |---|---|---|
 | GET | `/overview` | Tuiles de synthèse : parc, alertes, sites touchés |
 | GET | `/sites` | Synthèse par site |
-| GET | `/alerts` | Alertes actives (filtres : `severity`, `tool`, `site`, `acknowledged`, `include_maintenance`, `limit`) |
-| GET | `/alerts/{clé}` | Détail d'une alerte et son journal d'actions |
-| GET | `/alerts/by-severity`, `/alerts/by-tool`, `/alerts/hour-distribution` | Répartitions |
+| GET | `/alerts` | Alertes actives (filtres : `severity`, `tool`, `kind`, `site`, `acknowledged`, `include_maintenance`, `search`, `limit`) |
+| GET | `/alerts/{clé}` | Détail d'une alerte : contexte de l'outil (tags, donnée opérationnelle, commentaires…), équipement concerné |
+| GET | `/alerts/by-severity`, `/alerts/by-tool`, `/alerts/ages`, `/alerts/hour-distribution` | Répartitions |
 | GET | `/nodes` | Équipements (filtres : `state`, `site`, `tool`, `search`, `sort`, `limit`, `offset`) |
-| GET | `/nodes/{id}` | Fiche d'un équipement |
+| GET | `/nodes/{id}` | Fiche d'un équipement : sources, état chez chaque outil, faits de fiche (`details` : inventaire, interfaces, disponibilité de l'agence), panne en cours, dernier démarrage, maintenances et interventions |
 | GET | `/nodes/{id}/metrics` | Courbe d'un équipement — **interroge l'outil source** |
+| GET | `/nodes/{id}/metrics-latest` | Dernières mesures d'un équipement |
 | GET | `/nodes/states`, `/nodes/coverage` | Comptes par état, couverture par outil |
-| GET | `/network/snapshot`, `/network/down`, `/network/top` | Indicateurs réseau |
+| GET | `/network/snapshot`, `/network/down`, `/network/top` | Indicateurs réseau ; l'instantané donne aussi `links` (interfaces actives, liens surveillés, capacité) et `agency_availability` (disponibilité calculée par l'agence dans NetXMS) quand une source les publie |
 | GET | `/network/series` | Courbe agrégée sur un échantillon d'équipements — **interroge les outils** |
-| GET | `/interop/status`, `/interop/merge` | Santé de la collecte, rapport de fusion |
+| GET | `/interop/status`, `/interop/merge` | Santé de la collecte, rapport de fusion (dont équipements vus par un seul outil et échantillon des alertes sans équipement) |
 
 Toutes les clés d'alerte (`netxms:5647364`) et d'équipement contiennent un
 deux-points : elles doivent être encodées dans les URL.
 
-### Exploitation (PostgreSQL)
+### Exploitation
+
+Le NOC ne crée, n'acquitte ni ne résout aucune alerte ni aucun incident :
+toutes ses données viennent des API des outils. Il n'écrit en base que ses
+paramètres (objectifs SLA), ses comptes et son journal d'audit.
 
 | Méthode | Route | Rôle requis |
 |---|---|---|
-| POST | `/alerts/{clé}/acknowledge`, `/assign`, `/resolve` | directeur, chef NOC, technicien |
-| POST | `/alerts/{clé}/note` | tous |
-| POST | `/manual-incidents`, `/manual-incidents/{id}/resolve` | tous |
 | GET | `/maintenance` | Maintenances planifiées (changements iTop, maintenances Zabbix) — lecture seule ; filtres `scope`, `region`, `province`, `site`, `search` |
 | GET / PUT | `/sla/targets` | lecture : tous ; écriture : directeur, chef NOC |
-| GET | `/sla/compliance`, `/sla/breaches`, `/sla/at-risk` | tous |
-| GET | `/kpi/trend`, `/kpi/monthly`, `/kpi/sites`, `/kpi/causes`, `/kpi/resolution-times` | tous |
+| GET | `/geo/options`, `/geo/breakdown`, `/geo/sites/{site}` | Découpage territorial, ventilation par niveau, fiche d'un site |
+| GET | `/incidents` | Tickets iTop ouverts du périmètre, avec leur SLA |
+| GET | `/incidents/history` | Tickets iTop de la période, clos ou non, paginés ; ⚠️ interroge iTop |
+| GET | `/incidents/{clé}` | Fiche d'incident : ticket, événement Zabbix d'origine, état de l'équipement chez chaque outil, alertes liées |
+| GET | `/sla/incidents` | Respect des SLA par région, province, site ou équipement ; ⚠️ interroge iTop |
+| GET | `/sla/contract` | Engagements contractuels (SLT) déclarés dans iTop, en minutes par gravité ; ⚠️ interroge iTop (cache 5 min) |
+| GET | `/sla/at-risk` | Incidents iTop ouverts hors délai ou à moins de 25 % de leur délai de résolution ; filtres `region`, `province`, `site` |
+| GET | `/kpi/incidents?days=` | Indicateurs des tickets iTop de la période : volumes, taux de résolution, équipements récurrents (≥ 3 tickets), causes (code de résolution iTop), part sans cause, réouverts, sites et organisations ; ⚠️ interroge iTop |
+| GET | `/kpi/trend`, `/kpi/monthly`, `/kpi/sites` | tous |
+| GET | `/organisations` | Disponibilité par organisation (ministère, structure) du périmètre |
 | GET | `/interventions` | Ordres de travail iTop — lecture seule ; filtres `status`, `region`, `province`, `site`, `search` |
 | GET | `/trend/live` | Historique court du périmètre (24 h, un point par cycle de collecte : disponibilité, équipements HS, alertes, incidents) — mini-courbes des tuiles |
 | GET | `/search/suggest` | Suggestions des barres de recherche (`q`, `kinds`, `limit`), lues dans l'instantané |
-| GET | `/report/monthly?month=&year=&format=pdf\|docx` | directeur, chef NOC |
+| GET | `/report/monthly?month=&year=&format=pdf\|docx` | directeur, chef NOC — disponibilité et sites (`kpi_daily`), incidents, délais, causes et dépassements (tickets iTop du mois) |
+| GET | `/history/nodes/{id}?days=` | Disponibilité d'un équipement et de ses liens sur la période, pannes, MTTR, MTBF, frise des états, alertes ; `available: false` si le journal n'existe pas |
+| GET | `/history/ranking?kind=node\|link&days=&limit=` | Équipements ou liens les moins disponibles sur la période, dans le périmètre (`region`, `province`, `site`) |
+| GET | `/history/status` | Profondeur du journal : depuis quand, combien d'équipements, de liens, d'alertes |
+| GET | `/audit?action=&user_id=&limit=&offset=` | directeur, chef NOC — journal d'audit, du plus récent au plus ancien |
 
 ### Notifications, santé, temps réel
 
@@ -103,7 +121,7 @@ deux-points : elles doivent être encodées dans les URL.
 | POST / DELETE | `/notifications/subscribe` | Abonnement navigateur |
 | GET | `/notifications/email/status` | Chaîne courriel (chef NOC) |
 | POST | `/notifications/email/test` | Courriel de test (chef NOC) |
-| GET | `/health` | Santé : Redis, collecteur, base |
+| GET | `/health` | Santé : Redis, collecteur, base ; outils sources en échec et file des notifications (informatif). Publique, 503 si une dépendance est en erreur |
 | GET | `/health/live` | Le processus répond (utilisé par Docker) |
 | WS | `/ws/alerts` | Flux des nouvelles alertes (authentification par première trame) |
 
@@ -114,30 +132,32 @@ base en service (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE … ADD COLUMN IF
 NOT EXISTS`) : c'est ainsi qu'on met à jour la base. Il est appliqué
 automatiquement au premier démarrage d'un volume vide.
 
-`schema.sql` est le chemin de migration faisant autorité; il n'y a pas de
-chaîne Alembic à exécuter dans l'image. L'index unique d'expression de
+`schema.sql` est le chemin de migration faisant autorité : l'image ne lance
+aucune migration. Les révisions Alembic de `backend/migrations/versions`
+(jusqu'à `0004`, suppression des tables qui n'étaient plus alimentées)
+existent pour qui préfère cet outil ; elles mènent au même schéma.
+**Rejouer `schema.sql` supprime les tables `ops_alert_state`,
+`ops_alert_timeline`, `ops_manual_incident`, `ops_maintenance_window` et
+`ops_field_intervention`, avec leur contenu.** L'index unique d'expression de
 `kpi_daily` représente le site global par `COALESCE(site, '')`, car la clé de
 ce total contient volontairement `site=NULL`.
 
-Les liens vers une alerte ou un équipement sont des **clés texte**
-(`netxms:5647364`), sans clé étrangère : l'objet désigné vit dans Redis ou chez
-l'outil source. Une note peut donc survivre à l'alerte qu'elle commente, et
-c'est voulu.
+La base ne contient que ce que le NOC produit lui-même. Équipements,
+alertes, incidents, maintenances et interventions vivent dans Redis
+(instantané) et chez les outils sources.
 
 | Table | Contenu |
 |---|---|
 | `noc_user` | Comptes : identifiant, nom, rôle, empreintes du mot de passe et du PIN, courriel, abonnement aux alertes, rattachement |
-| `ops_alert_state` | Le travail du NOC sur une alerte : acquittement, affectation, escalade, cause, résolution. Une ligne seulement pour les alertes touchées. |
-| `ops_alert_timeline` | Journal des actions sur les alertes (jamais écrasé) |
-| `ops_manual_incident` | Incidents signalés à la main |
-| `ops_maintenance_window` | **Plus utilisée** (maintenances lues dans iTop/Zabbix) — conservée le temps d'exporter son contenu |
 | `ops_sla_target` | Délais cibles TTA/TTR par gravité ; la disponibilité réseau n'est pas une cible SLA configurable |
-| `ops_field_intervention` | **Plus utilisée** (interventions = ordres de travail iTop) — conservée le temps d'exporter son contenu |
 | `ops_push_subscription` | Abonnements aux notifications navigateur |
 | `ops_notification_log` | Journal des envois (courriel, SMS) |
 | `ops_alert_notified` | Verrou anti-doublon des notifications |
-| `ops_audit_log` | Journal d'audit |
-| `kpi_daily` | Bilan journalier par site (écrit par le collecteur) |
+| `ops_notification_retry` | Envois échoués en attente d'une nouvelle tentative (courriel, SMS), puis envoyés ou abandonnés |
+| `ops_audit_log` | Journal d'audit : connexions (réussies et refusées), comptes créés, modifiés, désactivés, mots de passe et PIN fixés, sessions coupées, objectifs SLA modifiés — auteur, cible, détail (jamais de secret), adresse IP |
+| `kpi_daily` | Bilan journalier par site (écrit par le collecteur, rattrapé depuis le journal) |
+| `hist_state` | Journal : périodes d'état de chaque équipement et de chaque lien surveillé (écrit par le collecteur) |
+| `hist_alert` | Journal : chaque alerte et chaque ticket iTop, de l'ouverture à la fermeture (écrit par le collecteur) |
 
 ## Développer sur le backend
 
@@ -181,5 +201,16 @@ export PYTHONPATH=..  NOC_DATABASE_URL=postgresql://noc:<mot de passe>@localhost
 uvicorn app.main:app --reload --port 8000
 ```
 
-> Les tests de `backend/tests/` visent l'ancienne architecture et ne
-> fonctionnent plus (voir [chapitre 10](10-etat-du-projet.md)).
+### Tests
+
+Les tests de `backend/tests/` n'utilisent ni base ni Redis réels : sources et
+instantané sont remplacés par des doublures (`tests/fakes.py` pour le
+collecteur). Ils se lancent depuis `backend/`, dans l'environnement virtuel
+ci-dessus (`requirements-dev.txt`) :
+
+```bash
+PYTHONPATH=.. python -m pytest -q tests      # PYTHONPATH="..;." sous Windows
+```
+
+`test_integration.py` est à part : il écrit dans une base et refuse de
+s'exécuter sans `NOC_TEST_DATABASE_URL` vers une base dédiée (`*_test`).

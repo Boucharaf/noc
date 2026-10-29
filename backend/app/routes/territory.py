@@ -5,6 +5,9 @@ Routes territoriales et incidents.
   /api/incidents*   incidents iTop, enrichis par les alertes des outils
   /api/sla/incidents  respect des engagements, ventilé par territoire —
                     ⚠️ interroge iTop (tickets résolus), avec cache court
+  /api/sla/at-risk  incidents ouverts qui vont manquer leur objectif
+  /api/kpi/incidents  volumes, récurrence, causes, organisations — même
+                    source que /sla/incidents
 
 Les filtres de périmètre (`region`, `province`, `site`, `search`) ont le même
 sens partout : voir app/services/geo_service.py.
@@ -183,6 +186,52 @@ async def sla_incidents(
         return await incident_service.sla_by_group(
             db, group_by, days, start_at, end_at, region, province, site
         )
+    except live_service.SnapshotUnavailable as exc:
+        raise _unavailable(exc) from exc
+    except incident_service.IncidentsUnavailable as exc:
+        raise _itop_unavailable(exc) from exc
+
+
+@router.get("/sla/at-risk")
+async def sla_at_risk(
+    region: Place = None,
+    province: Place = None,
+    site: Place = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Incidents iTop ouverts qui vont manquer leur objectif de résolution.
+
+    Le plus utile des indicateurs SLA : les autres racontent le passé, celui-ci
+    laisse encore le temps d'agir. Lu sur l'instantané, sans appel à iTop.
+    """
+    try:
+        return await incident_service.at_risk(db, region, province, site)
+    except live_service.SnapshotUnavailable as exc:
+        raise _unavailable(exc) from exc
+
+
+@router.get("/sla/contract")
+async def sla_contract(current_user: User = Depends(get_current_user)):
+    """Engagements de service (SLT) déclarés dans iTop — lus chez iTop, cache
+    de 5 minutes. Affichés à côté des objectifs du NOC, sans les remplacer."""
+    try:
+        return await incident_service.contract_targets()
+    except incident_service.IncidentsUnavailable as exc:
+        raise _itop_unavailable(exc) from exc
+
+
+@router.get("/kpi/incidents")
+async def kpi_incidents(
+    days: int = Query(30, ge=1, le=365),
+    region: Place = None,
+    province: Place = None,
+    site: Place = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        return await incident_service.incident_kpis(db, days, region, province, site)
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
     except incident_service.IncidentsUnavailable as exc:

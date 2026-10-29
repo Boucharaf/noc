@@ -149,6 +149,19 @@ NOTIFY_SEVERITIES = tuple(_csv("NOTIFY_SEVERITIES", "critical,high"))
 # ---------------------------------------------------------------------------
 NOTIFICATIONS_ENABLED = _bool("NOTIFICATIONS_ENABLED", False)
 
+# Nouvelles tentatives d'un envoi échoué (serveur SMTP ou passerelle SMS
+# indisponible) : espacées de 1, 5, 15, 30 puis 60 minutes, dans la limite
+# du nombre de tentatives et de l'âge de l'alerte. Au-delà, l'envoi est
+# abandonné et signalé (journal, /api/health) : prévenir trois heures après
+# une coupure déjà réparée ferait plus de bruit que de bien.
+NOTIFY_RETRY_MAX_ATTEMPTS = max(1, int(os.getenv("NOTIFY_RETRY_MAX_ATTEMPTS", "6")))
+NOTIFY_RETRY_MAX_AGE_MIN = max(1, int(os.getenv("NOTIFY_RETRY_MAX_AGE_MIN", "360")))
+
+# Rafale : au-delà de ce nombre de nouvelles alertes graves dans un même
+# cycle (retour après une coupure du collecteur, panne d'un cœur de réseau),
+# un seul message récapitulatif part au lieu d'un message par alerte.
+NOTIFY_BURST_MAX = max(1, int(os.getenv("NOTIFY_BURST_MAX", "10")))
+
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
 TWILIO_API_KEY_SID = os.getenv("TWILIO_API_KEY_SID", "")

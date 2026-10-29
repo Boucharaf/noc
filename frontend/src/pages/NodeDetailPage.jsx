@@ -1,13 +1,14 @@
 import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, PlusCircle } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 
 import AlertDrawer from "../components/domain/AlertDrawer";
+import AvailabilityHistory from "../components/domain/AvailabilityHistory";
 import LocationLink from "../components/domain/LocationLink";
 import NodeStateStrip from "../components/domain/NodeStateStrip";
-import ManualIncidentModal from "../components/domain/ManualIncidentModal";
+import SourceFacts from "../components/domain/SourceFacts";
 import Panel from "../components/ui/Panel";
-import Stat, { DefRow, Meter } from "../components/ui/Stat";
+import Stat, { DefRow } from "../components/ui/Stat";
 import { LineChart } from "../components/charts";
 import {
   NodeStateBadge,
@@ -22,9 +23,6 @@ import {
   bandwidth,
   dateTime,
   decimal,
-  duration,
-  num,
-  pct,
   smartTime,
 } from "../lib/format";
 import {
@@ -34,7 +32,6 @@ import {
   thresholdColor,
   toolLabel,
 } from "../lib/vocabulary";
-import { PERMISSIONS } from "../lib/permissions";
 import {
   periodFromHours,
   useNode,
@@ -42,7 +39,6 @@ import {
   useNodeLatest,
   useNodeSeries,
 } from "../hooks/queries";
-import { usePermission } from "../hooks/useSession";
 
 /**
  * Fiche d'équipement — NIVEAU 4 du document métier
@@ -79,7 +75,6 @@ export default function NodeDetailPage() {
   const [hours, setHours] = useState(24);
   const [metric, setMetric] = useState(null);
   const [selectedIncident, setSelectedIncident] = useState(null);
-  const [manualOpen, setManualOpen] = useState(false);
 
   const nodeQuery = useNode(id);
   const latest = useNodeLatest(id);
@@ -100,8 +95,13 @@ export default function NodeDetailPage() {
   });
 
   const meta = activeMetric ? metricMeta(activeMetric) : null;
+  // Date de la plus récente des dernières mesures publiées par les outils.
+  const lastMeasure = Object.values(latest.data ?? {})
+    .map((point) => point?.time)
+    .filter(Boolean)
+    .sort()
+    .at(-1);
   const stateMeta = node ? nodeStateMeta(node.state) : null;
-  const canCreateManual = usePermission(PERMISSIONS.CREATE_MANUAL_INCIDENT);
 
   return (
     <div className="space-y-2.5">
@@ -109,30 +109,19 @@ export default function NodeDetailPage() {
         title={node?.name ?? "Équipement"}
         subtitle={
           node
-            ? [node.locality, node.region, node.ministry]
+            ? [node.locality, node.region, node.organisation]
                 .filter(Boolean)
                 .join(" · ") || "Aucun rattachement géographique connu"
             : undefined
         }
         actions={
-          <>
-            <button
-              type="button"
-              className="btn btn-sm"
-              onClick={() => navigate(-1)}
-            >
-              <ArrowLeft size={13} /> Retour
-            </button>
-            {canCreateManual && (
-              <button
-                type="button"
-                className="btn btn-sm"
-                onClick={() => setManualOpen(true)}
-              >
-                <PlusCircle size={13} /> Signaler une panne
-              </button>
-            )}
-          </>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => navigate(-1)}
+          >
+            <ArrowLeft size={13} /> Retour
+          </button>
         }
       >
         {node && (
@@ -146,6 +135,16 @@ export default function NodeDetailPage() {
                 maintenance jusqu'à {smartTime(node.maintenance_until)}
               </span>
             )}
+            {node.state === "maintenance" &&
+              node.measured_state &&
+              node.measured_state !== "maintenance" && (
+                <span className="text-[11px]" style={{ color: "var(--ink-3)" }}>
+                  état mesuré :{" "}
+                  <span style={{ color: nodeStateMeta(node.measured_state).color }}>
+                    {nodeStateMeta(node.measured_state).label}
+                  </span>
+                </span>
+              )}
           </div>
         )}
       </PageHeader>
@@ -343,16 +342,22 @@ export default function NodeDetailPage() {
                       name={data.name}
                     />
                   </DefRow>
-                  <DefRow label="Ministère">{data.ministry || "—"}</DefRow>
+                  <DefRow label="Organisation">{data.organisation || "—"}</DefRow>
                   <DefRow label="Dernière mesure" mono>
-                    {data.last_metric_at
-                      ? dateTime(data.last_metric_at)
-                      : "jamais"}
+                    {lastMeasure ? dateTime(lastMeasure) : "aucune"}
                   </DefRow>
                   {data.down_since && (
                     <DefRow label="Hors service depuis" mono>
                       <span style={{ color: "var(--sev-critical)" }}>
                         {dateTime(data.down_since)} ({ageFrom(data.down_since)})
+                      </span>
+                    </DefRow>
+                  )}
+                  {data.boot_time && (
+                    <DefRow label="Démarré le" mono>
+                      {dateTime(data.boot_time)}
+                      <span className="ml-1.5 text-[11px]" style={{ color: "var(--ink-3)" }}>
+                        en service depuis {ageFrom(data.boot_time)}
                       </span>
                     </DefRow>
                   )}
@@ -378,6 +383,7 @@ export default function NodeDetailPage() {
                           >
                             {ref.external_ref}
                           </span>
+                          <SourceState node={data} tool={ref.source_tool} />
                         </li>
                       ))}
                     </ul>
@@ -391,6 +397,8 @@ export default function NodeDetailPage() {
                     </p>
                   )}
                 </Panel>
+
+                <SourceFacts details={data.details} />
 
                 {(data.maintenances?.length > 0 || data.work_orders?.length > 0) && (
                   <Panel title="Maintenances et interventions" subtitle="iTop et Zabbix">
@@ -420,55 +428,7 @@ export default function NodeDetailPage() {
                   </Panel>
                 )}
 
-                <Panel title="Historique">
-                  <div className="grid grid-cols-2 gap-2">
-                    <Stat
-                      compact
-                      label="Incidents 30 j"
-                      value={num(data.incidents_30d, "0")}
-                    />
-                    <Stat
-                      compact
-                      label="Incidents 90 j"
-                      value={num(data.incidents_90d, "0")}
-                    />
-                    <Stat
-                      compact
-                      label="MTTR moyen 90 j"
-                      value={duration(data.avg_mttr_minutes)}
-                      color={
-                        data.avg_mttr_minutes > 240
-                          ? "var(--sev-high)"
-                          : "var(--state-up)"
-                      }
-                    />
-                    <Stat
-                      compact
-                      label="Indispo. 30 j"
-                      value={duration(data.downtime_30d_minutes)}
-                    />
-                  </div>
-                  {data.availability_pct !== null &&
-                    data.availability_pct !== undefined && (
-                      <div className="mt-2">
-                        <div className="flex justify-between text-[11px] mb-1">
-                          <span style={{ color: "var(--ink-3)" }}>
-                            Disponibilité courante
-                          </span>
-                          <span className="num">
-                            {pct(data.availability_pct, 2)}
-                          </span>
-                        </div>
-                        <Meter
-                          value={data.availability_pct}
-                          color={thresholdColor(
-                            "availability_pct",
-                            data.availability_pct,
-                          )}
-                        />
-                      </div>
-                    )}
-                </Panel>
+                <AvailabilityHistory nodeId={id} />
               </div>
             </div>
 
@@ -534,12 +494,34 @@ export default function NodeDetailPage() {
         open={Boolean(selectedIncident)}
         onClose={() => setSelectedIncident(null)}
       />
-      <ManualIncidentModal
-        open={manualOpen}
-        onClose={() => setManualOpen(false)}
-        defaultNodeCode={node?.name ?? ""}
-      />
     </div>
+  );
+}
+
+/**
+ * Ce que dit UN outil de l'équipement, quand ce n'est pas l'état consolidé :
+ * outil momentanément muet (dernier état connu), ou état contradictoire
+ * avec un autre outil.
+ */
+function SourceState({ node, tool }) {
+  const stale = node.stale_sources?.includes(tool);
+  const lastKnown = node.last_known_states?.[tool];
+  const conflict = node.state_conflict?.[tool];
+  if (!stale && !conflict) return null;
+  const state = conflict ?? lastKnown;
+  return (
+    <span
+      className="ml-auto shrink-0 text-[11px]"
+      style={{ color: stale ? "var(--sev-medium)" : "var(--ink-3)" }}
+      title={
+        stale
+          ? "L'outil n'a pas répondu au dernier cycle : état mémorisé, pas une observation actuelle."
+          : "Cet outil ne voit pas le même état que les autres."
+      }
+    >
+      {stale ? "muet" : "voit"}
+      {state ? ` — ${stale ? "dernier état " : ""}${nodeStateMeta(state).label.toLowerCase()}` : ""}
+    </span>
   );
 }
 

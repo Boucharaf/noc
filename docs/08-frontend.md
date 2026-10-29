@@ -35,7 +35,7 @@ conteneur `frontend`, lui-même derrière la passerelle `nginx`.
 | `lib/format.js` | Formatage des nombres, dates, durées |
 | `components/layout/` | Coque : barre latérale, bandeau d'état, ticker d'alertes |
 | `components/ui/` | Briques génériques : panneaux, tableaux, modales, badges, états de chargement |
-| `components/domain/` | Briques métier : tableau d'incidents, fiche d'incident, carte, indicateurs réseau |
+| `components/domain/` | Briques métier : tableaux et fiches d'alerte (`AlertDrawer`) et d'incident iTop (`ItopIncidentDrawer`), carte, indicateurs réseau, indicateurs d'incidents (`IncidentInsights`), incidents à risque (`SlaAtRisk`), fiche technique d'un équipement (`SourceFacts`) |
 | `pages/` | Un fichier par écran |
 
 ## Les écrans
@@ -47,19 +47,26 @@ conteneur `frontend`, lui-même derrière la passerelle `nginx`.
 | `/supervision` | `SupervisionView.jsx` | directeur, chef NOC |
 | `/console` | `ConsoleView.jsx` | chef NOC, technicien |
 | `/interventions` | `InterventionsPage.jsx` | tous (ordres de travail iTop, lecture seule ; `/terrain` y redirige) |
-| `/incidents` | `IncidentsPage.jsx` | directeur, chef NOC, technicien |
+| `/incidents` | `IncidentsPage.jsx` — tickets iTop, historique, indicateurs | directeur, chef NOC, technicien |
+| `/alertes` | `AlertsPage.jsx` — alertes des outils de supervision | tous |
+| `/territoire` | `TerritoryPage.jsx` — carte, région → province → site → nœud (`/carte` y redirige) | tous |
 | `/equipements`, `/equipements/:id` | `NodesPage.jsx`, `NodeDetailPage.jsx` | tous |
-| `/performance` | `PerformancePage.jsx` | tous |
-| `/sla` | `SlaPage.jsx` | tous |
-| `/integrations` | `IntegrationsPage.jsx` | directeur, chef NOC, technicien |
+| `/performance` | `PerformancePage.jsx` — courbes, liens et interfaces, disponibilité calculée par l'agence | tous |
+| `/sla` | `SlaPage.jsx` — respect des SLA, incidents à risque, contrat iTop | tous |
+| `/integrations` | `IntegrationsPage.jsx` — santé de la collecte, fusion, équipements vus par un seul outil, alertes sans équipement | directeur, chef NOC, technicien |
 | `/maintenances` | `MaintenancePage.jsx` | tous (changements iTop et maintenances Zabbix, lecture seule) |
 | `/rapports` | `ReportsPage.jsx` | directeur, chef NOC |
 | `/utilisateurs` | `UsersPage.jsx` | chef NOC |
+| `/audit` | `AuditPage.jsx` — journal d'audit, lecture seule | directeur, chef NOC |
 | `/compte` | `AccountPage.jsx` | tous |
 | `/mur` | `WallboardPage.jsx` | tous (plein écran, sans menu) |
 
 La visibilité est gérée par `lib/permissions.js`. **Ce n'est qu'un confort** :
 le vrai contrôle est fait par le backend (chapitre 5).
+
+Aucun écran ne propose de geste de traitement (acquitter, affecter,
+résoudre, signaler une panne) : ces gestes se font dans l'outil source ou
+dans iTop, et les écrans en montrent le résultat.
 
 ## Comment un écran obtient ses données
 
@@ -101,7 +108,6 @@ Exemples :
 | un incident avec `id`, `detected_at`, `status`, `description`, `locality` | une alerte avec `key`, `since`, `acknowledged`, `message`, `site` | `toIncident()` |
 | `useKpiLocalities(8)` avec `locality`, `total_incidents` | `/kpi/sites` avec `site`, `avg_alerts` | renommage des champs |
 | une courbe sous forme de liste de points | un objet `{ points, sampled_nodes, … }` | `useNetworkSeries` rend la liste |
-| `actions.resolve({ id, notes })` | `POST /alerts/{clé}/resolve` avec `cause`, `note` | `useIncidentActions` traduit les arguments |
 
 Conséquences pratiques :
 

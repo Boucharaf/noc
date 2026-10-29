@@ -1,25 +1,24 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { PlusCircle } from "lucide-react";
 
 import AlertDrawer from "../components/domain/AlertDrawer";
 import IncidentTable from "../components/domain/IncidentTable";
-import ManualIncidentModal from "../components/domain/ManualIncidentModal";
 import NetworkVitals from "../components/domain/NetworkVitals";
+import SlaAtRisk from "../components/domain/SlaAtRisk";
 import { DashboardSummary, FleetStatesChart } from "../components/domain/FleetInsights";
 import Panel from "../components/ui/Panel";
 import { StackedBar } from "../components/ui/Stat";
-import { Donut, LineChart } from "../components/charts";
+import { Donut, HourHeatmap, LineChart } from "../components/charts";
 import { PageHeader } from "../components/layout/TopBar";
 import { QueryBoundary, SkeletonRows } from "../components/ui/States";
 import { FilterSelect, Segmented, Toolbar } from "../components/ui/Controls";
-import { NodeStateBadge, ToolStateBadge } from "../components/ui/Badge";
-import { duration, num, pct, time } from "../lib/format";
-import { PERMISSIONS } from "../lib/permissions";
+import { NodeStateBadge, SeverityBadge, ToolStateBadge } from "../components/ui/Badge";
+import { decimal, num, pct, time } from "../lib/format";
 import { availabilityColor, toolLabel, metricMeta, METRIC_TYPES } from "../lib/vocabulary";
 import {
   useAlertSummary,
   useAlerts,
+  useHourDistribution,
   useInterop,
   useKpiLocalities,
   useMaintenanceWindows,
@@ -29,8 +28,8 @@ import {
   useNodeStates,
   useNodes,
   useOpenAlerts,
+  useTopNodes,
 } from "../hooks/queries";
-import { usePermission } from "../hooks/useSession";
 
 /**
  * Salle de supervision — NIVEAU 2 du document métier
@@ -44,6 +43,10 @@ import { usePermission } from "../hooks/useSession";
  * ligne « non affecté » en tête, qui est la vraie alerte de management)
  * et la SANTÉ DE LA COLLECTE, parce qu'un connecteur muet rend faux tout
  * le reste de l'écran sans qu'aucun compteur ne bouge.
+ *
+ * S'y ajoutent les incidents iTop en danger de SLA (le seul engagement sur
+ * lequel la salle peut encore agir), les équipements les plus alertants et
+ * l'heure d'apparition des alertes, qui sert à dimensionner l'astreinte.
  */
 
 const WINDOWS = [
@@ -69,9 +72,7 @@ export default function SupervisionView() {
   const [organisation, setOrganisation] = useState(null);
   const [nodeType, setNodeType] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
-  const [manualOpen, setManualOpen] = useState(false);
 
-  const canCreateManual = usePermission(PERMISSIONS.CREATE_MANUAL_INCIDENT);
 
   const summary = useAlertSummary();
   const nodeStates = useNodeStates();
@@ -93,6 +94,8 @@ export default function SupervisionView() {
   const coverage = useNodeCoverage();
   const maintenance = useMaintenanceWindows("active");
   const localities = useKpiLocalities({ limit: 8 });
+  const topNodes = useTopNodes(8);
+  const hours24 = useHourDistribution();
   const criticalNodes = useNodes({ state: "down", limit: 8, sort: "state", organisation, node_type: nodeType });
 
   const allNodesQuery = useNodes({ limit: 2000 });
@@ -134,6 +137,10 @@ export default function SupervisionView() {
     { key: "up", label: "Normaux", value: states?.up, color: "var(--state-up)" },
   ];
 
+  const hourRows = hours24.data ?? [];
+  const hourTotal = hourRows.reduce((sum, row) => sum + row.count, 0);
+  const offHours = hourRows.filter((row) => row.off_hours).reduce((sum, row) => sum + row.count, 0);
+
   const seriesData = series.data?.points ?? [];
   const metricLabels = seriesData.map((point) => time(point.time));
 
@@ -170,11 +177,6 @@ export default function SupervisionView() {
               onChange={setHours}
               options={WINDOWS}
             />
-            {canCreateManual && (
-              <button type="button" className="btn btn-sm" onClick={() => setManualOpen(true)}>
-                <PlusCircle size={13} /> Signaler
-              </button>
-            )}
           </Toolbar>
         }
       />
@@ -301,6 +303,31 @@ export default function SupervisionView() {
       </div>
 
       <div className="grid grid-cols-12 gap-2.5">
+        <div className="col-span-12 lg:col-span-7 min-w-0">
+          <SlaAtRisk limit={6} />
+        </div>
+        <div className="col-span-12 lg:col-span-5 min-w-0">
+          <Panel
+            title="Heure d'apparition des alertes"
+            subtitle={
+              hourTotal
+                ? `${pct((100 * offHours) / hourTotal, 0)} hors heures ouvrées · alertes en cours`
+                : "alertes en cours"
+            }
+          >
+            <QueryBoundary
+              query={hours24}
+              compact
+              empty={() => hourTotal === 0}
+              emptyMessage="Aucune alerte en cours"
+            >
+              {() => <HourHeatmap data={hourRows} />}
+            </QueryBoundary>
+          </Panel>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-12 gap-2.5">
         {/* --- Collecte ETL ---
             (Plus de « charge par intervenant » : les affectations sont
             tenues dans iTop, pas dans le NOC.) */}
@@ -416,19 +443,71 @@ export default function SupervisionView() {
           </Panel>
         </div>
 
-        {/* --- Sites les plus touchés --- */}
+        {/* --- Équipements les plus alertants --- */}
         <div className="col-span-12 lg:col-span-7 min-w-0">
-          <Panel title="Sites les plus touchés ce mois" to="/territoire" toLabel="Territoire" flush>
+          <Panel
+            title="Équipements les plus alertants"
+            subtitle="alertes actives des outils, à l'instant"
+            to="/equipements"
+            flush
+          >
+            <QueryBoundary
+              query={topNodes}
+              compact
+              empty={(rows) => !rows?.some((row) => row.alerts)}
+              emptyMessage="Aucun équipement en alerte"
+            >
+              {(rows) => (
+                <ul className="divide-y" style={{ borderColor: "var(--border)" }}>
+                  {rows
+                    .filter((row) => row.alerts)
+                    .map((node) => (
+                      <li key={node.node_id}>
+                        <Link
+                          to={`/equipements/${encodeURIComponent(node.node_id)}`}
+                          className="flex items-center gap-2 px-2.5 py-1.5 hover:bg-[var(--surface-2)]"
+                          style={{ textDecoration: "none", color: "inherit" }}
+                        >
+                          <NodeStateBadge state={node.state} />
+                          <span className="min-w-0 flex-1">
+                            <span className="block text-[12px] truncate font-medium">{node.name}</span>
+                            <span className="block text-[10.5px]" style={{ color: "var(--ink-3)" }}>
+                              {node.locality || "site inconnu"}
+                            </span>
+                          </span>
+                          {node.worst_severity && <SeverityBadge severity={node.worst_severity} short />}
+                          <span className="num text-[11px]" style={{ minWidth: 58, textAlign: "right" }}>
+                            {node.alerts} alerte{node.alerts > 1 ? "s" : ""}
+                          </span>
+                        </Link>
+                      </li>
+                    ))}
+                </ul>
+              )}
+            </QueryBoundary>
+          </Panel>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-12 gap-2.5">
+        {/* --- Sites les plus touchés --- */}
+        <div className="col-span-12 min-w-0">
+          <Panel
+            title="Sites les plus touchés sur 30 j"
+            subtitle="moyennes journalières des agrégats de collecte"
+            to="/territoire"
+            toLabel="Territoire"
+            flush
+          >
             <QueryBoundary query={localities} compact emptyMessage="Aucun incident ce mois">
               {(items) => (
                 <table className="tbl">
                   <thead>
                     <tr>
                       <th>Site</th>
-                      <th>Région</th>
-                      <th style={{ textAlign: "right" }}>Incidents</th>
-                      <th style={{ textAlign: "right" }}>Critiques</th>
-                      <th style={{ textAlign: "right" }}>MTTR</th>
+                      <th style={{ textAlign: "right" }}>Alertes actives (moy.)</th>
+                      <th style={{ textAlign: "right" }}>Critiques (moy.)</th>
+                      <th style={{ textAlign: "right" }}>En panne (moy.)</th>
                       <th style={{ textAlign: "right" }}>Dispo.</th>
                     </tr>
                   </thead>
@@ -444,9 +523,8 @@ export default function SupervisionView() {
                             {locality.locality}
                           </Link>
                         </td>
-                        <td style={{ color: "var(--ink-3)" }}>{locality.region || "—"}</td>
                         <td className="num" style={{ textAlign: "right" }}>
-                          {num(locality.total_incidents)}
+                          {decimal(locality.average_alerts, 1)}
                         </td>
                         <td
                           className="num"
@@ -455,10 +533,10 @@ export default function SupervisionView() {
                             color: locality.critical ? "var(--sev-critical)" : "var(--ink-3)",
                           }}
                         >
-                          {num(locality.critical, "0")}
+                          {decimal(locality.critical, 1, "0")}
                         </td>
                         <td className="num" style={{ textAlign: "right", color: "var(--ink-2)" }}>
-                          {duration(locality.avg_mttr)}
+                          {decimal(locality.avg_down, 1, "0")}
                         </td>
                         <td
                           className="num"
@@ -507,7 +585,6 @@ export default function SupervisionView() {
         open={Boolean(selectedId)}
         onClose={() => setSelectedId(null)}
       />
-      <ManualIncidentModal open={manualOpen} onClose={() => setManualOpen(false)} />
     </div>
   );
 }

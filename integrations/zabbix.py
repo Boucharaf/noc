@@ -197,8 +197,11 @@ class ZabbixClient(SourceClient):
                 "selectHostGroups": ["name"],
                 # Position déclarée dans l'inventaire de l'hôte (champs
                 # standard « Location latitude / longitude »), quand l'agence
-                # la renseigne : elle place l'équipement sur la carte.
-                "selectInventory": ["location_lat", "location_lon"],
+                # la renseigne : elle place l'équipement sur la carte. Le
+                # reste de l'inventaire (constructeur, modèle, n° de série)
+                # va sur la fiche d'équipement ; aucun champ de contact n'est
+                # demandé, ce sont des données personnelles.
+                "selectInventory": ["location_lat", "location_lon", *_INVENTORY_FIELDS],
             },
         )
         if not hosts:
@@ -264,6 +267,7 @@ class ZabbixClient(SourceClient):
                     province=locality["province"],
                     region=locality["region"],
                     **_coordinates(host.get("inventory")),
+                    details=_inventory_details(host.get("inventory")),
                 )
             )
         return nodes
@@ -274,7 +278,8 @@ class ZabbixClient(SourceClient):
         while True:
             params = {
                 "output": "extend",
-                "selectAcknowledges": ["clock", "action"],
+                "selectAcknowledges": "extend",
+                "selectTags": "extend",
                 "recent": False,        # uniquement ce qui est encore en cours
                 "sortfield": ["eventid"],
                 "sortorder": "ASC",
@@ -329,6 +334,7 @@ class ZabbixClient(SourceClient):
                     node_name=host.get("name"),
                     acknowledged=str(problem.get("acknowledged")) == "1",
                     acknowledged_at=_acknowledged_at(acknowledges),
+                    details=_problem_details(problem, acknowledges),
                 )
             )
         return alerts
@@ -613,6 +619,71 @@ def _coordinates(inventory) -> dict:
     if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
         return {}
     return {"latitude": lat, "longitude": lon}
+
+
+# Champs d'inventaire Zabbix -> clés de Node.details["inventory"].
+_INVENTORY = {
+    "vendor": "vendor",
+    "model": "model",
+    "serialno_a": "serial",
+    "os": "os",
+    "type": "type",
+    "location": "location",
+}
+_INVENTORY_FIELDS = tuple(_INVENTORY)
+
+
+def _inventory_details(inventory) -> dict:
+    """Inventaire matériel de l'hôte, champs vides écartés."""
+    if not isinstance(inventory, dict):
+        return {}
+    facts = {
+        name: str(inventory[field]).strip()
+        for field, name in _INVENTORY.items()
+        if str(inventory.get(field) or "").strip()
+    }
+    return {"inventory": facts} if facts else {}
+
+
+def _problem_details(problem: dict, acknowledges: list[dict]) -> dict:
+    """Ce que Zabbix dit d'un problème au-delà de sa gravité :
+
+    * `tags` — étiquettes du déclencheur (service, couche, client…) ;
+    * `opdata` — donnée opérationnelle (« 95 % utilisé ») ;
+    * `suppressed` — masqué par une maintenance Zabbix ;
+    * `cause_ref` — Zabbix 7 : ce problème est le SYMPTÔME d'un autre ;
+    * `actions` — commentaires laissés à l'acquittement, du plus ancien au
+      plus récent.
+    """
+    details: dict = {}
+    tags = [
+        {"tag": str(tag.get("tag") or ""), "value": str(tag.get("value") or "")}
+        for tag in problem.get("tags") or []
+        if tag.get("tag")
+    ]
+    if tags:
+        details["tags"] = tags
+    if str(problem.get("opdata") or "").strip():
+        details["opdata"] = str(problem["opdata"]).strip()
+    if str(problem.get("suppressed")) == "1":
+        details["suppressed"] = True
+    if str(problem.get("cause_eventid") or "0") not in ("", "0"):
+        details["cause_ref"] = str(problem["cause_eventid"])
+    actions = []
+    for action in acknowledges:
+        message = str(action.get("message") or "").strip()
+        if not message:
+            continue
+        user = (
+            " ".join(filter(None, (action.get("name"), action.get("surname")))).strip()
+            or action.get("username")
+            or None
+        )
+        actions.append({"at": epoch_to_dt(action.get("clock")), "user": user, "message": message})
+    if actions:
+        oldest = datetime.min.replace(tzinfo=timezone.utc)
+        details["actions"] = sorted(actions, key=lambda a: a["at"] or oldest)
+    return details
 
 
 def _key_parameters(key: str) -> list[str]:

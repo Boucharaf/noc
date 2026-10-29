@@ -116,7 +116,10 @@ def _patch_snapshot(monkeypatch, nodes=NODES, records=RECORDS):
 
     monkeypatch.setattr(live_service, "get_nodes", get_nodes)
     monkeypatch.setattr(live_service, "get_alerts", get_alerts)
-    monkeypatch.setattr(geo_service.node_service, "_active_windows", lambda _db, _at: [])
+    async def no_windows(_at=None):
+        return []
+
+    monkeypatch.setattr(geo_service.node_service, "active_windows", no_windows)
     monkeypatch.setattr(live_service, "snapshot_age_s", zero)
     monkeypatch.setattr(live_service, "is_stale", fresh)
 
@@ -266,3 +269,95 @@ def test_site_locality_is_inherited_only_when_unambiguous():
     merged, _ = merge_nodes([netxms, zabbix])
     by_tool = {next(iter(node.sources)): node for node in merged}
     assert (by_tool["zabbix"].province, by_tool["zabbix"].region) == ("Houet", "Guiriko")
+
+
+def test_at_risk_keeps_open_incidents_near_or_past_their_target(monkeypatch):
+    now = datetime.now(timezone.utc)
+    records = [
+        {**RECORDS[2], "ref": "1", "since": (now - timedelta(hours=5)).isoformat()},
+        {**RECORDS[2], "ref": "2", "since": (now - timedelta(minutes=200)).isoformat()},
+        {**RECORDS[2], "ref": "3", "since": (now - timedelta(minutes=30)).isoformat()},
+    ]
+    _patch_snapshot(monkeypatch, records=records)
+    monkeypatch.setattr(
+        sla_service,
+        "targets",
+        lambda _db: {"critical": SimpleNamespace(tta_target_minutes=15, ttr_target_minutes=240)},
+    )
+    rows = asyncio.run(incident_service.at_risk(None))
+    # Dépassé d'abord, puis celui à qui il reste 40 min ; le ticket récent
+    # (210 min de marge) n'est pas encore à risque.
+    assert [row["key"] for row in rows] == ["itop:1", "itop:2"]
+    assert rows[0]["breached"] is True
+    assert rows[1]["breached"] is False
+
+
+def test_incident_kpis_count_recurrence_causes_and_reopening(monkeypatch):
+    _patch_snapshot(monkeypatch)
+    now = datetime.now(timezone.utc)
+    opened = (now - timedelta(hours=10)).isoformat()
+    resolved = (now - timedelta(hours=9)).isoformat()
+
+    def ticket(name, status, resolution, code, org="DGI"):
+        return {
+            "severity": "critical",
+            "status": status,
+            "organisation": org,
+            "start_date": opened,
+            "resolution_date": resolution,
+            "assignment_date": None,
+            "resolution_code": code,
+            "cis": [{"ref": None, "name": name}],
+        }
+
+    async def history(_start, _end):
+        return [
+            ticket("sw-ouaga", "resolved", resolved, "hardware repair"),
+            ticket("sw-ouaga", "closed", resolved, ""),
+            ticket("sw-ouaga", "assigned", resolved, ""),  # rouvert
+            ticket("rt-ouaga", "new", None, None, org=None),
+        ]
+
+    monkeypatch.setattr(incident_service, "_history", history)
+    monkeypatch.setattr(sla_service, "targets", lambda _db: {})
+    kpis = asyncio.run(incident_service.incident_kpis(None))
+
+    assert kpis["total"] == 4
+    assert kpis["resolved"] == 2
+    assert kpis["resolution_rate_pct"] == 50.0
+    assert kpis["reopened"] == 1
+    assert kpis["recurrent_nodes"] == 1
+    assert kpis["recurrent"][0]["node_key"] == "n2"
+    assert kpis["recurrent"][0]["incidents"] == 3
+    assert kpis["cause_available"] is True
+    assert kpis["without_cause"] == 1
+    assert kpis["without_cause_pct"] == 50.0
+    assert kpis["causes"] == [{"cause": "hardware repair", "count": 1, "share_pct": 100.0}]
+    assert kpis["top_sites"][0]["site"] == "Ouaga DGI"
+    assert {row["organisation"] for row in kpis["by_organisation"]} == {
+        "DGI",
+        "Organisation non renseignée",
+    }
+
+
+def test_incident_kpis_do_not_report_missing_cause_field_as_zero(monkeypatch):
+    _patch_snapshot(monkeypatch)
+    now = datetime.now(timezone.utc)
+
+    async def history(_start, _end):
+        return [
+            {
+                "severity": "high",
+                "status": "resolved",
+                "start_date": (now - timedelta(hours=3)).isoformat(),
+                "resolution_date": (now - timedelta(hours=2)).isoformat(),
+                "resolution_code": None,
+                "cis": [],
+            }
+        ]
+
+    monkeypatch.setattr(incident_service, "_history", history)
+    monkeypatch.setattr(sla_service, "targets", lambda _db: {})
+    kpis = asyncio.run(incident_service.incident_kpis(None))
+    assert kpis["cause_available"] is False
+    assert kpis["without_cause_pct"] is None

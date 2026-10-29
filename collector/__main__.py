@@ -34,7 +34,7 @@ from integrations.config import build_all_clients, configured_tools
 
 from . import config
 from .cycle import run_cycle
-from .rollup import rollup_loop
+from .rollup import restore_accumulator, rollup_loop
 from .state import SnapshotStore
 
 logging.basicConfig(
@@ -100,6 +100,16 @@ async def main() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         with contextlib.suppress(NotImplementedError):  # Windows n'a pas SIGTERM
             loop.add_signal_handler(sig, stop.set)
+
+    if config.ROLLUP_ENABLED:
+        # Compteurs du bilan en cours, sauvegardés au cycle précédent : un
+        # redémarrage en cours de journée ne repart pas de zéro.
+        try:
+            restored = restore_accumulator(await store.load_rollup())
+            if restored:
+                logger.info("Bilan journalier : %d compteur(s) repris de Redis", restored)
+        except Exception:  # noqa: BLE001 — Redis indisponible : on repart de zéro
+            logger.exception("Compteurs du bilan journalier non repris")
 
     tasks = [asyncio.create_task(collect_loop(clients, store, stop), name="collecte")]
     if config.ROLLUP_ENABLED:

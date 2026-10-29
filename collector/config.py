@@ -33,7 +33,18 @@ CYCLE_TIMEOUT_S = _int("COLLECT_CYCLE_TIMEOUT_S", max(120, COLLECT_INTERVAL_S - 
 # Agrégats journaliers écrits en base (voir collector/rollup.py). Désactivables
 # pour un déploiement qui n'aurait pas besoin des tendances long terme.
 ROLLUP_ENABLED = _bool("ROLLUP_ENABLED", True)
-ROLLUP_HOUR = _int("ROLLUP_HOUR", 1)  # heure locale d'écriture du bilan de la veille
+ROLLUP_HOUR = _int("ROLLUP_HOUR", 1)
+# Bilan non écrit (base indisponible) : nouvel essai à cet intervalle.
+ROLLUP_RETRY_S = max(60, _int("ROLLUP_RETRY_S", 900))
+# Journal historique (collector/history.py) : périodes d'état des équipements
+# et des liens, vie des alertes. Écrit à chaque cycle dans la base du NOC.
+HISTORY_ENABLED = _bool("HISTORY_ENABLED", True)
+# Jours de conservation de ce qui est clos. 0 (défaut) = indéfiniment : la
+# disponibilité sur plusieurs années est un besoin, et le journal ne garde
+# que les changements (quelques Mo par mois).
+HISTORY_RETENTION_DAYS = _int("HISTORY_RETENTION_DAYS", 0)
+# Délai de garde de l'écriture d'un cycle : au-delà, le cycle n'attend plus.
+HISTORY_TIMEOUT_S = _int("HISTORY_TIMEOUT_S", 60)  # heure locale d'écriture du bilan de la veille
 
 DATABASE_URL = os.getenv(
     "NOC_DATABASE_URL",

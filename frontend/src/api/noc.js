@@ -74,6 +74,12 @@ export const auth = {
 };
 
 /** Gestion des comptes — Chef NOC uniquement, sauf `list`. */
+/** Journal d'audit — lecture seule (Chef NOC, Directeur). */
+export const audit = {
+  /** @param {object} params action, user_id, limit, offset */
+  list: (params) => get("/audit", params),
+};
+
 export const users = {
   list: () => get("/users"),
   create: (payload) => post("/users", payload),
@@ -95,7 +101,8 @@ export const overview = {
   summary: (params) => get("/overview", params),
   /** Synthèse par site, du plus dégradé au plus sain. */
   sites: (params) => get("/sites", params),
-  alertsBySeverity: (params) => get("/alerts/by-severity", params),
+  /** Disponibilité par organisation (ministère, structure) du périmètre. */
+  organisations: (params) => get("/organisations", params),
   alertsByTool: (params) => get("/alerts/by-tool", params),
   /** Alertes en cours par ancienneté (tranches). */
   alertAges: (params) => get("/alerts/ages", params),
@@ -120,7 +127,6 @@ export const alerts = {
   // Lecture seule : le traitement et les affectations sont tenus dans iTop.
 };
 
-/** Incidents signalés à la main, qu'aucune sonde ne voit. */
 /* ------------------------------------------------------------------ */
 /* Territoire — région > province > site > nœud                         */
 /* ------------------------------------------------------------------ */
@@ -152,11 +158,6 @@ export const itopIncidents = {
   sla: (params) => get("/sla/incidents", params),
 };
 
-export const manualIncidents = {
-  create: (payload) => post("/manual-incidents", payload),
-  resolve: (id) => post(`/manual-incidents/${id}/resolve`),
-};
-
 /**
  * Alias de compatibilité pour les écrans écrits avant le changement de
  * vocabulaire. `incidents` et `alerts` désignent la même chose.
@@ -169,7 +170,6 @@ export const manualIncidents = {
  */
 export const incidents = {
   ...alerts,
-  createManual: manualIncidents.create,
   exportCsv: async (params) => {
     const { alerts: rows = [] } = await alerts.list(params);
     const columns = [
@@ -250,9 +250,12 @@ export const kpi = {
   monthly: (params) => get("/kpi/monthly", params),
   /** @param {object} params days, limit, sort (availability | alerts) */
   sites: (params) => get("/kpi/sites", params),
-  /** Causes retenues par les exploitants — la seule analyse propre au NOC. */
-  causes: (params) => get("/kpi/causes", params),
-  resolutionTimes: (params) => get("/kpi/resolution-times", params),
+  /**
+   * Indicateurs d'incidents iTop de la période : volumes, résolution,
+   * récurrence, causes, réouvertures, organisations. ⚠️ Lit l'historique iTop.
+   * @param {object} params days, region, province, site
+   */
+  incidents: (params) => get("/kpi/incidents", params),
 };
 
 /* ------------------------------------------------------------------ */
@@ -261,10 +264,13 @@ export const kpi = {
 export const sla = {
   targets: () => get("/sla/targets"),
   updateTarget: (severity, payload) => put(`/sla/targets/${severity}`, payload),
-  compliance: (params) => get("/sla/compliance", params),
-  breaches: (params) => get("/sla/breaches", params),
-  /** Alertes en cours qui vont manquer leur objectif — le seul actionnable. */
-  atRisk: () => get("/sla/at-risk"),
+  /**
+   * Incidents iTop ouverts qui vont manquer leur objectif — le seul
+   * actionnable. @param {object} params region, province, site
+   */
+  atRisk: (params) => get("/sla/at-risk", params),
+  /** Engagements contractuels (SLT) déclarés dans iTop — interroge iTop. */
+  contract: () => get("/sla/contract"),
 };
 
 /* ------------------------------------------------------------------ */
@@ -330,14 +336,25 @@ export const report = {
 
 export const health = () => get("/health");
 
+/* ------------------------------------------------------------------ */
+/* Historique de disponibilité (journal du collecteur, base du NOC)     */
+/* ------------------------------------------------------------------ */
+export const history = {
+  status: () => get("/history/status"),
+  /** Disponibilité, pannes, liens et alertes d'un équipement sur `days` jours. */
+  node: (nodeId, days = 30) => get(`/history/nodes/${encodeURIComponent(nodeId)}`, { days }),
+  /** Équipements (kind=node) ou liens (kind=link) les moins disponibles. */
+  ranking: (params) => get("/history/ranking", params),
+};
+
 export default {
   auth,
   users,
+  audit,
   overview,
   sites,
   alerts,
   incidents,
-  manualIncidents,
   nodes,
   metrics,
   kpi,
@@ -349,4 +366,5 @@ export default {
   notifications,
   report,
   health,
+  history,
 };

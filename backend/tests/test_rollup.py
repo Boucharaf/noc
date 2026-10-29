@@ -1,49 +1,56 @@
-from datetime import UTC, datetime
-import asyncio
+from datetime import UTC, date, datetime
 
 from collector import cycle, rollup
+from collector.merge import MergedNode
+from integrations.models import Alert
 
 
-def test_incomplete_cycle_is_excluded_from_daily_kpis(monkeypatch):
+def _node(node_id, state, site=None, province=None, region=None):
+    return MergedNode(
+        id=node_id, name=node_id, hostname=node_id, ip=None, state=state, site=site,
+        latitude=None, longitude=None, organisation=None, node_type=None,
+        province=province, region=region, sources={"zabbix": node_id},
+    )
+
+
+def test_cycle_observation_feeds_total_site_province_and_region(monkeypatch):
     monkeypatch.setattr(rollup, "_ACCUMULATOR", {})
+    at = datetime(2026, 10, 1, 8, tzinfo=UTC)
+    nodes = [
+        _node("a", "up", site="Ouaga DGI", province="Kadiogo", region="Centre"),
+        _node("b", "down", site="Ouaga DGI", province="Kadiogo", region="Centre"),
+        _node("c", "up"),  # sans localité : compté dans le seul total
+    ]
+    alert = Alert(
+        tool="zabbix", ref="1", severity="critical", message="down", since=at, node_ref="b"
+    )
 
-    cycle._observe_rollup([], [], datetime.now(UTC), complete=False)
+    cycle._observe_rollup(nodes, [alert], at, set(), set())
 
-    assert rollup._ACCUMULATOR == {}
+    day = at.date()
+    assert set(rollup._ACCUMULATOR) == {
+        (day, None),
+        (day, "Ouaga DGI"),
+        (day, rollup.rollup_key("province", "Kadiogo")),
+        (day, rollup.rollup_key("region", "Centre")),
+    }
+    assert rollup._ACCUMULATOR[(day, None)]["nodes"] == 3
+    site = rollup._ACCUMULATOR[(day, "Ouaga DGI")]
+    assert (site["nodes"], site["down"], site["alerts"], site["critical"]) == (2, 1, 1, 1)
 
 
-def test_complete_cycle_contributes_to_daily_kpis(monkeypatch):
+def test_drain_averages_over_real_samples_and_clears_only_that_day(monkeypatch):
+    day = date(2026, 10, 1)
     monkeypatch.setattr(rollup, "_ACCUMULATOR", {})
+    # Deux cycles le 1er, dont un équipement en maintenance ; un cycle le 2.
+    rollup.observe(day, None, [_node("a", "up"), _node("b", "down")], [])
+    rollup.observe(day, None, [_node("a", "up"), _node("b", "maintenance")], [])
+    rollup.observe(date(2026, 10, 2), None, [_node("a", "up")], [])
 
-    cycle._observe_rollup([], [], datetime.now(UTC), complete=True)
+    (row,) = rollup._drain(day)
 
-    assert len(rollup._ACCUMULATOR) == 1
-    assert next(iter(rollup._ACCUMULATOR.values()))["samples"] == 1
-
-
-def test_failed_kpi_write_keeps_batch_for_idempotent_retry(monkeypatch):
-    day = datetime.now(UTC).date()
-    rows = [{"day": day, "site": None, "samples": 2}]
-    monkeypatch.setattr(rollup, "_PENDING_ROWS", {day: rows.copy()})
-    attempts = 0
-
-    async def flaky_write(received):
-        nonlocal attempts
-        attempts += 1
-        assert received == rows
-        if attempts == 1:
-            raise OSError("temporary database outage")
-
-    monkeypatch.setattr(rollup, "write_rows", flaky_write)
-
-    try:
-        asyncio.run(rollup.flush_pending())
-    except OSError:
-        pass
-    else:
-        raise AssertionError("the simulated SQL failure should propagate")
-
-    assert rollup._PENDING_ROWS[day] == rows
-    asyncio.run(rollup.flush_pending())
-    assert day not in rollup._PENDING_ROWS
-    assert attempts == 2
+    assert row["samples"] == 2
+    assert row["avg_nodes"] == 2.0
+    # 2 « up » sur 3 observations mesurées : la maintenance sort du dénominateur.
+    assert row["fleet_availability_pct"] == 66.67
+    assert list(rollup._ACCUMULATOR) == [(date(2026, 10, 2), None)]

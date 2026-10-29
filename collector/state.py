@@ -45,6 +45,12 @@ KEY_TOOL = f"{PREFIX}tool:"          # + nom de l'outil
 KEY_SOURCE = f"{PREFIX}source:"      # + outil:nodes|alerts, last valid collection
 KEY_HISTORY = f"{PREFIX}hist:"       # + outil:empreinte
 KEY_ALERT_SEEN = f"{PREFIX}live:alerts:seen"
+# Marqueur « le NOC a déjà vu un cycle » : distinct de l'ensemble des alertes
+# vues, qui peut légitimement être vide (aucune alerte en cours).
+KEY_ALERT_SEEN_SINCE = f"{PREFIX}live:alerts:seen_since"
+# Compteurs du bilan journalier en cours (collector/rollup.py), sauvegardés à
+# chaque cycle : un redémarrage du collecteur ne perd plus la journée.
+KEY_ROLLUP = f"{PREFIX}rollup:pending"
 KEY_LATEST = f"{PREFIX}live:latest"  # dernières valeurs, « outil:ref » -> {métrique: valeur}
 KEY_MAINTENANCE = f"{PREFIX}live:maintenance"  # maintenances planifiées (iTop, Zabbix)
 KEY_WORK_ORDERS = f"{PREFIX}live:work_orders"  # ordres de travail iTop
@@ -188,30 +194,46 @@ class SnapshotStore:
     async def diff_new_alerts(self, alerts: list) -> list:
         """Alertes absentes du cycle précédent.
 
-        L'ensemble des clés vues est stocké dans Redis et non en mémoire du
-        processus : un collecteur redémarré ne doit pas rediffuser tout le
-        parc comme s'il venait de tomber en panne.
+        L'ensemble des clés vues est stocké dans Redis, SANS EXPIRATION, et
+        non en mémoire du processus :
+
+          * un collecteur redémarré ne rediffuse pas tout le parc comme s'il
+            venait de tomber en panne ;
+          * après une coupure, même longue, les pannes apparues pendant la
+            coupure SONT diffusées et notifiées au retour. Autrefois
+            l'ensemble expirait au bout de trois cycles, et ces pannes-là
+            n'étaient jamais notifiées.
+
+        Seul un VRAI premier démarrage (aucun marqueur, Redis neuf ou vidé)
+        ne diffuse rien : tout y serait « nouveau » sans que rien ne vienne de
+        se produire, et l'astreinte serait réveillée pour tout le parc. Un
+        ensemble vide, lui, veut seulement dire « aucune alerte au cycle
+        précédent » : une alerte qui apparaît ensuite est bien nouvelle.
         """
         current = {alert.key() for alert in alerts}
         previous = set(await self.redis.smembers(KEY_ALERT_SEEN) or [])
+        # Un ensemble non vide écrit par une version précédente vaut marqueur.
+        initialised = bool(previous) or bool(await self.redis.exists(KEY_ALERT_SEEN_SINCE))
 
-        new_keys = current - previous
+        pipe = self.redis.pipeline(transaction=True)
+        pipe.delete(KEY_ALERT_SEEN)
         if current:
-            pipe = self.redis.pipeline(transaction=True)
-            pipe.delete(KEY_ALERT_SEEN)
             pipe.sadd(KEY_ALERT_SEEN, *current)
-            pipe.expire(KEY_ALERT_SEEN, self.ttl)
-            await pipe.execute()
-        else:
-            await self.redis.delete(KEY_ALERT_SEEN)
+        pipe.set(KEY_ALERT_SEEN_SINCE, datetime.now(timezone.utc).isoformat(), nx=True)
+        await pipe.execute()
 
-        # Un ensemble « vu » vide signifie soit un premier démarrage, soit une
-        # expiration après une longue panne. Dans les deux cas, tout est
-        # techniquement « nouveau », mais rien ne vient de se produire : on ne
-        # diffuse rien, sinon le premier démarrage réveillerait l'astreinte.
-        if not previous:
+        if not initialised:
             return []
+        new_keys = current - previous
         return [alert for alert in alerts if alert.key() in new_keys]
+
+    async def save_rollup(self, payload: list) -> None:
+        """Compteurs du bilan journalier en cours, sans expiration."""
+        await self.redis.set(KEY_ROLLUP, json.dumps(payload, ensure_ascii=False))
+
+    async def load_rollup(self) -> list:
+        value = await self._read_json(KEY_ROLLUP)
+        return value if isinstance(value, list) else []
 
     # -- lecture (backend) -------------------------------------------------
     async def read_nodes(self) -> list[dict] | None:

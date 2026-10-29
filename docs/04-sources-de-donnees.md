@@ -1,7 +1,9 @@
 # 4. Sources de données
 
 La plateforme ne crée aucune donnée de supervision : elle la lit chez les
-**outils sources** grâce à des **connecteurs** (`integrations/`).
+**outils sources** grâce à des **connecteurs** (`integrations/`). En
+production, **uniquement par leurs API** ; les exports de production (dump
+NetXMS, journal Centreon) ne servent qu'à visualiser en local.
 
 ## Le contrat d'un connecteur
 
@@ -14,6 +16,27 @@ implémente quatre méthodes :
 | `fetch_nodes()` | collecteur | L'inventaire des équipements (`list[Node]`) |
 | `fetch_alerts()` | collecteur | Les alertes **actives uniquement** (`list[Alert]`) |
 | `fetch_history(node, métrique, début, fin)` | backend, à la demande | Une courbe. Vide par défaut (iTop, par exemple, ne mesure rien). |
+
+Méthodes facultatives, vides par défaut :
+
+| Méthode | Appelée par | Rôle | Implémentée par |
+|---|---|---|---|
+| `fetch_fleet_latest()` | collecteur | Dernière valeur de chaque mesure pour tout le parc, en un appel groupé | Zabbix |
+| `fetch_latest(node)` | backend | Dernières valeurs d'un équipement | Zabbix |
+| `fetch_maintenance()` | collecteur | Maintenances planifiées | iTop (changements), Zabbix |
+| `fetch_work_orders()` | collecteur | Ordres de travail | iTop |
+| `fetch_incident_history(début, fin)`, `fetch_sla_targets()` | backend, à la demande | Tickets de la période, engagements contractuels | iTop |
+
+Un équipement peut porter des **faits de fiche** (`Node.details`) : inventaire
+matériel, dernier démarrage, heure de la panne, disponibilité calculée par
+l'agence, résumé des interfaces. Une alerte peut porter son **contexte**
+(`Alert.details`) : tags, donnée opérationnelle, commentaires… Ces champs
+sont affichés sur les fiches, jamais utilisés pour décider d'un état ou d'un
+décompte.
+
+`python -m collector.probe [outil]` exécute un cycle de lecture contre l'outil
+réel, sans rien publier, et dit ce qui est lu et ce qui manque (équipements
+localisés, alertes rattachées, champs reçus).
 
 La classe de base fournit le client HTTP, la mesure de latence et un
 **disjoncteur** : après 3 échecs consécutifs, l'outil n'est plus sollicité
@@ -52,7 +75,14 @@ pas su lire la gravité ne doit pas disparaître de l'écran.
 - **API** : JSON-RPC sur `/api_jsonrpc.php`.
 - **Authentification** : jeton d'API permanent (`ZABBIX_API_TOKEN`, préféré)
   ou identifiant/mot de passe.
-- **Alertes** : `problem.get` (seulement les problèmes actifs).
+- **Alertes** : `problem.get` (seulement les problèmes actifs), avec leurs
+  **tags**, leur **donnée opérationnelle** (« 95 % utilisé »), l'indicateur
+  de **suppression** par une maintenance, le lien **cause → symptôme**
+  (Zabbix 7, `cause_eventid`) et les **commentaires d'acquittement** — affichés
+  sur la fiche d'alerte, jamais utilisés pour les décomptes.
+- **Inventaire** : constructeur, modèle, n° de série, système, type et
+  emplacement de l'inventaire d'hôte, sur la fiche d'équipement. Aucun champ
+  de contact n'est demandé (données personnelles).
 - **Limites explicites** : si l'API atteint 5 000 problèmes ou points
   historiques, la collecte signale un résultat potentiellement tronqué au
   lieu de le présenter comme complet.
@@ -74,6 +104,15 @@ pas su lire la gravité ne doit pas disparaître de l'écran.
 - **Limites explicites** : la pagination est suivie jusqu'au total annoncé;
   au-delà de 20 000 ressources, la collecte échoue visiblement plutôt que de
   publier un inventaire tronqué.
+- **Export du journal, en local** : `CENTREON_API_URL=file:///…` remplace
+  l'API par `centreon_logs.py`, qui rejoue un export de
+  `centreon_storage.logs` (README § 3.2). Mêmes références (`host-<id>`,
+  `service-<id>`) et mêmes états que l'API. Seuls les états HARD font une
+  alerte, datée du premier état HARD de la série ; un acquittement ne survit
+  pas à un changement d'état. Un hôte sans ligne de contrôle d'hôte (Centreon
+  ne journalise que les changements) prend l'état de ses services : tous
+  nominaux, en service ; l'un en alerte, dégradé. Ni groupes, ni localité, ni
+  mesures.
 
 ### iTop 3.2 — `integrations/itop.py`
 
@@ -82,9 +121,8 @@ pas su lire la gravité ne doit pas disparaître de l'écran.
   tickets (`ITOP_TICKET_CLASSES`, par défaut `Incident,UserRequest`). Les
   tickets sont classés comme `itsm_ticket` et ne sont pas comptés comme des
   alertes techniques ni diffusés comme de nouvelles alertes. iTop ne mesure
-  rien. La supervision et son bandeau n'affichent que les alertes techniques;
-  la page Incidents permet de filtrer les alertes techniques, tickets iTop et
-  incidents manuels par catégorie.
+  rien. Les tickets ouverts sont dans l'instantané ; les tickets clos sont lus
+  à la demande (`fetch_incident_history`, cache de 5 min).
 - **Priorité dans la fusion** : iTop fait foi pour le **nom**, le **site** et
   l'**organisation** d'un équipement.
 - **Compte de service** : il lui faut plusieurs profils iTop, pas seulement
@@ -92,11 +130,14 @@ pas su lire la gravité ne doit pas disparaître de l'écran.
 - **Classes optionnelles** : les classes absentes selon les modules activés
   sont omises mais signalées dans la santé de l'intégration. Les autres
   erreurs d'accès ne sont pas converties en inventaires ou tickets vides.
-- **SLT** : une erreur de lecture des objectifs remonte au consommateur au
-  lieu d'être convertie en liste vide. Les indicateurs SLA ne doivent pas
-  présenter ces objectifs comme récupérés. La lecture des objectifs n'est
-  pas encore reliée au calcul SLA du backend; celui-ci ne consomme donc pas
-  les objectifs iTop.
+- **SLT** : les engagements contractuels sont lus à la demande
+  (`GET /api/sla/contract`, cache de 5 min) et affichés sur l'écran SLA à
+  côté des objectifs du NOC, en minutes, le plus exigeant par gravité. Ils ne
+  remplacent pas les objectifs du NOC : un écart se voit et se corrige à la
+  main. Une instance sans classe SLT est signalée comme telle ; toute autre
+  erreur remonte au lieu d'être convertie en liste vide.
+- **Événement Zabbix** (`ITOP_ZBX_EVENT_FIELD`) : la fiche d'incident nomme
+  le problème Zabbix à l'origine du ticket et le repère parmi les alertes.
 - **Rattachement** : les identifiants numériques iTop sont utilisés pour
   faire correspondre `id` et `functionalci_id`, pas les clés OQL `Classe::id`.
 
@@ -105,20 +146,43 @@ pas su lire la gravité ne doit pas disparaître de l'écran.
 NetXMS peut être lu de **deux façons**, et le choix se fait par la **forme de
 l'URL** dans `NETXMS_API_URL` (`integrations/config.py`) :
 
-| URL | Connecteur | Quand l'utiliser |
+| URL | Connecteur | Usage |
 |---|---|---|
-| `https://…` | `netxms.py` — API Web (`netxms-websvc`) | Après validation des endpoints sur la version déployée |
-| `postgresql://…` | `netxms_db.py` — base PostgreSQL, **lecture seule** | Préféré si l'agence accorde un compte dédié en lecture seule |
+| `https://…` | `netxms.py` — API Web (`netxms-websvc`) | **Production** : en exploitation, toutes les données viennent des API |
+| `postgresql://…` | `netxms_db.py` — base PostgreSQL, **lecture seule** | **Local** : visualiser le dump de production restauré |
 
-Les deux produisent exactement les mêmes équipements et alertes : passer de
-l'un à l'autre ne change que cette variable.
+Les deux produisent les mêmes équipements et alertes : passer de l'un à
+l'autre ne change que cette variable.
 
-Le connecteur API emploie des endpoints de la Legacy Web API dont le
-comportement n'a pas été confirmé sur l'instance de production. Quand l'accès
-à la base est accordé, le compte `noc_reader` et les requêtes en lecture
-seule de `netxms_db.py` sont donc le chemin de production recommandé. Ne
-basculer sur l'API qu'après validation de `/objects`, `/alarms` et des DCI
-sur la version réellement exploitée.
+Particularités du connecteur API (`netxms.py`) :
+
+- **À valider sur l'instance réelle** : les chemins (`/objects`, `/alarms`,
+  DCI) et la forme des réponses n'ont pas été confrontés à l'instance de
+  l'agence. Le connecteur accepte les variantes connues (classe, état et
+  gravité en nombre ou en nom ; dates en secondes, millisecondes ou ISO 8601).
+  `python -m collector.probe netxms` dit ce qui est lu et ce qui manque.
+- **Localité** : l'API ne donne pas le référentiel de sites de l'agence
+  (propre à sa base). Le **site** est l'attribut personnalisé désigné par
+  `NETXMS_SITE_ATTRIBUTE`, sinon la ville de l'adresse NetXMS. La **province
+  et la région** viennent de cette ville, sinon des coordonnées placées dans
+  le contour de leur région (`integrations/localities.py`, référentiel figé
+  dans `integrations/data/localities.json` par
+  `database/export_localities.py`). Mesuré sur le dump : région trouvée pour
+  85 % des équipements, province pour 70 % (80 % des équipements ont un site
+  administratif en mode base). Pour retrouver ce niveau, l'agence peut
+  recopier le site administratif dans un attribut personnalisé des nœuds.
+- **Alarmes d'interface** : leur objet source est une interface ; son
+  équipement est lu une fois (`/objects/{id}`, au plus 100 par cycle), puis
+  gardé en mémoire.
+- **Groupes** : noms des conteneurs NetXMS ; s'ils ne sont pas lisibles,
+  l'inventaire est publié sans groupes.
+- **Fiche d'équipement** : constructeur, modèle, n° de série, dernier
+  démarrage, heure de la panne ; disponibilité calculée par l'agence
+  (attributs personnalisés `perAvailability`, `mttr`, `mtbf`, `NumFailures`
+  — 72 nœuds dans le dump) ; résumé des **interfaces** (activées, actives,
+  surveillées, débit nominal), qui donne la disponibilité des liens. Les
+  interfaces sont la lecture la plus lourde : `NETXMS_COLLECT_INTERFACES=false`
+  la coupe.
 
 Particularités du connecteur base (`netxms_db.py`) :
 
@@ -127,6 +191,10 @@ Particularités du connecteur base (`netxms_db.py`) :
   repli sur la ville de l'objet. La présence du référentiel est détectée : le
   connecteur fonctionne aussi sur une base NetXMS standard.
 - **Alarmes d'interface** : rattachées à leur équipement via `interfaces.node_id`.
+- **Fiche d'équipement** : mêmes faits que par l'API, lus seulement si
+  `noc_reader` a les droits du bloc « Fiche d'équipement » de
+  `netxms_readonly_role.sql` ; les attributs personnalisés passent par la vue
+  `noc_availability_attributes`, limitée aux attributs de disponibilité.
 - **Garanties** : chaque connexion est ouverte en lecture seule, avec un délai
   de garde ; aucune colonne secrète (communautés SNMP, secrets d'agent) n'est
   lue.
@@ -140,7 +208,10 @@ Nagios est validé sur le laboratoire local (Nagios Core 4.5.12, profil
 emploient des masques de bits (hôte 2 UP, 4 DOWN, 8 UNREACHABLE ; service
 2 OK, 4 WARNING, 8 UNKNOWN, 16 CRITICAL), pas les codes de retour des sondes.
 `objectjson.cgi` plante sur un alias accentué : le connecteur publie alors
-l'état sans adresses ni groupes et le signale. NSP n'a pas d'instance locale.
+l'état sans adresses ni groupes et le signale. NSP n'a pas d'instance locale :
+un **simulateur** (`tools/nsp-sim`, profil `nsp`) répond aux requêtes du
+connecteur pour voir des données NSP dans le NOC, sans prouver la
+compatibilité avec le NSP de l'agence (tools/README.md).
 Chacun a plusieurs modes d'accès à confirmer auprès de l'agence :
 `NAGIOS_MODE` (`statusjson`, `livestatus`, `xi`) et `NSP_FM_MODE` (`yang`,
 `classic`). Tant qu'ils valent `unknown`, le connecteur se déclare « non
@@ -176,11 +247,17 @@ est signalée dans l'état de l'intégration, même si ses alarmes sont collect�
 Chaque équipement porte son site, sa province et sa région (17 régions du
 nouveau découpage), lus chez les sources et jamais devinés :
 
-- **NetXMS (base)** : référentiel de l'agence, site administratif → ville →
-  commune → province → région ; à défaut de site, la ville de l'objet quand
-  elle ne désigne qu'une seule province. Le compte `noc_reader` doit avoir les
-  droits du bloc « Découpage administratif » de
+- **NetXMS (API, production)** : site = attribut personnalisé
+  (`NETXMS_SITE_ATTRIBUTE`) ou ville de l'adresse NetXMS ; province et région
+  d'après la ville, sinon d'après les coordonnées
+  (`integrations/localities.py`).
+- **NetXMS (base, dump local)** : référentiel de l'agence, site administratif
+  → ville → commune → province → région ; à défaut de site, la ville de
+  l'objet quand elle ne désigne qu'une seule province. Le compte `noc_reader`
+  doit avoir les droits du bloc « Découpage administratif » de
   `database/netxms_readonly_role.sql`.
+- **Centreon (export du journal)** : aucune localité, le journal n'a pas les
+  groupes d'hôtes.
 - **Zabbix, Centreon, Nagios** : groupes d'hôtes `Site/…`, `Province/…`,
   `Region/…` (ou `Région/…`).
 - **Héritage** : un équipement dont seul le site est connu hérite de la
@@ -232,13 +309,14 @@ n'est pas une source de mesure. Si plusieurs sources supervisant un même
 Le nom, le site et l'organisation restent du contexte CMDB priorisé depuis
 iTop, puis les sources de supervision.
 
-## Les trois façons d'alimenter la plateforme en local
+## Les façons d'alimenter la plateforme en local
 
 | Mode | Réalisme | Mise en place |
 |---|---|---|
-| **Dump NetXMS** | Données réelles de production, figées au 07/08/2026 | [README § 3.1](../README.md#31-base-netxms-restaurée-depuis-le-dump) |
-| **Outils de laboratoire** | Vrais Zabbix/iTop/Centreon aux versions de l'agence, supervisant les conteneurs de la pile. Une vraie panne (arrêter un conteneur) produit une vraie alerte. | [README § 3.2](../README.md#32-outils-de-laboratoire-zabbix-itop-centreon), [tools/README.md](../tools/README.md) |
-| **Outils de l'agence** | Le réseau réel, en direct | [README § 3.3](../README.md#33-outils-réels-de-lagence) |
+| **Dump NetXMS** | Données réelles de production, figées au 07/08/2026 — visualisation locale uniquement, jamais en production | [README § 3.1](../README.md#31-base-netxms-restaurée-depuis-le-dump) |
+| **Journal Centreon** | Export de `centreon_storage.logs`, 25/09 → 27/10/2026 — visualisation locale uniquement | [README § 3.2](../README.md#32-export-du-journal-centreon) |
+| **Outils de laboratoire** | Vrais Zabbix/iTop/Centreon aux versions de l'agence, supervisant les conteneurs de la pile. Une vraie panne (arrêter un conteneur) produit une vraie alerte. | [README § 3.3](../README.md#33-outils-de-laboratoire), [tools/README.md](../tools/README.md) |
+| **Outils de l'agence** | Le réseau réel, en direct | [README § 3.4](../README.md#34-outils-réels-de-lagence) |
 
 ### Le dump NetXMS en détail
 
@@ -267,6 +345,23 @@ Deux règles de sécurité :
 - **Le dump reste hors de git** et la base n'est accessible que depuis le poste
   (`127.0.0.1:5438`).
 
+Après une mise à jour de `netxms_readonly_role.sql` (nouveaux droits pour la
+fiche d'équipement), le rejouer sur une base déjà restaurée :
+
+```bash
+docker compose --profile netxms exec -T netxms-db psql -U netxms -d netxms   -v reader_password="<NETXMS_DB_READER_PASSWORD>" -f - < database/netxms_readonly_role.sql
+```
+
+### Le journal Centreon en détail
+
+`database/alertes.sql` est un export **tabulé** de la table
+`centreon_storage.logs` (et non un dump SQL) : 47 132 événements de 12 hôtes
+ANPTIC, du 25/09 au 27/10/2026. `integrations/centreon_logs.py` le rejoue
+dans l'ordre pour reconstituer le dernier état de chaque hôte et de chaque
+service ; le collecteur le lit par `docker-compose.dumps.yml` (lecture seule).
+L'export fourni ne contient que des états OK : il donne 12 hôtes en service et
+aucune alerte. Il est exclu de git.
+
 ## Garanties envers la production
 
 À présenter à l'équipe sécurité de l'agence :
@@ -274,9 +369,9 @@ Deux règles de sécurité :
 | Garantie | Comment elle est tenue |
 |---|---|
 | **Charge constante et connue** | Une série de requêtes par outil toutes les `COLLECT_INTERVAL_S` secondes (300 par défaut), quel que soit le nombre d'utilisateurs connectés. Les courbes à la demande sont mises en cache. |
-| **Lecture seule** | Aucun connecteur n'écrit chez un outil. Pour NetXMS par la base, le compte `noc_reader` est en lecture seule **imposée par le serveur**. |
-| **Droits minimaux** | `netxms_readonly_role.sql` n'accorde que les colonnes lues, jamais les secrets. Pour Zabbix : un jeton d'API révocable ; pour iTop : un compte de service dédié. |
-| **Pas de copie brute des données** | L'inventaire et les alertes courantes résident dans l'instantané Redis, qui expire après trois cycles si la collecte s'arrête. PostgreSQL conserve les opérations du NOC et des agrégats KPI journaliers, pas une copie des données brutes des outils. |
+| **Lecture seule** | Aucun connecteur n'écrit chez un outil : comptes en lecture sur les API (NetXMS, Centreon, Nagios, NSP), jeton d'API révocable pour Zabbix, compte de service dédié pour iTop. |
+| **Droits minimaux** | Les comptes ne demandent que la lecture des objets supervisés et des alertes ; aucun champ de contact Zabbix n'est lu. |
+| **Pas de copie brute des données** | L'inventaire et les alertes courantes résident dans l'instantané Redis, qui expire après trois cycles si la collecte s'arrête. PostgreSQL conserve les comptes, les objectifs SLA, le journal d'audit et des agrégats journaliers, pas une copie des données des outils. |
 | **Robustesse** | Délais de garde, disjoncteur, cycle borné : un outil lent ne peut pas être submergé par le NOC. |
 
 ## Ajouter un nouvel outil
@@ -287,10 +382,10 @@ Deux règles de sécurité :
 2. Ajouter la table de traduction de ses gravités dans `normalize.py`.
 3. Ajouter une branche dans `build_client()` et le nom dans `TOOL_NAMES`
    (`integrations/config.py`).
-4. Ajouter ses priorités dans `STATE_PRIORITY` et `REFERENCE_PRIORITY`
-   (`collector/merge.py`).
+4. Ajouter son nom dans `REFERENCE_PRIORITY` (`collector/merge.py`) : ordre
+   de préférence pour le nom, le site et l'organisation d'un équipement.
 5. Déclarer `<OUTIL>_API_URL`, `_USER`, `_PASSWORD` dans `docker-compose.yml`
    (services `collector` **et** `backend`) et dans `.env.example`.
-6. Ajouter son libellé dans `frontend/src/lib/vocabulary.js` (`TOOL_LABEL`) et
-   son nom dans `SUPERVISION_TOOLS`.
-7. Reconstruire : `docker compose up -d --build collector backend frontend`.
+6. Ajouter son libellé dans `frontend/src/lib/vocabulary.js` (`TOOL_LABEL`).
+7. Vérifier contre l'instance réelle : `python -m collector.probe <outil>`.
+8. Reconstruire : `docker compose up -d --build collector backend frontend`.

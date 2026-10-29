@@ -173,9 +173,7 @@ export default function NodesPage() {
               onChange={(value) => setParam("source_tool", value)}
               allLabel="Tous les outils"
               width={140}
-              options={Object.keys(TOOL_LABEL)
-                .filter((tool) => tool !== "manual")
-                .map((tool) => ({ value: tool, label: toolLabel(tool) }))}
+              options={Object.keys(TOOL_LABEL).map((tool) => ({ value: tool, label: toolLabel(tool) }))}
             />
           </Toolbar>
         </div>

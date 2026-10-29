@@ -37,6 +37,7 @@ from app.core.config import (
     CORS_ORIGINS,
     JWT_SECRET,
     LOG_LEVEL,
+    NOTIFICATIONS_ENABLED,
     REALTIME_ENABLED,
 )
 from app.core.rate_limit import rate_limit_middleware
@@ -61,7 +62,7 @@ def _check_schema() -> None:
             text(
                 """
                 SELECT array_agg(expected.name)
-                FROM (VALUES ('noc_user'), ('ops_alert_state'), ('kpi_daily'))
+                FROM (VALUES ('noc_user'), ('ops_audit_log'), ('kpi_daily'))
                      AS expected(name)
                 WHERE NOT EXISTS (
                     SELECT 1 FROM information_schema.tables
@@ -129,6 +130,13 @@ async def lifespan(app: FastAPI):
             "REALTIME_ENABLED=false : aucune alerte ne sera poussée vers les "
             "navigateurs. Les écrans se rafraîchiront par sondage uniquement."
         )
+
+    if NOTIFICATIONS_ENABLED:
+        # Import local : le service tire Twilio et smtplib, inutiles quand
+        # les notifications sont coupées.
+        from app.services.notification_service import retry_loop
+
+        tasks.append(asyncio.create_task(retry_loop(stop), name="notifications-retentees"))
 
     yield
 

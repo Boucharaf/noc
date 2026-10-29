@@ -1,6 +1,6 @@
-from datetime import datetime
-from types import SimpleNamespace
+from datetime import date
 
+from app.services import kpi_service
 from app.services.kpi_service import monthly_summary, monthly_trend
 
 
@@ -39,48 +39,35 @@ def test_monthly_delta_is_unavailable_when_previous_period_is_sparse():
     }
 
 
-class _RowsResult:
-    def __init__(self, rows):
-        self.rows = rows
-
-    def all(self):
-        return self.rows
-
-
-class _MonthlyTrendSession:
-    def __init__(self, results):
-        self.results = iter(results)
-
-    def execute(self, _query):
-        return _RowsResult(next(self.results))
-
-
-def test_monthly_trend_returns_calendar_months_and_noc_alert_counts():
-    db = _MonthlyTrendSession(
+def test_monthly_delta_is_computed_when_both_months_are_reliable():
+    db = _Session(
         [
-            [
-                SimpleNamespace(
-                    period=datetime(2026, 10, 1),
-                    avg_alerts=3.24,
-                    availability_pct=99.12,
-                )
-            ],
-            [SimpleNamespace(period=datetime(2026, 10, 1), handled=8)],
-            [SimpleNamespace(period=datetime(2026, 10, 1), resolved=5)],
+            (99.5, 4.0, 1.0, 2.0, 600, 20),
+            (98.0, 5.0, 2.0, 3.0, 600, 30),
         ]
     )
 
-    result = monthly_trend(db, 2026, 10, months=12)
+    result = monthly_summary(db, 2026, 10)
 
-    assert len(result) == 12
-    assert (result[0]["year"], result[0]["month"]) == (2025, 11)
-    assert (result[-1]["year"], result[-1]["month"]) == (2026, 10)
-    assert result[-1] == {
-        "year": 2026,
-        "month": 10,
-        "avg_alerts": 3.2,
-        "availability_pct": 99.12,
-        "handled": 8,
-        "resolved": 5,
+    assert result["previous_reliable"] is True
+    assert result["delta"] == {
+        "availability_pct": 1.5,
+        "avg_alerts": -1.0,
+        "avg_critical": -1.0,
     }
-    assert result[0]["handled"] == 0
+
+
+def test_monthly_trend_reads_the_daily_rows_of_the_calendar_month(monkeypatch):
+    calls = []
+
+    def trend(_db, **kwargs):
+        calls.append(kwargs)
+        return [{"day": "2026-12-01"}]
+
+    monkeypatch.setattr(kpi_service, "trend", trend)
+
+    assert monthly_trend(None, 2026, 12, site="Ouaga DGI") == [{"day": "2026-12-01"}]
+    # Décembre se termine au 1er janvier de l'année suivante.
+    assert calls == [
+        {"site": "Ouaga DGI", "start_at": date(2026, 12, 1), "end_at": date(2027, 1, 1)}
+    ]

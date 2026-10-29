@@ -1,412 +1,248 @@
+"""Traduction des données propres à chaque outil (tickets et CI iTop,
+services Centreon).
+
+Retirés avec les fonctionnalités correspondantes (commit d4a70d7) : contexte
+métier des CI (propriétaire, service, criticité), interfaces réseau,
+dépendances entre hôtes, cibles SLA publiées dans l'instantané et
+conservation des nœuds désactivés — ceux-ci sont désormais exclus du parc
+(test_data_quality::test_collector_excludes_disabled_nodes).
+"""
 from __future__ import annotations
 
 import asyncio
-import sys
-from pathlib import Path
+from datetime import datetime, timezone
 
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from collector.cycle import poll_tool, run_cycle  # noqa: E402
-from collector.merge import merge_nodes  # noqa: E402
-from integrations.centreon import CentreonClient  # noqa: E402
-from integrations.itop import ITopClient  # noqa: E402
-from integrations.models import NetworkInterface, Node, ToolHealth  # noqa: E402
-from integrations.base import ToolUnavailable  # noqa: E402
-from integrations.netxms_db import NetXMSDatabaseClient  # noqa: E402
-from integrations.zabbix import ZabbixClient  # noqa: E402
+from integrations.base import ToolUnavailable
+from integrations.centreon import CentreonClient
+from integrations.itop import ITopClient
 
 
-def test_merge_preserves_ci_context_interfaces_and_impact_links():
-    ci = Node(
-        tool="itop",
-        ref="ci-1",
-        name="Routeur central",
-        hostname="core-rtr",
-        owner="Equipe réseau",
-        business_service="WAN national",
-        criticality="high",
-        interfaces=(
-            NetworkInterface(
-                tool="netxms",
-                ref="if-1",
-                name="GigabitEthernet1/0/1",
-                state="up",
-                speed_mbps=1000,
-            ),
-        ),
-    )
-    router = Node(
-        tool="centreon",
-        ref="host-1",
-        name="core-rtr",
-        hostname="core-rtr",
-        depends_on=("centreon:host-2", "centreon:host-1"),
-        source_status="UP",
-    )
-    dependent = Node(
-        tool="centreon",
-        ref="host-2",
-        name="Agence-01",
-        hostname="agence-01",
-    )
-
-    merged, _ = merge_nodes([ci, router, dependent])
-    by_name = {node.name: node for node in merged}
-
-    assert by_name["Routeur central"].owner == "Equipe réseau"
-    assert by_name["Routeur central"].business_service == "WAN national"
-    assert by_name["Routeur central"].criticality == "high"
-    assert by_name["Routeur central"].interfaces[0].speed_mbps == 1000
-    assert by_name["Routeur central"].source_status == "UP"
-    assert by_name["Routeur central"].depends_on == [by_name["Agence-01"].id]
-    assert by_name["Agence-01"].impacted_by == [by_name["Routeur central"].id]
+def _ticket_response(fields: str, extra: dict | None = None) -> dict:
+    """Réponse core/get d'un ticket, limitée aux champs demandés — comme iTop."""
+    available = {
+        "id": "7",
+        "ref": "I-000007",
+        "title": "Lien indisponible",
+        "status": "assigned",
+        "start_date": "2026-09-30 10:00:00",
+        "last_update": "2026-09-30 10:05:00",
+        "priority": "2",
+        "org_id_friendlyname": "Ministère des Finances",
+        "functionalcis_list": [{"functionalci_id": "42", "functionalci_name": "RTR-01"}],
+        "agent_id_friendlyname": "A. Traoré",
+        "team_id_friendlyname": "Réseau",
+        "assignment_date": "2026-09-30 10:02:00",
+        **(extra or {}),
+    }
+    requested = set(fields.split(","))
+    return {
+        "objects": {
+            "Incident::7": {
+                "key": "7",
+                "fields": {key: value for key, value in available.items() if key in requested},
+            }
+        },
+        "message": "Found: 1",
+    }
 
 
-def test_disabled_source_node_is_preserved_as_inactive():
-    node = Node(
-        tool="zabbix",
-        ref="host-disabled",
-        name="Switch désactivé",
-        enabled=False,
-        state="up",
-    )
-
-    merged, _ = merge_nodes([node])
-
-    assert merged[0].enabled is False
-
-
-def test_poll_tool_collects_optional_sla_targets_without_external_services():
-    class FakeClient:
-        async def check(self):
-            return ToolHealth(tool="itop", reachable=True)
-
-        async def fetch_nodes(self):
-            return []
-
-        async def fetch_alerts(self):
-            return []
-
-        async def fetch_sla_targets(self):
-            return [{"ref": "slt-1", "name": "WAN", "value": "4"}]
-
-    snapshot = asyncio.run(poll_tool("itop", FakeClient()))
-    assert snapshot.health.reachable
-    assert snapshot.sla_targets == ({"ref": "slt-1", "name": "WAN", "value": "4"},)
-
-
-def test_itop_ticket_fields_and_sla_targets_are_normalized():
+def test_itop_ticket_details_and_sla_targets_are_normalized():
     client = ITopClient("http://itop", ticket_classes=("Incident",))
 
-    async def fake_call(operation, payload):
+    async def fake_call(_operation, payload):
         if payload.get("class") == "SLT":
             return {
                 "objects": {
-                    "slt-1": {
-                        "key": "slt-1",
-                        "fields": {"name": "WAN critique", "metric": "TTO", "value": "4", "unit": "hours"},
+                    "SLT::1": {
+                        "key": "1",
+                        "fields": {
+                            "name": "WAN critique", "metric": "TTR", "value": "4", "unit": "hours",
+                        },
                     }
-                }
+                },
+                "message": "Found: 1",
             }
-        return {
-            "objects": {
-                "ticket-1": {
-                    "key": "ticket-1",
-                    "fields": {
-                        "ref": "INC-1",
-                        "title": "Lien indisponible",
-                        "status": "assigned",
-                        "start_date": "2026-09-30 10:00:00",
-                        "last_update": "2026-09-30 10:05:00",
-                        "priority": "2",
-                        "agent_id_friendlyname": "A. Traoré",
-                        "team_id_friendlyname": "Réseau",
-                        "service_id_friendlyname": "WAN",
-                        "functionalcis_list": [
-                            {"functionalci_id": "ci-1", "functionalci_name": "RTR-01"}
-                        ],
-                    },
-                }
-            }
-        }
+        return _ticket_response(payload["output_fields"])
 
     client._call = fake_call
     alerts = asyncio.run(client.fetch_alerts())
     targets = asyncio.run(client.fetch_sla_targets())
 
-    assert alerts[0].source_assignee == "A. Traoré"
-    assert alerts[0].source_team == "Réseau"
-    assert alerts[0].business_service == "WAN"
-    assert alerts[0].ticket_ref == "INC-1"
-    assert targets[0]["name"] == "WAN critique"
-    assert targets[0]["unit"] == "hours"
+    (ticket,) = alerts
+    assert ticket.kind == "itsm_ticket"
+    assert ticket.ticket_ref == "I-000007"
+    assert ticket.severity == "high"
+    assert ticket.node_ref == "42"
+    # Pris en charge = sorti du statut « nouveau ».
+    assert ticket.acknowledged is True
+    assert ticket.acknowledged_at is not None
+    assert ticket.details["agent"] == "A. Traoré"
+    assert ticket.details["team"] == "Réseau"
+    assert ticket.details["organisation"] == "Ministère des Finances"
+    assert targets == [
+        {"ref": "1", "name": "WAN critique", "metric": "TTR", "value": "4", "unit": "hours"}
+    ]
 
 
-def test_itop_ci_maps_business_criticality():
+def test_itop_ticket_fields_fall_back_level_by_level():
+    """Code de résolution, puis prise en charge, puis socle : une classe
+    personnalisée perd un niveau de détail, jamais tous ses tickets."""
+    start = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    end = datetime(2026, 10, 1, tzinfo=timezone.utc)
+
+    def run(refused: tuple[str, ...]):
+        client = ITopClient("http://itop", ticket_classes=("Incident",))
+        requested = []
+
+        async def fake_call(_operation, payload):
+            fields = payload["output_fields"]
+            requested.append(fields)
+            if any(name in fields.split(",") for name in refused):
+                raise ToolUnavailable("itop", "Error: invalid attribute code")
+            return _ticket_response(fields, {"resolution_code": ""})
+
+        client._call = fake_call
+        return asyncio.run(client.fetch_incident_history(start, end)), requested, client
+
+    # Instance standard : code de résolution lu ; vide = cause non saisie.
+    tickets, requested, _ = run(())
+    assert len(requested) == 1
+    assert tickets[0]["resolution_code"] == ""
+    assert tickets[0]["agent"] == "A. Traoré"
+
+    # Classe sans code de résolution : prise en charge conservée, champ absent.
+    tickets, requested, client = run(("resolution_code",))
+    assert len(requested) == 2
+    assert tickets[0]["resolution_code"] is None
+    assert tickets[0]["agent"] == "A. Traoré"
+    assert client.collection_warnings == []
+
+    # Classe sans champs de prise en charge : socle, perte signalée.
+    tickets, requested, client = run(("resolution_code", "agent_id_friendlyname"))
+    assert len(requested) == 3
+    assert tickets[0]["agent"] is None
+    assert tickets[0]["ref"] == "I-000007"
+    assert client.collection_warnings == [
+        "tickets Incident : détails de prise en charge indisponibles"
+    ]
+
+
+def test_itop_ci_maps_identity_organisation_site_and_ip():
     client = ITopClient("http://itop")
 
-    async def fake_get_class(cls, fields, optional_fields=(), page=1):
+    async def fake_get_class(cls, _fields):
         if cls != "NetworkDevice":
             return None
         return {
             "objects": {
-                "ci-1": {
-                    "key": "ci-1",
+                "NetworkDevice::1": {
+                    "key": "1",
                     "fields": {
+                        "id": "1",
                         "name": "RTR-01",
-                        "status": "implementation",
+                        "status": "production",
                         "org_id_friendlyname": "Ministère",
                         "location_id_friendlyname": "Ouagadougou",
                         "managementip": "10.0.0.1",
-                        "business_criticity": "high",
-                        "support_team_id_friendlyname": "Equipe réseau",
-                        "service_id_friendlyname": "WAN national",
                     },
                 }
             }
         }
 
     client._get_class = fake_get_class
-    nodes = asyncio.run(client.fetch_nodes())
+    (node,) = asyncio.run(client.fetch_nodes())
 
-    assert nodes[0].criticality == "high"
-    assert nodes[0].owner == "Equipe réseau"
-    assert nodes[0].business_service == "WAN national"
-    assert nodes[0].organisation == "Ministère"
-    assert nodes[0].site == "Ouagadougou"
-
-
-def test_netxms_database_maps_read_only_interface_inventory():
-    client = NetXMSDatabaseClient("postgresql://netxms-db:5432/netxms")
-
-    async def no_site_referential():
-        return False
-
-    async def fake_query(sql):
-        assert "json_agg" in sql
-        assert "WITH active_nodes AS" in sql
-        assert "JOIN active_nodes n ON n.id = cm.object_id" in sql
-        assert "JOIN active_nodes n ON n.id = i.node_id" in sql
-        return [
-            (
-                10,
-                "RTR-01",
-                "rtr-01.example.org",
-                "10.0.0.1",
-                0,
-                "Ouagadougou",
-                None,
-                None,
-                None,
-                ["Core"],
-                [{"id": 20, "name": "GigabitEthernet1/0/1", "status": 0}],
-            )
-        ]
-
-    client._uses_site_referential = no_site_referential
-    client._query = fake_query
-    nodes = asyncio.run(client.fetch_nodes())
-
-    assert nodes[0].interfaces == (
-        NetworkInterface(
-            tool="netxms",
-            ref="20",
-            name="GigabitEthernet1/0/1",
-            state="up",
-        ),
-    )
+    # La référence est l'identifiant numérique : c'est lui que les tickets citent.
+    assert node.ref == "1"
+    assert node.ip == "10.0.0.1"
+    assert node.organisation == "Ministère"
+    assert node.site == "Ouagadougou"
+    assert node.node_type == "NetworkDevice"
+    assert node.state == "unknown"
 
 
-def test_itop_ticket_enrichment_falls_back_when_optional_fields_are_unknown():
-    client = ITopClient("http://itop", ticket_classes=("Incident",))
-    calls = 0
+def test_itop_ci_without_numeric_id_is_rejected():
+    client = ITopClient("http://itop")
 
-    async def fake_call(operation, payload):
-        nonlocal calls
-        calls += 1
-        if "agent_id_friendlyname" in payload.get("output_fields", ""):
-            raise ToolUnavailable("itop", "invalid attribute code")
+    async def fake_get_class(cls, _fields):
+        if cls != "NetworkDevice":
+            return None
+        return {"objects": {"NetworkDevice::1": {"key": "1", "fields": {"name": "RTR-01"}}}}
+
+    client._get_class = fake_get_class
+    try:
+        asyncio.run(client.fetch_nodes())
+    except ToolUnavailable as error:
+        assert "sans identifiant numérique" in str(error)
+    else:
+        raise AssertionError("un CI sans id ne peut pas être rattaché à ses tickets")
+
+
+def test_itop_ci_falls_back_to_minimal_fields_on_unknown_attribute():
+    client = ITopClient("http://itop")
+    calls = []
+
+    async def fake_call(_operation, payload):
+        fields = payload["output_fields"]
+        calls.append(fields)
+        if "managementip" in fields:
+            raise ToolUnavailable("itop", "Error: invalid attribute code")
         return {
-            "objects": {
-                "ticket-1": {
-                    "key": "ticket-1",
-                    "fields": {
-                        "ref": "INC-1",
-                        "title": "Incident",
-                        "status": "new",
-                        "priority": "3",
-                        "functionalcis_list": [],
-                    },
-                }
-            }
+            "objects": {"NetworkDevice::1": {"key": "1", "fields": {"id": "1", "name": "RTR-01"}}},
+            "message": "Found: 1",
         }
 
     client._call = fake_call
-    alerts = asyncio.run(client.fetch_alerts())
+    result = asyncio.run(
+        client._get_class(
+            "NetworkDevice",
+            "id,name,status,org_id_friendlyname,location_id_friendlyname,managementip",
+        )
+    )
 
-    assert calls == 2
-    assert len(alerts) == 1
-    assert alerts[0].source_assignee is None
-    assert alerts[0].business_service is None
-
-
-def test_zabbix_maps_interfaces_acknowledger_and_suppression():
-    client = ZabbixClient("http://zabbix")
-
-    async def fake_call(method, params, authenticated=True):
-        if method == "host.get":
-            return [
-                {
-                    "hostid": "10",
-                    "host": "rtr-01",
-                    "name": "Routeur 01",
-                    "status": "0",
-                    "interfaces": [
-                        {
-                            "interfaceid": "20",
-                            "type": "2",
-                            "main": "1",
-                            "useip": "1",
-                            "ip": "10.0.0.1",
-                            "port": "161",
-                            "available": "1",
-                        }
-                    ],
-                    "hostgroups": [],
-                }
-            ]
-        if method == "problem.get":
-            return [
-                {
-                    "eventid": "900",
-                    "objectid": "30",
-                    "severity": "5",
-                    "name": "Lien indisponible",
-                    "clock": "100",
-                    "acknowledged": "1",
-                    "suppressed": "1",
-                    "suppression_data": [{"maintenanceid": "7", "suppress_until": "200"}],
-                    "acknowledges": [
-                        {"clock": "150", "userid": "42", "message": "Pris en charge"}
-                    ],
-                }
-            ]
-        if method == "trigger.get":
-            return [{"triggerid": "30", "hosts": [{"hostid": "10", "name": "Routeur 01"}]}]
-        if method == "user.get":
-            return [{"userid": "42", "username": "a.traore"}]
-        raise AssertionError(method)
-
-    client._call = fake_call
-    nodes = asyncio.run(client.fetch_nodes())
-    alerts = asyncio.run(client.fetch_alerts())
-
-    assert nodes[0].interfaces[0].name == "SNMP 10.0.0.1"
-    assert nodes[0].interfaces[0].state == "up"
-    assert alerts[0].acknowledged_by == "a.traore"
-    assert alerts[0].acknowledgement_note == "Pris en charge"
-    assert alerts[0].is_maintenance
-    assert alerts[0].maintenance_until is not None
+    assert len(calls) == 2
+    assert calls[-1] == "id,name,status,org_id_friendlyname"
+    assert result["objects"]["NetworkDevice::1"]["fields"]["name"] == "RTR-01"
 
 
-def test_centreon_maps_service_parent_check_freshness_and_ack_details():
+def test_centreon_service_alert_attaches_to_parent_host():
     client = CentreonClient("http://centreon")
-    row = {
+    host = {
+        "id": 12,
+        "type": "host",
+        "name": "RTR-01",
+        "fqdn": "10.0.0.1",
+        "status": {"code": 0, "name": "UP"},
+        "groups": [],
+    }
+    service = {
         "id": 55,
         "type": "service",
         "name": "Ping WAN",
         "information": "RRD loss 8%",
         "status": {"code": 2, "name": "CRITICAL"},
         "parent": {"id": 12, "name": "RTR-01"},
-        "in_downtime": True,
         "acknowledged": True,
-        "acknowledgement": {
-            "entry_time": "2026-10-01T08:00:00Z",
-            "author": {"name": "A. Traoré"},
-            "comment": "Analyse en cours",
-        },
+        "acknowledgement": {"entry_time": "2026-10-01T08:00:00Z"},
         "last_status_change": "2026-10-01T07:55:00Z",
-        "last_check": "2026-10-01T08:05:00Z",
-        "next_check": "2026-10-01T08:10:00Z",
     }
 
     async def fake_resources(resource_types, extra=None):
-        return [row]
+        # Requête d'alertes : Centreon ne rend que les statuts en problème.
+        rows = (service,) if extra and "statuses" in extra else (host, service)
+        return [row for row in rows if row["type"] in resource_types]
 
     client._resources = fake_resources
     nodes = asyncio.run(client.fetch_nodes())
     alerts = asyncio.run(client.fetch_alerts())
 
-    assert nodes[0].depends_on == ("centreon:host-12",)
-    assert nodes[0].last_output == "RRD loss 8%"
-    assert nodes[0].last_check_at is not None
-    assert nodes[0].next_check_at is not None
-    assert alerts[0].node_ref == "host-12"
-    assert alerts[0].acknowledged_by == "A. Traoré"
-    assert alerts[0].acknowledgement_note == "Analyse en cours"
-    assert alerts[0].is_maintenance
-
-
-def test_itop_progressively_drops_unsupported_ci_fields():
-    client = ITopClient("http://itop")
-    calls = []
-
-    async def fake_call(operation, payload):
-        fields = payload["output_fields"]
-        calls.append(fields)
-        if "support_team_id_friendlyname" in fields:
-            raise ToolUnavailable("itop", "invalid attribute code")
-        return {"objects": {"ci-1": {"key": "ci-1", "fields": {"name": "RTR-01"}}}}
-
-    client._call = fake_call
-    result = asyncio.run(
-        client._get_class(
-            "NetworkDevice",
-            "id,name,status,org_id_friendlyname,location_id_friendlyname,managementip,"
-            "business_criticity,support_team_id_friendlyname,contact_id_friendlyname",
-            ("business_criticity", "support_team_id_friendlyname", "contact_id_friendlyname"),
-        )
-    )
-
-    assert len(calls) == 3
-    assert "managementip" in calls[-1]
-    assert "business_criticity" in calls[-1]
-    assert "support_team_id_friendlyname" not in calls[-1]
-    assert result["objects"]["ci-1"]["fields"]["name"] == "RTR-01"
-
-
-def test_run_cycle_publishes_source_sla_targets_with_snapshot():
-    class FakeClient:
-        async def check(self):
-            return ToolHealth(tool="itop", reachable=True)
-
-        async def fetch_nodes(self):
-            return []
-
-        async def fetch_alerts(self):
-            return []
-
-        async def fetch_sla_targets(self):
-            return [{"ref": "slt-1", "name": "WAN"}]
-
-    class FakeStore:
-        sla_targets = None
-
-        async def write_tool_health(self, health):
-            pass
-
-        async def write_snapshot(self, nodes, alerts, meta, sla_targets=None):
-            self.sla_targets = sla_targets
-
-        async def diff_new_alerts(self, alerts):
-            return []
-
-        async def publish_new_alerts(self, alerts):
-            raise AssertionError("no alert expected")
-
-    store = FakeStore()
-    asyncio.run(run_cycle({"itop": FakeClient()}, store, timeout_s=2))
-
-    assert store.sla_targets == [{"tool": "itop", "ref": "slt-1", "name": "WAN"}]
+    # Un service est un contrôle de l'hôte, pas un équipement.
+    assert [node.ref for node in nodes] == ["host-12"]
+    assert nodes[0].ip == "10.0.0.1"
+    service_alert = next(alert for alert in alerts if alert.ref == "service-55")
+    assert service_alert.node_ref == "host-12"
+    assert service_alert.node_name == "RTR-01"
+    assert service_alert.severity == "critical"
+    assert service_alert.message == "RRD loss 8%"
+    assert service_alert.acknowledged is True
+    assert service_alert.acknowledged_at is not None

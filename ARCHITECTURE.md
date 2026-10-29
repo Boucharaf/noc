@@ -35,7 +35,7 @@ famille différemment.
 
 | | Famille 1 — État instantané | Famille 2 — Historique | Famille 3 — Données propres au NOC |
 |---|---|---|---|
-| **Exemples** | équipements et leur état, alertes actives, disponibilité des outils | courbes de métriques, incidents clos, tickets résolus | comptes et rôles, acquittements, notes d'exploitation, fenêtres de maintenance, incidents signalés à la main, abonnements aux notifications |
+| **Exemples** | équipements et leur état, alertes actives, disponibilité des outils | courbes de métriques, incidents clos, tickets résolus | comptes et rôles, objectifs SLA, journal d'audit, trace des notifications, bilans journaliers de la collecte |
 | **Propriétaire** | l'outil source | l'outil source | **le NOC** |
 | **Où ça vit chez nous** | **Redis**, instantané réécrit toutes les 300 s et dernière collecte complète par flux | **nulle part** — requête à la demande vers la source, cache Redis à TTL long | **PostgreSQL**, petite base |
 | **Perte acceptable ?** | oui : reconstruit au cycle suivant | oui : la source fait foi | **non** : irrécupérable |
@@ -51,10 +51,10 @@ liste partielle ne doit pas être présentée comme le dernier succès complet.
 ## 3. Schéma d'ensemble
 
 ```
-   Zabbix 7.0        Centreon 22.10        iTop 3.2
-   (+ NetXMS, Nagios, Nokia NSP — connecteurs prêts, activés par URL)
+   Zabbix 7.0    Centreon 22.10    NetXMS 5.0    Nagios    Nokia NSP    iTop 3.2
+   (en production : uniquement leurs API ; chaque outil s'active par son URL)
         │                   │                   │
-        │  ①  polling cadencé, 1 requête / 300 s / outil
+        │  ①  polling cadencé, 1 série de requêtes / 300 s / outil
         └───────────────────┼───────────────────┘
                             ▼
                   ┌──────────────────┐
@@ -65,8 +65,8 @@ liste partielle ne doit pas être présentée comme le dernier succès complet.
                            ▼
                   ┌──────────────────┐        ┌────────────────────┐
                   │      REDIS       │        │ PostgreSQL (petit) │
-                  │ état courant     │        │ comptes, ack,      │
-                  │ + cache historique│       │ maintenances,      │
+                  │ état courant     │        │ comptes, SLA,      │
+                  │ + cache historique│       │ audit, notif.,     │
                   └────────┬─────────┘        │ agrégats journaliers│
                            │                  └─────────┬──────────┘
                            │  ② lecture instantanée     │
@@ -117,23 +117,33 @@ C'est le motif dit de *query federation*, celui de Grafana ou de Perses.
 
 Trois choses, et rien d'autre :
 
-* **les données propres au NOC** (`ops_*`, comptes) — un technicien qui
-  acquitte à 3 h 12 avec un commentaire produit une information qui n'existe
-  dans aucun outil source. La perdre serait irrattrapable ;
-* **les agrégats journaliers** (`kpi_daily`) — une ligne par jour, par
-  localité et par outil : nombre d'incidents, MTTA, MTTR, disponibilité
-  moyenne. Quelques centaines de lignes par jour, soit quelques mégaoctets
+* **les données propres au NOC** — comptes et rôles, objectifs SLA, journal
+  d'audit, abonnements et trace des notifications. Aucun outil source ne les
+  connaît : les perdre serait irrattrapable. Le travail d'exploitation
+  lui-même (acquitter, affecter, résoudre) n'en fait **pas** partie : il se
+  fait dans l'outil source ou dans iTop, et le NOC le relit — sinon il
+  tiendrait un second circuit de travail qui divergerait de l'ITSM ;
+* **les agrégats journaliers** (`kpi_daily`) — une ligne par jour et par
+  site : équipements, pannes, alertes, disponibilité moyenne. Quelques centaines de lignes par jour, soit quelques mégaoctets
   par an. Ils permettent aux courbes du tableau Direction de porter sur six
   ou douze mois sans interroger les outils sur toute la période à chaque
   affichage ;
+* **le journal des changements d'état** (`hist_state`, `hist_alert`) — une
+  ligne quand un équipement ou un lien change d'état, une ligne par alerte de
+  son ouverture à sa fermeture. C'est la seule entorse à « ne rien
+  recopier », et elle est délibérée : sans elle, impossible de dire quelle a
+  été la disponibilité d'un lien sur l'année, ni de recalculer un bilan
+  perdu. Elle reste petite parce qu'elle ne garde que les changements,
+  jamais les mesures ;
 * rien de plus. **Pas de `metric_value`, pas de `fact_incident`, pas de
   TimescaleDB.**
 
 > **Pourquoi ne pas tout mettre dans Redis, y compris les comptes ?**
 > Redis sait persister (AOF), mais son modèle de données ne sait ni contrainte
-> d'intégrité, ni transaction multi-clés, ni requête analytique. Un
-> acquittement rattaché à un incident et à un compte utilisateur est
-> exactement ce qu'une base relationnelle fait bien. Et ce n'est pas là qu'est
+> d'intégrité, ni transaction multi-clés, ni requête analytique. Une entrée
+> d'audit rattachée à un compte, ou une notification qu'un seul backend doit
+> envoyer (clé unique servant de verrou), est exactement ce qu'une base
+> relationnelle fait bien. Et ce n'est pas là qu'est
 > le coût : la table des comptes d'un NOC pèse quelques kilooctets. Ce qui
 > coûtait, c'était la copie des métriques — elle a disparu.
 
@@ -146,10 +156,13 @@ lui seul.
 |---|---|---|---|
 | `noc:live:nodes` | string (JSON) | tous les équipements normalisés, fusionnés entre outils | `3 × COLLECT_INTERVAL_S` |
 | `noc:live:alerts` | string (JSON) | alertes actives, tous outils confondus | `3 × COLLECT_INTERVAL_S` |
-| `noc:live:meta` | string (JSON) | horodatage du cycle, durée, compteurs | `3 × COLLECT_INTERVAL_S` |
+| `noc:live:meta` | string (JSON) | horodatage du cycle, durée, compteurs, rapport de fusion, alertes orphelines | `3 × COLLECT_INTERVAL_S` |
+| `noc:live:latest` | string (JSON) | dernières mesures par équipement | `3 × COLLECT_INTERVAL_S` |
+| `noc:live:maintenance`, `noc:live:work_orders` | string (JSON) | maintenances planifiées, ordres de travail iTop | `3 × COLLECT_INTERVAL_S` |
+| `noc:live:trend` | liste (JSON) | historique court, un point par cycle | 24 h glissantes |
 | `noc:tool:<outil>` | string (JSON) | joignabilité, latence, dernier succès, dernière erreur | `3 × COLLECT_INTERVAL_S` |
-| `noc:source:<outil>:nodes|alerts` | string (JSON) | dernière collecte complète de chaque flux pour reprise et affichage périmé | sans expiration |
-| `noc:hist:<outil>:<empreinte>` | string (JSON) | réponse d'historique mise en cache | selon la fenêtre demandée |
+| `noc:source:<outil>:<flux>` | string (JSON) | dernière collecte complète de chaque flux (équipements, alertes, maintenances, interventions) pour reprise et affichage périmé | sans expiration |
+| `noc:hist:<empreinte>` | string (JSON) | courbe, historique iTop ou contrat SLT mis en cache | selon la donnée |
 
 **La durée de vie de trois cycles est un choix de sûreté**, pas un réglage
 arbitraire : si le collecteur meurt, les clés expirent au bout de quinze
@@ -182,5 +195,6 @@ Aucune architecture n'est gratuite. Celle-ci a deux contreparties assumées :
 | TimescaleDB et l'hypertable `metric_value` | duplication de l'historique Zabbix/Centreon — la cause du coût |
 | Tables `dim_*` et `fact_*` | remplacées par l'instantané Redis pour l'état courant et par `kpi_daily` pour les tendances |
 | Celery + Celery beat + trois bases Redis | un ordonnanceur asyncio dans un unique conteneur suffit pour des tâches cadencées ; Celery apportait un courtier, un backend de résultats et deux processus pour un besoin qui n'en demandait aucun |
-| `backend/scripts/seed_demo.py`, `database/legacy/generate_seed.py` | jeux de données fictifs — toute donnée affichée provient désormais d'une API ou d'une base d'outil |
+| `backend/scripts/seed_demo.py`, `database/legacy/generate_seed.py` | jeux de données fictifs — toute donnée affichée provient désormais d'une API d'outil (ou, en local seulement, d'un export de production) |
+| Acquittement, affectation, notes et incidents manuels dans le NOC (`ops_alert_state`, `ops_alert_timeline`, `ops_manual_incident`) ; maintenances et interventions saisies dans le NOC (`ops_maintenance_window`, `ops_field_intervention`) | un second circuit de travail, parallèle à iTop, qui divergeait de l'ITSM : ces gestes se font dans l'outil source ou dans iTop, et le NOC les relit |
 | Veilleur d'incidents interrogeant `fact_incident` | le collecteur détecte les nouvelles alertes lors de la comparaison entre deux instantanés, et publie directement sur le canal temps réel |

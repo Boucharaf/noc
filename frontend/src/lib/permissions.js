@@ -33,7 +33,7 @@ export const ROLE_DESCRIPTION = Object.freeze({
   technicien:
     "Console d'exploitation : traitement des alertes, acquittement, résolution.",
   agent_terrain:
-    "Terrain : interventions (ordres de travail iTop), signalement de pannes.",
+    "Terrain : interventions (ordres de travail iTop).",
 });
 
 const ALL = [ROLES.DIRECTEUR, ROLES.CHEF_NOC, ROLES.TECHNICIEN, ROLES.AGENT_TERRAIN];
@@ -58,11 +58,6 @@ export const PERMISSIONS = Object.freeze({
   VIEW_COVERAGE: ALL,
   VIEW_INTEROP: [ROLES.DIRECTEUR, ROLES.CHEF_NOC, ROLES.TECHNICIEN],
 
-  // --- Signalements ---
-  // Plus d'acquittement, d'affectation ni de clôture d'alerte dans le NOC :
-  // ce circuit est tenu dans iTop.
-  CREATE_MANUAL_INCIDENT: ALL, // _MANUAL
-
   // --- Maintenance ---
   // Lecture seule : les maintenances se planifient dans iTop (changements)
   // ou Zabbix, plus dans le NOC.
@@ -74,6 +69,7 @@ export const PERMISSIONS = Object.freeze({
   // ses propres identifiants depuis « Mon compte », qui n'exige aucune
   // permission (auth.py::update_me).
   MANAGE_USERS: [ROLES.CHEF_NOC], // users.py::_MANAGE_USERS
+  VIEW_AUDIT: [ROLES.DIRECTEUR, ROLES.CHEF_NOC], // audit.py::_VIEW_AUDIT
   MANAGE_SLA_TARGETS: [ROLES.DIRECTEUR, ROLES.CHEF_NOC], // sla.py update_target
 });
 

@@ -23,7 +23,7 @@ from app.schemas.auth import (
     TokenResponse,
 )
 from app.schemas.users import UserOut, UserSelfUpdate
-from app.services import auth_service, user_service
+from app.services import audit_service, auth_service, user_service
 
 router = APIRouter(prefix="/api/auth", tags=["authentification"])
 
@@ -121,12 +121,17 @@ def login(
         user = auth_service.authenticate_with_password(db, payload.username, payload.password)
     except HTTPException:
         _record_failure(scopes)
+        # L'identifiant tenté, jamais le mot de passe.
+        audit_service.record(
+            db, "auth.login_failed", target=payload.username[:150], request=request
+        )
         raise
 
     # Le compteur de l'IP n'est PAS remis à zéro : un attaquant qui détient
     # un compte valide effacerait sinon ses échecs en s'y connectant.
     for scope, subject, _ in scopes[1:]:
         session_store.clear_failures(scope, subject)
+    audit_service.record(db, "auth.login", actor=user, target=user.username, request=request)
     return _issue_session(db, user, response)
 
 
@@ -152,6 +157,7 @@ def pin_login(
         user = auth_service.authenticate_with_pin(db, payload.pin)
     except HTTPException:
         session_store.register_pin_failure(ip)
+        audit_service.record(db, "auth.pin_login_failed", request=request)
         raise
 
     if user.role not in PIN_LOGIN_ALLOWED_ROLES:
@@ -159,9 +165,15 @@ def pin_login(
         # existe mais n'a pas le droit d'utiliser ce mode renseignerait un
         # attaquant sur la validité du PIN saisi.
         session_store.register_pin_failure(ip)
+        # Le journal, lui, peut nommer le compte : il n'est lu que par la salle.
+        audit_service.record(
+            db, "auth.pin_login_failed", actor=user, target=user.username,
+            detail={"reason": "role"}, request=request,
+        )
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Code PIN invalide.")
 
     session_store.clear_pin_failures(ip)
+    audit_service.record(db, "auth.pin_login", actor=user, target=user.username, request=request)
     return _issue_session(db, user, response)
 
 
@@ -238,6 +250,7 @@ def get_me(current_user: User = Depends(get_current_user), db: Session = Depends
 @router.patch("/me", response_model=UserOut)
 def update_me(
     payload: UserSelfUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -247,9 +260,17 @@ def update_me(
     n'est pas modifiable ici (le schéma refuse le champ) : seul un Chef NOC
     l'attribue, depuis la gestion des comptes.
     """
-    return UserOut(
-        **user_service.update_self(db, current_user, payload.model_dump(exclude_unset=True))
+    changes = payload.model_dump(exclude_unset=True)
+    previous_username = current_user.username
+    updated = user_service.update_self(db, current_user, changes)
+    detail = {"fields": sorted(field for field in changes if field != "current_password")}
+    if updated["username"] != previous_username:
+        detail["username"] = {"from": previous_username, "to": updated["username"]}
+    audit_service.record(
+        db, "auth.profile_updated", actor=current_user, target=updated["username"],
+        detail=detail, request=request,
     )
+    return UserOut(**updated)
 
 
 @router.patch("/me/password", status_code=status.HTTP_204_NO_CONTENT)
@@ -274,11 +295,23 @@ def change_my_password(
     # Changer son mot de passe invalide les autres sessions : c'est le
     # geste attendu quand on soupçonne une compromission.
     session_store.revoke_all_sessions(current_user.id)
+    audit_service.record(
+        db, "auth.password_changed", actor=current_user, target=current_user.username,
+        request=request,
+    )
 
 
 @router.post("/users/{user_id}/revoke-sessions", status_code=status.HTTP_204_NO_CONTENT)
 def revoke_user_sessions(
     user_id: int,
-    _admin: User = Depends(require_role("chef_noc")),
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_role("chef_noc")),
 ):
     session_store.revoke_all_sessions(user_id)
+    target = db.get(User, user_id)
+    audit_service.record(
+        db, "auth.sessions_revoked", actor=admin,
+        target=target.username if target is not None else None,
+        detail={"user_id": user_id}, request=request,
+    )

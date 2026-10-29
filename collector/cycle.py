@@ -28,10 +28,10 @@ from datetime import datetime, timezone
 from integrations.base import SourceClient
 from integrations.models import Alert, Node, ToolHealth, ToolSnapshot
 
-from . import config
+from . import config, history
 from .merge import MergedNode, attach_alerts, merge_nodes
 from .operations import active_maintenance_keys, link_operations
-from .rollup import observe, rollup_key
+from .rollup import export_accumulator, observe, rollup_key
 from .state import SnapshotStore, build_meta
 from .trend import sample as trend_sample
 
@@ -467,6 +467,20 @@ async def run_cycle(
         "single_source": report.single_source[:50],
     }
     meta["orphan_alerts"] = len(orphans)
+    # Échantillon nommé : sans lui, l'écran Interopérabilité dirait combien
+    # d'alertes ne trouvent pas leur équipement, sans dire lesquelles.
+    meta["orphan_samples"] = [
+        {
+            "key": alert.key(),
+            "tool": alert.tool,
+            "kind": alert.kind,
+            "severity": alert.severity,
+            "message": alert.message,
+            "node_ref": alert.node_ref,
+            "node_name": alert.node_name,
+        }
+        for alert in sorted(orphans, key=lambda a: (a.tool, a.ref))[:50]
+    ]
 
     # AVANT l'instantané : le backend recale ses caches sur la version de
     # l'instantané (clé meta) et relirait sinon les valeurs du cycle précédent.
@@ -478,12 +492,30 @@ async def run_cycle(
     except Exception:  # noqa: BLE001 — les mini-courbes ne valent pas un cycle perdu
         logger.exception("Historique court non enregistré")
 
+    # Journal historique (périodes d'état, vie des alertes) : après la
+    # publication, borné dans le temps, et jamais bloquant — une base du NOC
+    # lente ou indisponible retarde l'historique, pas le tableau de bord. Le
+    # cycle suivant reprend là où celui-ci s'est arrêté.
+    if config.HISTORY_ENABLED:
+        try:
+            await asyncio.wait_for(
+                history.record(merged, all_alerts, maintenance[0], source_data_status,
+                               started_at),
+                timeout=config.HISTORY_TIMEOUT_S,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Journal historique non mis à jour pour ce cycle")
+
     # Alimente les compteurs du bilan journalier (collector/rollup.py). Fait
     # ici, dans le cycle, et non par une requête séparée : l'agrégat doit
     # porter sur ce qui a RÉELLEMENT été observé, cycle par cycle, y compris
     # les cycles où un outil manquait à l'appel.
     if config.ROLLUP_ENABLED:
         _observe_rollup(merged, technical_alerts, started_at, *maintenance)
+        try:
+            await store.save_rollup(export_accumulator())
+        except Exception:  # noqa: BLE001 — sauvegarde manquée : reprise au cycle suivant
+            logger.exception("Compteurs du bilan journalier non sauvegardés")
 
     # La diffusion se fait APRÈS l'écriture de l'instantané : un navigateur
     # réveillé par une nouvelle alerte va immédiatement relire le parc, et il

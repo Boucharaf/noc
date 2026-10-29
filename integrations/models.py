@@ -106,6 +106,16 @@ class Node:
     # Renseigné par les outils d'ITSM (iTop) uniquement.
     organisation: str | None = None
     node_type: str | None = None
+    # Faits propres à la source, affichés sur la fiche d'équipement et
+    # jamais utilisés pour décider de l'état ni de la fusion. Clés connues :
+    #   inventory     {vendor, model, serial, os, type, location}
+    #   boot_time     dernier démarrage (datetime)
+    #   down_since    hors service depuis (datetime)
+    #   availability  calcul de l'agence dans NetXMS : {pct, mttr_h, mtbf_h,
+    #                 failures, downtime_s, computed_at}
+    #   interfaces    {total, enabled, enabled_up, enabled_down, watched,
+    #                 watched_down, capacity_bps}
+    details: dict = field(default_factory=dict)
     observed_at: datetime = field(default_factory=_now)
     stale: bool = False
 

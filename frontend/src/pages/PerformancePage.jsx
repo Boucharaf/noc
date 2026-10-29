@@ -1,16 +1,18 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
+import AvailabilityRanking from "../components/domain/AvailabilityRanking";
 import NetworkVitals from "../components/domain/NetworkVitals";
 import { FleetStatesChart } from "../components/domain/FleetInsights";
 import Panel from "../components/ui/Panel";
+import Stat from "../components/ui/Stat";
 import { LineChart } from "../components/charts";
 import { FilterSelect, Segmented, Toolbar } from "../components/ui/Controls";
 import { Meter } from "../components/ui/Stat";
 import { PageHeader } from "../components/layout/TopBar";
 import { QueryBoundary } from "../components/ui/States";
 import { METRIC_TYPES, metricMeta, thresholdColor } from "../lib/vocabulary";
-import { bandwidth, decimal, num, smartTime } from "../lib/format";
+import { bandwidth, dateTime, decimal, duration, num, pct, smartTime } from "../lib/format";
 import {
   useNetworkKpi,
   useNetworkRanking,
@@ -142,6 +144,10 @@ export default function PerformancePage() {
           compact
         />
       </div>
+
+      <LinksAndAgency data={network.data} />
+
+      <AvailabilityRanking />
 
       <div className="flex flex-wrap gap-1">
         {METRIC_TYPES.map((type) => {
@@ -299,6 +305,87 @@ export default function PerformancePage() {
       </div>
 
       <FleetStatesChart height={200} />
+    </div>
+  );
+}
+
+/**
+ * Liens et disponibilité calculée par l'agence — publiés par NetXMS
+ * (état des interfaces, attributs personnalisés des nœuds). Rien n'est
+ * affiché quand aucune source ne les publie sur le périmètre.
+ */
+function LinksAndAgency({ data }) {
+  const links = data?.links;
+  const agency = data?.agency_availability;
+  if (!links && !agency) return null;
+  return (
+    <div className="grid grid-cols-12 gap-2.5">
+      {links && (
+        <div className={`col-span-12 ${agency ? "lg:col-span-7" : ""}`}>
+          <Panel
+            title="Liens et interfaces"
+            subtitle={`état réel des interfaces · ${num(links.nodes)} équipement(s)`}
+          >
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <Stat
+                compact
+                label="Liens surveillés actifs"
+                value={pct(links.watched_up_pct, 2)}
+                color={thresholdColor("availability_pct", links.watched_up_pct) ?? undefined}
+                hint={`${num(links.watched - links.watched_down, "0")} / ${num(links.watched, "0")} attendus actifs`}
+              />
+              <Stat
+                compact
+                label="Interfaces activées actives"
+                value={pct(links.enabled_up_pct, 1)}
+                hint={`${num(links.enabled_up, "0")} / ${num(links.enabled_up + links.enabled_down, "0")} · ports libres compris`}
+              />
+              <Stat
+                compact
+                label="Liens surveillés coupés"
+                value={num(links.watched_down, "0")}
+                color={links.watched_down ? "var(--sev-high)" : undefined}
+              />
+              <Stat
+                compact
+                label="Capacité active"
+                value={bandwidth(links.capacity_bps / 1e6)}
+                hint="débit nominal des interfaces actives"
+              />
+            </div>
+          </Panel>
+        </div>
+      )}
+      {agency && (
+        <div className={`col-span-12 ${links ? "lg:col-span-5" : ""}`}>
+          <Panel
+            title="Disponibilité calculée par l'agence"
+            subtitle={`NetXMS · ${num(agency.nodes)} équipement(s)${
+              agency.computed_at ? ` · calcul du ${dateTime(agency.computed_at)}` : ""
+            }`}
+          >
+            <div className="grid grid-cols-3 gap-2">
+              <Stat
+                compact
+                label="Disponibilité moyenne"
+                value={pct(agency.avg_pct, 2)}
+                color={thresholdColor("availability_pct", agency.avg_pct) ?? undefined}
+              />
+              <Stat
+                compact
+                label="MTTR moyen"
+                value={duration(agency.avg_mttr_h != null ? agency.avg_mttr_h * 60 : null)}
+                hint={`${num(agency.failures, "0")} pannes comptées`}
+              />
+              <Stat
+                compact
+                label="MTBF moyen"
+                value={duration(agency.avg_mtbf_h != null ? agency.avg_mtbf_h * 60 : null)}
+              />
+            </div>
+          </Panel>
+        </div>
+      )}
     </div>
   );
 }

@@ -5,9 +5,10 @@
 | Déclencheur | Quand | Code |
 |---|---|---|
 | **Nouvelle alerte d'un outil** | Le collecteur voit une alerte absente du cycle précédent, et la publie sur Redis | `collector/state.py` → `backend/app/services/realtime_service.py` |
-| **Incident signalé à la main** | À sa création, s'il est grave | `backend/app/routes/operations.py` |
 
-Dans les deux cas, une notification sortante ne part que si :
+C'est le seul déclencheur : le NOC ne crée pas d'alerte lui-même, et les
+tickets iTop (`itsm_ticket`) ne sont pas diffusés comme des alertes. Une
+notification sortante ne part que si :
 
 1. `NOTIFICATIONS_ENABLED=true` ;
 2. la gravité fait partie de `NOTIFY_SEVERITIES` (par défaut : `critical,high`,
@@ -17,9 +18,21 @@ Dans les deux cas, une notification sortante ne part que si :
 
 Deux cas où **rien ne part**, volontairement :
 
-- **Au démarrage du collecteur** (ou après une longue coupure), toutes les
-  alertes seraient « nouvelles » : rien n'est diffusé, sinon l'équipe recevrait
-  des centaines de messages pour des pannes anciennes.
+- **Au tout premier démarrage** (Redis neuf ou vidé), toutes les alertes
+  seraient « nouvelles » : rien n'est diffusé, sinon l'équipe recevrait des
+  centaines de messages pour des pannes anciennes. Ce cas est reconnu par un
+  marqueur durable (`noc:live:alerts:seen_since`), pas par l'absence
+  d'alertes : un réseau sans aucune alerte qui voit apparaître une panne la
+  notifie bien.
+
+Après un **redémarrage ou une coupure du collecteur, même longue**, les
+alertes apparues pendant la coupure sont diffusées et notifiées au retour :
+la mémoire des alertes déjà vues (`noc:live:alerts:seen`) n'expire plus.
+Pour qu'un retour de coupure ne déclenche pas des dizaines de messages,
+au-delà de `NOTIFY_BURST_MAX` (10) nouvelles alertes graves dans un même
+cycle, **un seul message récapitulatif** part (courriel et SMS), listant
+jusqu'à 50 alertes. Chacune est tout de même réservée dans
+`ops_alert_notified` : aucune ne sera notifiée une seconde fois.
 - **Une alerte qui dure** n'est notifiée qu'une fois : seule la nouveauté est
   un événement.
 
@@ -30,7 +43,7 @@ Deux cas où **rien ne part**, volontairement :
 | **Écran (WebSocket)** | Tous les utilisateurs connectés | Toujours actif (`REALTIME_ENABLED`) |
 | **Courriel** | Comptes abonnés + listes fixes | `SMTP_*`, voir ci-dessous |
 | **SMS** (Twilio) | Numéros de `NOC_SMS_RECIPIENTS` | `TWILIO_*` |
-| **Notification navigateur** (Web Push) | Utilisateurs qui l'ont activée dans *Mon compte* | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` |
+| **Notification navigateur** (Web Push) | Utilisateurs qui l'ont activée dans *Mon compte* | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` — ⚠️ l'abonnement s'enregistre, mais **aucun envoi n'est déclenché sur alerte** aujourd'hui (chapitre 10) |
 
 ## Le courriel en détail
 
@@ -87,13 +100,17 @@ Après toute modification : `docker compose up -d backend`.
 | Garantie | Mécanisme |
 |---|---|
 | **Pas de doublon**, même avec plusieurs backends | Avant d'envoyer, le backend insère la clé de l'alerte dans `ops_alert_notified`. La clé primaire fait office de verrou : un seul backend réussit l'insertion, les autres n'envoient rien. |
+| **Un envoi échoué est retenté** | Il est rangé dans `ops_notification_retry` et retenté à 1, 5, 15, 30 puis 60 minutes, tant que l'alerte est active, dans la limite de `NOTIFY_RETRY_MAX_ATTEMPTS` tentatives (6) et de `NOTIFY_RETRY_MAX_AGE_MIN` minutes (360). Courriel : destinataires relus à chaque tentative. SMS : seuls les numéros en échec sont retentés. Plusieurs backends ne retentent jamais le même envoi (`FOR UPDATE SKIP LOCKED`). |
 | **Traçabilité** | Chaque envoi (réussi ou non) est journalisé dans `ops_notification_log` : canal, destinataires, statut, erreur. |
 | **Un envoi lent ne bloque rien** | Les envois se font dans un fil séparé ; l'affichage temps réel n'attend pas le serveur SMTP. |
 | **Une panne de messagerie n'arrête pas le NOC** | Les erreurs d'envoi sont journalisées, jamais propagées. |
 
-> Conséquence de l'anti-doublon : si un envoi **échoue** (serveur SMTP en
-> panne), il n'est **pas retenté** pour cette alerte. L'alerte reste visible à
-> l'écran, et l'échec est dans `ops_notification_log`.
+> Un envoi qui échoue encore après toutes ses tentatives, ou dont l'alerte
+> est trop ancienne, est **abandonné** : statut `abandoned` dans
+> `ops_notification_log`, compteur `notifications.abandoned_24h` de
+> `/api/health`, et alerte « notification d'alerte abandonnée » dans Zabbix
+> si le NOC y est supervisé (chapitre 9). Une alerte refermée dans son outil
+> entre-temps n'est plus notifiée.
 
 ## Diagnostic : pourquoi je ne reçois rien
 
@@ -103,9 +120,12 @@ Dans l'ordre :
    il dit ce qui manque (SMTP non configuré, envoi coupé, aucun destinataire).
 2. **Le bouton *Envoyer un test*** fonctionne-t-il ? Sinon, lire le message
    d'erreur SMTP affiché.
-3. **Y a-t-il de nouvelles alertes ?** Avec le dump NetXMS (données figées),
-   aucune alerte n'est jamais nouvelle : aucun courriel automatique ne part.
+3. **Y a-t-il de nouvelles alertes ?** Avec le dump NetXMS ou l'export du
+   journal Centreon (données figées), aucune alerte n'est jamais nouvelle :
+   aucun courriel automatique ne part.
 4. **La gravité est-elle dans `NOTIFY_SEVERITIES` ?**
-5. **L'alerte a-t-elle déjà été notifiée ?**
+5. **L'alerte a-t-elle déjà été notifiée, ou est-elle en attente ?**
    `docker compose exec -T postgres psql -U noc -d noc -c "select * from ops_notification_log order by id desc limit 10"`
+   et, pour les envois à retenter :
+   `docker compose exec -T postgres psql -U noc -d noc -c "select alert_key, channel, status, attempts, next_attempt_at, last_error from ops_notification_retry order by id desc limit 10"`
 6. **Les journaux du backend** : `docker compose logs backend | grep -i courriel`.

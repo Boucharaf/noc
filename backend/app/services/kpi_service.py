@@ -32,7 +32,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import NOC_BUSINESS_HOURS, SEVERITIES
-from app.models import AlertState, KpiDaily
+from app.models import KpiDaily
 from app.services import live_service
 
 logger = logging.getLogger(__name__)
@@ -306,10 +306,14 @@ def monthly_summary(db: Session, year: int, month: int, site: str | None = None)
 
     current = aggregate(year, month)
     previous = aggregate(*previous_month(year, month))
+    previous_reliable = previous["days_with_data"] >= 15
 
     def delta(field: str) -> float | None:
+        # Pas d'écart contre un mois lacunaire : il mesurerait les trous de
+        # collecte, pas l'évolution. Nul ici plutôt qu'à chaque lecteur — le
+        # rapport PDF l'imprimait sans regarder `previous_reliable`.
         a, b = current.get(field), previous.get(field)
-        if a is None or b is None:
+        if a is None or b is None or not previous_reliable:
             return None
         return round(a - b, 2)
 
@@ -327,9 +331,8 @@ def monthly_summary(db: Session, year: int, month: int, site: str | None = None)
         # Un mois dont moins de la moitié des jours ont des données ne doit
         # pas être présenté comme comparable. L'écran l'affiche en grisé.
         "reliable": current["days_with_data"] >= 15,
-        # Même règle pour le mois de référence : un écart calculé contre un
-        # mois lacunaire mesure les trous de collecte, pas l'évolution.
-        "previous_reliable": previous["days_with_data"] >= 15,
+        # Même règle pour le mois de référence (les écarts sont alors nuls).
+        "previous_reliable": previous_reliable,
     }
 
 
@@ -392,100 +395,3 @@ def sites_ranking(
         }
         for row in rows
     ]
-
-
-# ---------------------------------------------------------------------------
-# Causes — le seul historique que le NOC produit lui-même
-# ---------------------------------------------------------------------------
-def causes(
-    db: Session,
-    days: int = 90,
-    limit: int = 15,
-    start_at: datetime | None = None,
-    end_at: datetime | None = None,
-) -> list[dict]:
-    """Causes retenues par les exploitants sur la période.
-
-    C'est la donnée la plus précieuse du système, et la seule dont le NOC
-    est propriétaire : aucun outil de supervision ne sait qu'une coupure
-    venait d'un groupe électrogène à sec. Elle vient de `ops_alert_state`,
-    renseignée à la clôture par le technicien.
-    """
-    since = start_at or (datetime.now(timezone.utc) - timedelta(days=days))
-    query = select(AlertState.cause, func.count().label("count")).where(
-        AlertState.cause.isnot(None), AlertState.resolved_at >= since
-    )
-    if end_at is not None:
-        query = query.where(AlertState.resolved_at < end_at)
-    rows = db.execute(
-        query.group_by(AlertState.cause)
-        .order_by(func.count().desc())
-        .limit(limit)
-    )
-    results = [{"cause": row.cause, "count": row.count} for row in rows]
-    total = sum(row["count"] for row in results)
-    for row in results:
-        row["share_pct"] = round(100.0 * row["count"] / total, 1) if total else 0.0
-    return results
-
-
-def resolution_times(
-    db: Session,
-    days: int = 30,
-    start_at: datetime | None = None,
-    end_at: datetime | None = None,
-) -> dict:
-    """Délais de prise en charge et de résolution, mesurés par le NOC.
-
-    Calculés sur `ops_alert_state` et non sur les outils sources : le NOC
-    mesure SON délai de réaction, ce qui est la question posée en revue de
-    service. Le délai de détection de l'outil est une autre question, et
-    elle appartient à l'outil.
-    """
-    since = start_at or (datetime.now(timezone.utc) - timedelta(days=days))
-
-    tta_query = select(
-        func.avg(
-            func.extract("epoch", AlertState.acknowledged_at - AlertState.detected_at)
-        )
-    ).where(
-        AlertState.acknowledged_at.isnot(None),
-        AlertState.detected_at.isnot(None),
-        AlertState.acknowledged_at >= since,
-    )
-    if end_at is not None:
-        tta_query = tta_query.where(AlertState.acknowledged_at < end_at)
-    tta = db.execute(tta_query).scalar()
-
-    ttr_query = select(
-        func.avg(
-            func.extract("epoch", AlertState.resolved_at - AlertState.detected_at)
-        )
-    ).where(
-        AlertState.resolved_at.isnot(None),
-        AlertState.detected_at.isnot(None),
-        AlertState.resolved_at >= since,
-    )
-    if end_at is not None:
-        ttr_query = ttr_query.where(AlertState.resolved_at < end_at)
-    ttr = db.execute(ttr_query).scalar()
-
-    handled_query = select(func.count()).select_from(AlertState).where(
-        AlertState.resolved_at >= since
-    )
-    if end_at is not None:
-        handled_query = handled_query.where(AlertState.resolved_at < end_at)
-    handled = db.execute(handled_query).scalar()
-
-    return {
-        "period_days": (
-            max(1, (end_at - since).days) if end_at is not None else days
-        ),
-        # En minutes : un délai d'astreinte se raisonne en minutes, et
-        # afficher 14 400 secondes oblige chacun à diviser de tête.
-        # `is not None` et non une valeur de vérité : un délai moyen nul est
-        # une mesure, pas une absence de mesure.
-        "mtta_minutes": round(tta / 60, 1) if tta is not None else None,
-        "mttr_minutes": round(ttr / 60, 1) if ttr is not None else None,
-        "handled_alerts": int(handled or 0),
-    }

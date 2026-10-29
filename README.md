@@ -2,13 +2,19 @@
 
 Tableau de bord du **centre de supervision (NOC)** du réseau de
 l'administration burkinabè (RESINA, exploité par l'ANPTIC). La plateforme lit
-les outils de supervision existants — Zabbix, Centreon, iTop, NetXMS, et à
-terme Nagios et Nokia NSP — et présente un écran par métier : Directeur,
-Chef NOC, Technicien, Agent terrain.
+les outils de supervision existants **par leurs API** — Zabbix, Centreon,
+iTop, NetXMS, Nagios et Nokia NSP — et présente un écran par métier :
+Directeur, Chef NOC, Technicien, Agent terrain. Elle ne recopie pas les
+données des outils et n'en crée aucune : acquitter, affecter, résoudre se
+fait dans l'outil source ou dans iTop. Elle tient seulement un **journal des
+changements d'état** (équipements, liens, alertes) pour la disponibilité sur
+la durée.
 
-> **Ce fichier explique comment installer et faire tourner le projet.**
-> Pour **comprendre** le projet (métier, architecture, code, sécurité), lire
-> la documentation : **[docs/README.md](docs/README.md)**.
+> **Ce fichier explique comment installer, lancer et mettre à jour le
+> projet.** Pour **comprendre** le projet (métier, architecture, code,
+> sécurité), lire la documentation : **[docs/README.md](docs/README.md)**.
+> Une équipe qui **reprend** le projet commence par
+> [docs/12-reprise-du-projet.md](docs/12-reprise-du-projet.md).
 
 ---
 
@@ -17,12 +23,13 @@ Chef NOC, Technicien, Agent terrain.
 1. [Prérequis](#1-prérequis)
 2. [Installation et premier lancement](#2-installation-et-premier-lancement)
 3. [Choisir ses sources de données](#3-choisir-ses-sources-de-données)
-4. [Tester les alertes par courriel](#4-tester-les-alertes-par-courriel)
-5. [Commandes du quotidien](#5-commandes-du-quotidien)
-6. [Configuration : les variables essentielles](#6-configuration--les-variables-essentielles)
-7. [Adresses et ports](#7-adresses-et-ports)
-8. [Problèmes fréquents](#8-problèmes-fréquents)
-9. [Aller plus loin](#9-aller-plus-loin)
+4. [Mettre à jour une installation existante](#4-mettre-à-jour-une-installation-existante)
+5. [Tester les alertes par courriel](#5-tester-les-alertes-par-courriel)
+6. [Commandes du quotidien](#6-commandes-du-quotidien)
+7. [Configuration : les variables essentielles](#7-configuration--les-variables-essentielles)
+8. [Adresses et ports](#8-adresses-et-ports)
+9. [Problèmes fréquents](#9-problèmes-fréquents)
+10. [Aller plus loin](#10-aller-plus-loin)
 
 ---
 
@@ -34,8 +41,8 @@ Chef NOC, Technicien, Agent terrain.
 | **Mémoire allouée à Docker** | 4 Go pour la plateforme seule ; **8 Go** avec la base NetXMS et un ou deux outils de laboratoire ; 12 Go et plus avec Zabbix + iTop + Centreon. |
 | **Disque** | 10 Go pour la plateforme ; +2 Go pour la base NetXMS restaurée ; +5 Go pour les outils de laboratoire. |
 | **Git** | Pour récupérer le code. |
-| **Un terminal bash** | Les scripts `.sh` du dépôt sont en bash. Sous Windows : **Git Bash** (installé avec Git). |
-| **Ports libres** | 8443 et 8888 (interface), 5436 (base du NOC, publiée sur 127.0.0.1 seulement). |
+| **Un terminal bash** | Les commandes et scripts sont en bash. Sous Windows : **Git Bash** (installé avec Git). Sur une VM Ubuntu : le terminal par défaut. |
+| **Ports libres** | 8443 et 8888 (interface) ; 5436 (base du NOC) ; en local, selon les outils lancés : 5438, 8025, 8081, 8082, 8084, 8085, 8086 (tous publiés sur 127.0.0.1 seulement). |
 
 ---
 
@@ -79,15 +86,27 @@ l'agence (fichiers `nginx/certs/noc-selfsigned.crt` et `.key`).
 
 ### Étape 4 — Démarrer
 
+Le **cœur** de la plateforme (collecteur, backend, interface, nginx, Redis,
+PostgreSQL) démarre avec :
+
 ```bash
 docker compose up -d --build
 ```
 
-Le premier lancement construit les images (quelques minutes). Vérifier que
-tout est « healthy » :
+Le premier lancement construit les images (quelques minutes) et crée le
+schéma de la base. Vérifier que tout est « healthy » :
 
 ```bash
 docker compose ps
+```
+
+Les **outils locaux** (dump NetXMS, laboratoires, simulateur NSP, faux
+serveur de courriel) ne démarrent pas avec le cœur : chacun a son **profil**
+Docker Compose (§ 3). Pour les lancer à chaque `docker compose up` sans les
+nommer, les lister une fois dans `.env` :
+
+```ini
+COMPOSE_PROFILES=netxms,nagios,nsp,mail
 ```
 
 ### Étape 5 — Créer le premier compte (Chef NOC)
@@ -116,8 +135,8 @@ Chaque utilisateur modifie ensuite ses propres identifiants dans *Mon compte*.
 |---|---|
 | Directeur | Pilotage (disponibilité, SLA, tendances, rapports) |
 | Chef NOC | Salle de supervision + gestion des comptes |
-| Technicien | Console d'exploitation (traitement des alertes) |
-| Agent terrain | Tournée (interventions, signalement de pannes) |
+| Technicien | Console d'exploitation (suivi des alertes et incidents iTop) |
+| Agent terrain | Tournée (interventions, ordres de travail iTop) |
 
 À ce stade, **le tableau de bord est vide** : aucune source de données n'est
 branchée. C'est normal — voir la section suivante.
@@ -128,17 +147,52 @@ branchée. C'est normal — voir la section suivante.
 
 La plateforme ne stocke pas les équipements ni les alertes : elle les lit
 chez les outils de supervision. Un outil s'active par la **seule présence de
-son URL** dans `.env` (`<OUTIL>_API_URL`). Quatre situations possibles :
+son URL** dans `.env` (`<OUTIL>_API_URL`), et le mode d'accès se choisit par
+la **forme** de cette URL : `https://…` (API, production), `postgresql://…`
+(dump NetXMS, local), `file://…` (export Centreon, local).
 
 | Situation | Données affichées | Mise en place |
 |---|---|---|
 | **A. Aucune source** | Aucune (écrans vides) | Rien à faire |
-| **B. Dump NetXMS de production** | 1 409 équipements et 791 alarmes réels, **figés au 07/08/2026** | [§ 3.1](#31-base-netxms-restaurée-depuis-le-dump) |
-| **C. Outils de laboratoire** | Les conteneurs de la pile, supervisés par de vrais Zabbix, iTop et Centreon locaux | [§ 3.2](#32-outils-de-laboratoire-zabbix-itop-centreon) |
-| **D. Outils réels de l'agence** | Le vrai réseau, en direct | [§ 3.3](#33-outils-réels-de-lagence) |
+| **B. Dump NetXMS de production** | 1 409 équipements, 791 alarmes, 1 012 liens surveillés réels, **figés au 07/08/2026** | [§ 3.1](#31-base-netxms-restaurée-depuis-le-dump) |
+| **B′. Export du journal Centreon** | 12 serveurs ANPTIC et leurs contrôles, **du 25/09 au 27/10/2026** | [§ 3.2](#32-export-du-journal-centreon) |
+| **C. Outils de laboratoire** | Vrais Zabbix, iTop, Centreon et Nagios locaux, et un **simulateur NSP** | [§ 3.3](#33-outils-de-laboratoire) |
+| **D. Outils réels de l'agence** | Le vrai réseau, en direct, par les API | [§ 3.4](#34-outils-réels-de-lagence) |
 
 Les situations B, C et D se combinent : les équipements de plusieurs outils
-sont fusionnés dans un même parc.
+sont fusionnés dans un même parc. **En production, seule la situation D
+s'applique** : aucun dump, aucun export, aucun simulateur.
+
+### Lancement local complet, en une fois
+
+Pour un poste de développement avec toutes les sources locales (une fois le
+dump restauré, § 3.1), dans `.env` :
+
+```ini
+COMPOSE_FILE=docker-compose.yml;docker-compose.dumps.yml
+COMPOSE_PATH_SEPARATOR=;
+COMPOSE_PROFILES=netxms,zabbix,nagios,nsp,mail
+```
+
+puis :
+
+```bash
+docker compose up -d --build
+docker compose ps
+```
+
+| Profil | Ce qu'il lance | Mémoire |
+|---|---|---|
+| `netxms` | Base NetXMS restaurée depuis le dump (`netxms-db`) | ~0,5 Go |
+| `zabbix` | Zabbix 7.0.23 de laboratoire (base, serveur, web, agent) | ~1 Go |
+| `itop` | iTop 3.2.3 de laboratoire | ~1 Go |
+| `centreon` | Centreon 22.10.7 de laboratoire | ~2 Go |
+| `nagios` | Nagios Core 4.5.12 de laboratoire | ~0,2 Go |
+| `nsp` | Simulateur Nokia NSP (`tools/nsp-sim`) | ~30 Mo |
+| `netlab` | Six « équipements » de site simulés (SNMP, trafic, pannes) | ~60 Mo |
+| `mail` | Mailpit, faux serveur de courriel | ~30 Mo |
+| `tools` | Tous les outils de laboratoire à la fois | ~5 Go |
+| `provision` | Tâche ponctuelle : déclarer les machines à superviser dans les laboratoires | — |
 
 ### 3.1 Base NetXMS restaurée depuis le dump
 
@@ -169,45 +223,184 @@ docker compose up -d collector backend
 Les équipements apparaissent au cycle de collecte suivant (moins d'une
 minute après le redémarrage du collecteur).
 
-### 3.2 Outils de laboratoire (Zabbix, iTop, Centreon)
-
-Instances locales, **aux mêmes versions que la production** de l'agence. Elles
-sont lourdes : les lancer par profil.
+Sur une base **déjà restaurée** avant l'ajout de la fiche technique
+(inventaire, interfaces, liens, disponibilité de l'agence), rejouer le script
+de droits, sinon ces informations restent vides :
 
 ```bash
-docker compose --profile zabbix --profile itop up -d     # ~2 Go de RAM
+docker compose exec -T netxms-db psql -U netxms -d netxms \
+  -v reader_password="$(grep -E '^NETXMS_DB_READER_PASSWORD=' .env | cut -d= -f2-)" \
+  -f - < database/netxms_readonly_role.sql
+```
+
+### 3.2 Export du journal Centreon
+
+`database/alertes.sql` est un export tabulé de la table `logs` de Centreon
+(`centreon_storage`), fourni par l'agence. Malgré son extension, ce n'est pas
+un dump SQL : il n'y a pas de base à restaurer. Le connecteur
+`integrations/centreon_logs.py` le **rejoue** dans l'ordre pour en déduire
+le dernier état de chaque hôte et de chaque service. Il sert à **visualiser
+en local** ; en production, Centreon est lu par son API. Le fichier est exclu
+de git.
+
+```bash
+# 1. Dans .env : donner au collecteur l'accès en lecture au dossier database/
+#    COMPOSE_FILE=docker-compose.yml;docker-compose.dumps.yml
+#    COMPOSE_PATH_SEPARATOR=;
+# 2. Dans .env : brancher Centreon sur l'export
+#    CENTREON_API_URL=file:///srv/dumps/alertes.sql
+# 3. Prendre en compte la configuration
+docker compose up -d collector backend
+```
+
+Ce que l'export donne et ne donne pas :
+
+- **12 hôtes**, dont 11 avec leur adresse IP ; aucun groupe, donc ni site ni
+  région : ils sont comptés sous « Région non renseignée ».
+- **Aucune alerte** : toutes les lignes de l'export fourni sont à l'état OK.
+  Un export sans filtre de statut (`SELECT * FROM logs WHERE ctime >= …`)
+  ferait apparaître les alertes encore ouvertes à la fin de l'export.
+- L'état affiché est celui de la **fin de l'export** (27/10/2026), figé.
+
+### 3.3 Outils de laboratoire
+
+Instances locales **aux mêmes versions que la production** de l'agence (et un
+simulateur pour NSP). Les URL et comptes sont déjà dans `.env.example`.
+
+```bash
+# Zabbix et iTop (~2 Go de RAM)
+docker compose --profile zabbix --profile itop up -d
 docker compose logs -f itop                              # attendre la fin de l'installation
 docker compose --profile provision run --rm provision    # déclarer les machines à superviser
 
-docker compose --profile centreon up -d                  # ~2 Go de plus, à part
+# Centreon (~2 Go de plus, à part)
+docker compose --profile centreon up -d
 docker compose exec centreon /usr/local/bin/provision-lab
+
+# Nagios : son inventaire est le fichier tools/nagios/noc-lab.cfg
+docker compose --profile nagios up -d nagios
+
+# Simulateur Nokia NSP (Nokia ne distribue pas NSP)
+docker compose --profile nsp up -d --build nsp-sim
+
+# Réseau de site simulé (SNMP, trafic, pannes) pour Zabbix et Centreon
+docker compose --profile netlab up -d
 ```
 
-Les URL et comptes de ces outils sont déjà dans `.env.example`. Accès aux
-interfaces : voir [§ 7](#7-adresses-et-ports). Détails et pièges connus :
-**[tools/README.md](tools/README.md)**.
+Pour le **simulateur NSP**, dans `.env` :
 
-### 3.3 Outils réels de l'agence
+```ini
+NSP_API_URL=http://nsp-sim:8080
+NSP_API_USER=admin
+NSP_API_PASSWORD=NspLab!2026
+NSP_FM_MODE=yang
+```
+
+Il sert 8 équipements du réseau de transport (préfixés `LAB-`) et leurs
+alarmes ; `LAB-GAOUA-WAVENCE-01` tombe seul 15 minutes au début de chaque
+heure. Lever ou effacer une alarme à la main :
+
+```bash
+curl http://localhost:8086/_sim/state
+curl -X POST http://localhost:8086/_sim/alarms -H 'Content-Type: application/json' \
+     -d '{"ne_id":"LAB-NSP-7","severity":"critical","text":"Coupure fibre"}'
+curl -X DELETE http://localhost:8086/_sim/alarms/<id>
+```
+
+Le simulateur montre comment le NOC affiche des données NSP ; il **ne prouve
+pas** que le connecteur fonctionne avec le NSP de l'agence.
+
+Après avoir lancé un outil ou changé `.env` : `docker compose up -d collector
+backend`. Accès aux interfaces : [§ 8](#8-adresses-et-ports). Détails et
+pièges connus : **[tools/README.md](tools/README.md)**.
+
+### 3.4 Outils réels de l'agence
 
 Dans `.env`, remplacer le bloc « laboratoire local » (section 4) par le bloc
-« production » (section 5) : URL des outils de l'agence et **comptes en
-lecture seule**. Ne jamais mélanger les deux blocs.
+« production » (section 5) : URL des **API** des outils de l'agence et
+**comptes en lecture seule**. Ne jamais mélanger les deux blocs, et ne pas
+charger `docker-compose.dumps.yml` (`COMPOSE_FILE`) ni de profil local.
 
-Pour NetXMS, deux accès sont possibles, sans changer de code :
+Avant la mise en service, **vérifier ce que chaque API renvoie réellement** :
 
-- **par son API Web** : `NETXMS_API_URL=https://…` et un compte NetXMS ;
-  à valider sur la version de l'agence avant mise en service ;
-- **par sa base, en lecture seule** : l'administrateur de l'agence exécute
-  `database/netxms_readonly_role.sql`, puis
-  `NETXMS_API_URL=postgresql://<hôte>:5432/netxms?sslmode=verify-full`.
-  C'est le mode recommandé si cet accès est accordé.
+```bash
+docker compose run --rm collector python -m collector.probe              # tous les outils
+docker compose run --rm collector python -m collector.probe netxms nsp   # certains
+docker compose run --rm -v "$PWD:/out" collector \
+  python -m collector.probe --json /out/recette.json                     # rapport transmissible
+```
+
+Le diagnostic lit les outils sans rien publier et donne : version, nombre
+d'équipements et d'alertes, part localisée et part des alertes rattachées à
+un équipement, faits de fiche, et pour NetXMS par API les noms des champs
+reçus. Le rapport JSON ne contient aucun secret. Critères d'acceptation et
+résultats de la recette locale : [docs/09](docs/09-exploitation.md#recette-des-connecteurs).
+
+Enfin, **faire superviser le NOC lui-même par Zabbix** : importer
+`monitoring/zabbix/noc_resina_by_http.yaml` dans le Zabbix de l'agence
+([docs/09](docs/09-exploitation.md#faire-superviser-le-noc-par-zabbix)).
 
 ---
 
-## 4. Tester les alertes par courriel
+## 4. Mettre à jour une installation existante
+
+Mêmes commandes sur un poste (Git Bash) et sur une **VM Ubuntu**, depuis le
+dossier du projet. Si l'utilisateur n'est pas dans le groupe `docker`,
+préfixer par `sudo`. Remplacer `noc` / `noc` si `POSTGRES_USER` /
+`POSTGRES_DB` diffèrent dans `.env`.
+
+```bash
+# 1. Récupérer le code
+git pull
+
+# 2. Sauvegarder la base du NOC
+docker compose exec -T postgres pg_dump -U noc -d noc --clean --if-exists \
+  > sauvegarde_noc_$(date +%F).sql
+
+# 3. Arrêter ce qui écrit dans la base
+docker compose stop collector backend
+
+# 4. Mettre le schéma à jour (sans danger, rejouable)
+docker compose exec -T postgres psql -U noc -d noc -v ON_ERROR_STOP=1 \
+  < backend/sql/schema.sql
+
+# 5. Aligner la révision Alembic (révision courante : 0006)
+docker compose exec -T postgres psql -U noc -d noc \
+  -c "UPDATE alembic_version SET version_num = '0006_history_journal'"
+
+# 6. Reconstruire et relancer
+docker compose up -d --build
+
+# 7. Vérifier
+docker compose ps
+curl -sk https://localhost:8443/api/health
+docker compose exec -T postgres psql -U noc -d noc -c "\dt hist_*"
+```
+
+> ⚠️ Depuis la version du 29 octobre 2026, le rejeu de `schema.sql`
+> **supprime** les tables qui ne sont plus alimentées (`ops_alert_state`,
+> `ops_alert_timeline`, `ops_manual_incident`, `ops_maintenance_window`,
+> `ops_field_intervention`) **avec leur contenu**, et crée le journal
+> historique (`hist_state`, `hist_alert`) et la file des notifications à
+> retenter (`ops_notification_retry`). D'où la sauvegarde de l'étape 2.
+
+Sur une VM, mettre la sauvegarde à l'abri depuis son poste :
+`scp utilisateur@vm:/chemin/noc/sauvegarde_noc_*.sql .`
+
+En PowerShell, l'étape 4 s'écrit :
+`Get-Content backend/sql/schema.sql -Raw | docker compose exec -T postgres psql -U noc -d noc -v ON_ERROR_STOP=1`.
+
+`bash deployment.sh` arrête puis relance **toute** la pile ; il ne met pas le
+schéma à jour.
+
+---
+
+## 5. Tester les alertes par courriel
 
 La plateforme envoie un courriel à chaque nouvelle alerte grave (critique ou
-majeure). Pour tester sans écrire à personne, un faux serveur SMTP est fourni :
+majeure), retente un envoi échoué, et regroupe une rafale (plus de 10 alertes
+d'un coup) en un seul message. Pour tester sans écrire à personne, un faux
+serveur SMTP est fourni :
 
 ```bash
 docker compose --profile mail up -d mailpit
@@ -227,42 +420,57 @@ Puis `docker compose up -d backend`. Les courriels se lisent sur
 
 Côté interface : écran *Utilisateurs* → renseigner l'adresse d'un compte et
 cocher « Recevoir les alertes » → bouton **Envoyer un test** dans le panneau
-*Alertes par courriel*.
+*Alertes par courriel*. Pour provoquer une vraie alerte : lever une alarme
+dans le simulateur NSP (§ 3.3) ou arrêter un conteneur supervisé.
 
 En production, remplacer `SMTP_*` par le relais de messagerie de l'agence et
 refaire le test.
 
 ---
 
-## 5. Commandes du quotidien
+## 6. Commandes du quotidien
 
 | Besoin | Commande |
 |---|---|
 | État des conteneurs | `docker compose ps` |
-| Santé de la chaîne | `curl -sk https://localhost:8443/api/health` |
+| Santé de la chaîne (Redis, collecteur, base, sources, notifications) | `curl -sk https://localhost:8443/api/health` |
 | Journaux d'un service | `docker compose logs -f --tail 100 collector` (ou `backend`, `nginx`…) |
 | Redémarrer un service | `docker compose restart backend` |
 | Prendre en compte une modification de `.env` | `docker compose up -d collector backend` |
-| Mettre à jour le code | `git pull && bash deployment.sh` |
+| Lancer un outil local | `docker compose --profile nagios up -d nagios` (ou `nsp`, `netxms`, `mail`…) |
+| Mettre à jour le code et la base | [§ 4](#4-mettre-à-jour-une-installation-existante) |
 | Arrêter **sans rien perdre** | `docker compose down` |
 | Réinitialiser un mot de passe | `docker compose exec backend python scripts/create_user.py -u <identifiant> --reset-password -p "<nouveau>"` |
 | Lister les comptes | `docker compose exec backend python scripts/create_user.py --list` |
-| Mettre à jour le schéma de la base | `docker compose exec -T postgres psql -U noc -d noc < backend/sql/schema.sql` (sans danger, rejouable) |
+| Mettre à jour le schéma de la base | `docker compose exec -T postgres psql -U noc -d noc -v ON_ERROR_STOP=1 < backend/sql/schema.sql` |
 | Sauvegarder la base du NOC | `docker compose exec -T postgres pg_dump -U noc -d noc --clean --if-exists > sauvegarde_noc.sql` |
 | Restaurer une sauvegarde | `docker compose exec -T postgres psql -U noc -d noc < sauvegarde_noc.sql` |
+| Vérifier ce qu'un outil renvoie, sans rien publier | `docker compose run --rm collector python -m collector.probe <outil>` |
+| Compléter les bilans journaliers manquants depuis le journal | `docker compose exec collector python -m collector.history backfill --days 30` |
+| Recalculer les bilans d'une période | `docker compose exec collector python -m collector.history rebuild-daily --from 2026-10-01 --to 2026-10-31 --overwrite` |
+| Notifications en attente de nouvel envoi | `docker compose exec -T postgres psql -U noc -d noc -c "select alert_key, channel, status, attempts, last_error from ops_notification_retry order by id desc limit 10"` |
 
-Les tests du backend n'écrivent pas dans une base réelle. Les tests
-d'intégration vérifient les contrats actuels (fenêtres mensuelles, routes
-internes protégées); les anciens tests fondés sur `fact_incident` et
-`metric_value` ont été retirés avec ces tables.
+Lancer les **tests** (sans base ni outil réels) :
+
+```bash
+cd backend
+python -m venv .venv && source .venv/bin/activate   # .venv/Scripts/activate sous Windows
+pip install -r requirements-dev.txt                 # + `pip install tzdata` sous Windows
+PYTHONPATH=.. python -m pytest -q tests             # PYTHONPATH="..;." sous Windows
+cd ../frontend && npm install && npm run lint && npm run build
+```
 
 > ⛔ **Ne jamais lancer `docker compose down -v`.** L'option `-v` supprime les
-> volumes : tous les comptes, acquittements, notes et maintenances sont
-> perdus, et plus personne ne peut se connecter.
+> volumes : tous les comptes, objectifs SLA, journal d'audit, bilans
+> journaliers et **tout l'historique de disponibilité** sont perdus, et plus
+> personne ne peut se connecter.
+>
+> ⛔ **Ne pas vider Redis** (`FLUSHALL`) en exploitation : le NOC croirait à
+> un premier démarrage et ne notifierait pas les alertes du cycle suivant.
 
 ---
 
-## 6. Configuration : les variables essentielles
+## 7. Configuration : les variables essentielles
 
 `.env.example` documente chaque variable. Les plus importantes :
 
@@ -271,13 +479,22 @@ internes protégées); les anciens tests fondés sur `fact_incident` et
 | `SECRET_KEY` | Signature des jetons de connexion (≥ 32 caractères) | — (obligatoire) |
 | `POSTGRES_PASSWORD` | Mot de passe de la base du NOC | — (obligatoire) |
 | `REDIS_PASSWORD` | Mot de passe de Redis | — (obligatoire) |
-| `COLLECT_INTERVAL_S` | Cadence de lecture des outils, en secondes. **C'est la charge imposée à la production** : une requête par outil par intervalle. | `300` |
-| `<OUTIL>_API_URL`, `_USER`, `_PASSWORD`, `_TOKEN` | Accès à chaque outil. URL vide = outil désactivé. | laboratoire local |
+| `COLLECT_INTERVAL_S` | Cadence de lecture des outils, en secondes. **C'est la charge imposée à la production** : une série de requêtes par outil par intervalle. | `300` |
+| `<OUTIL>_API_URL`, `_USER`, `_PASSWORD`, `_TOKEN` | Accès à chaque outil. URL vide = outil désactivé. En production, toujours l'URL de l'API ; `postgresql://…` (NetXMS) et `file://…` (Centreon) ne servent qu'aux exports locaux. | laboratoire local |
+| `NETXMS_SITE_ATTRIBUTE` | NetXMS par API : attribut personnalisé portant le site administratif (sinon, la ville) | vide |
+| `NETXMS_COLLECT_INTERFACES` | NetXMS par API : lire les interfaces (liens, capacité) — la lecture la plus lourde | `true` |
+| `NAGIOS_MODE`, `NSP_FM_MODE` | Mode d'accès Nagios (`statusjson`, `livestatus`) et NSP (`yang`, `classic`) | `unknown` |
+| `HISTORY_ENABLED` | Journal historique (disponibilité sur la durée, liens, rattrapage des bilans) | `true` |
+| `HISTORY_RETENTION_DAYS` | Conservation du journal, en jours (0 = indéfiniment) | `0` |
+| `ROLLUP_HOUR`, `ROLLUP_RETRY_S` | Heure du bilan journalier ; délai entre deux essais s'il échoue | `1`, `900` |
 | `NOTIFICATIONS_ENABLED` | Envoi automatique des courriels et SMS | `false` |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_USE_TLS` | Serveur de messagerie | vide |
 | `NOTIFY_SEVERITIES` | Gravités qui déclenchent une notification | `critical,high` |
+| `NOTIFY_RETRY_MAX_ATTEMPTS`, `NOTIFY_RETRY_MAX_AGE_MIN` | Nouvelles tentatives d'un envoi échoué : nombre, âge maximal de l'alerte | `6`, `360` |
+| `NOTIFY_BURST_MAX` | Au-delà, une rafale d'alertes graves part en un seul message | `10` |
 | `REFRESH_COOKIE_SECURE` | `true` dès que l'accès se fait en HTTPS | `true` |
 | `CORS_ORIGINS`, `DASHBOARD_URL` | Adresse publique de l'interface (à adapter sur un serveur) | `localhost` |
+| `COMPOSE_PROFILES`, `COMPOSE_FILE` | **Local seulement** : outils lancés d'office, accès aux exports (`docker-compose.dumps.yml`) | vide |
 
 > ⚠️ **Ne jamais écrire deux fois la même variable dans `.env`.** Docker
 > Compose garde silencieusement la dernière, ce qui produit des pannes dont le
@@ -285,17 +502,20 @@ internes protégées); les anciens tests fondés sur `fact_incident` et
 
 ---
 
-## 7. Adresses et ports
+## 8. Adresses et ports
 
 | Service | Adresse depuis le poste | Identifiants |
 |---|---|---|
 | **Interface NOC** | <https://localhost:8443> (et <http://localhost:8888>, redirigé) | comptes créés dans le NOC |
+| Sonde de santé | <https://localhost:8443/api/health> | publique |
 | Base du NOC (PostgreSQL) | `127.0.0.1:5436`, base `noc` | `noc` / `POSTGRES_PASSWORD` |
 | Base NetXMS restaurée | `127.0.0.1:5438`, base `netxms` | `netxms` / `netxms` (lecture : `noc_reader`) |
 | Mailpit (courriels de test) | <http://localhost:8025> | — |
 | Zabbix de laboratoire | <http://localhost:8081> | `Admin` / `zabbix` |
 | iTop de laboratoire | <http://localhost:8082> | `admin` / `ITOP_ADMIN_PASSWORD` |
 | Centreon de laboratoire | <http://localhost:8084/centreon> | `admin` / `CENTREON_API_PASSWORD` |
+| Nagios de laboratoire | <http://localhost:8085/nagios> | `nagiosadmin` / `NAGIOS_API_PASSWORD` |
+| Simulateur NSP | <http://localhost:8086/_sim/state> | pilotage sans compte ; API : `NSP_API_USER` / `NSP_API_PASSWORD` |
 
 La documentation interactive de l'API (Swagger) est **fermée par défaut**, et
 le backend n'a plus de port publié (seul nginx le joint). Pour la consulter en
@@ -320,7 +540,7 @@ confiance au backend.
 
 ---
 
-## 8. Problèmes fréquents
+## 9. Problèmes fréquents
 
 | Symptôme | Cause probable | Solution |
 |---|---|---|
@@ -329,6 +549,11 @@ confiance au backend.
 | nginx ne démarre pas | Certificat absent | `bash nginx/generate_cert.sh` |
 | Tableau de bord vide | Aucune source branchée, ou collecteur arrêté | Écran *Collecte ETL* ; `docker compose logs collector` |
 | « Collecte interrompue » | Le collecteur ne publie plus depuis 15 min | `docker compose restart collector`, puis lire ses journaux |
+| *Collecte ETL* : Nagios « En erreur » | URL renseignée mais conteneur de laboratoire non démarré | `docker compose --profile nagios up -d nagios` |
+| *Collecte ETL* : NSP « Non configuré » | `NSP_API_URL` vide ou `NSP_FM_MODE=unknown` | En local : simulateur (§ 3.3) ; en production : l'instance de l'agence |
+| Journaux du collecteur : « Journal historique non mis à jour » ; fiche équipement : « Historique indisponible » | Schéma pas mis à jour (tables `hist_*` absentes) | [§ 4](#4-mettre-à-jour-une-installation-existante), étapes 2 à 6 |
+| NetXMS (dump) : fiche technique vide (inventaire, liens) | Droits du compte `noc_reader` d'avant la fiche technique | Rejouer `netxms_readonly_role.sql` (§ 3.1) |
+| Centreon (export) : « export introuvable » | `docker-compose.dumps.yml` non chargé | `COMPOSE_FILE` dans `.env` (§ 3.2) |
 | Déconnexion au bout de 30 min | `REFRESH_COOKIE_SECURE=true` avec un accès en `http://` | Accéder en HTTPS, ou mettre `false` en local |
 | Aucun courriel reçu | Voir la liste de contrôle dans [docs/06](docs/06-alertes-et-notifications.md#diagnostic--pourquoi-je-ne-reçois-rien) | — |
 | `no such file or directory` au lancement d'un script `.sh` dans un conteneur | Fins de ligne Windows (CRLF) | Le `.gitattributes` force LF ; re-cloner ou convertir le fichier |
@@ -336,11 +561,14 @@ confiance au backend.
 
 ---
 
-## 9. Aller plus loin
+## 10. Aller plus loin
 
 | Document | Contenu |
 |---|---|
 | **[docs/README.md](docs/README.md)** | Documentation complète : comprendre le métier, l'architecture, le code, la sécurité, l'exploitation |
+| [docs/11-donnees-et-indicateurs.md](docs/11-donnees-et-indicateurs.md) | D'où vient chaque chiffre affiché, quand il change, comment il est calculé |
+| [docs/12-reprise-du-projet.md](docs/12-reprise-du-projet.md) | Reprendre le projet : quoi récupérer, comment démarrer, pièges, liste avant production |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Le raisonnement derrière les choix d'architecture |
-| [tools/README.md](tools/README.md) | Les outils de laboratoire : versions, installation, pièges |
+| [tools/README.md](tools/README.md) | Les outils de laboratoire et le simulateur NSP : versions, installation, pièges |
+| [monitoring/zabbix/](monitoring/zabbix/) | Modèle Zabbix pour superviser le NOC lui-même |
 | [.env.example](.env.example) | Chaque variable de configuration, commentée |

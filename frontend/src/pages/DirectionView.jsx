@@ -11,6 +11,13 @@ import {
 } from "lucide-react";
 
 import { DashboardSummary } from "../components/domain/FleetInsights";
+import {
+  CauseList,
+  IncidentScorecard,
+  OrganisationTable,
+  RecurrentTable,
+  TopSitesTable,
+} from "../components/domain/IncidentInsights";
 import Panel from "../components/ui/Panel";
 import { Meter } from "../components/ui/Stat";
 import TerritoryMap from "../components/domain/TerritoryMap";
@@ -20,7 +27,7 @@ import { Notice } from "../components/ui/Controls";
 import { PageHeader } from "../components/layout/TopBar";
 import { QueryBoundary, SkeletonRows } from "../components/ui/States";
 import { NodeStateBadge, SeverityBadge } from "../components/ui/Badge";
-import { decimal, duration, monthLabel, num, pct } from "../lib/format";
+import { decimal, delta, duration, monthLabel, num, pct } from "../lib/format";
 import { LEVEL, localityKey } from "../lib/locality";
 import { availabilityColor } from "../lib/vocabulary";
 import { errorMessage } from "../api/client";
@@ -32,9 +39,11 @@ import { usePermission } from "../hooks/useSession";
 import { PERMISSIONS } from "../lib/permissions";
 import {
   useGeoBreakdown,
-  useKpiCauses,
+  useIncidentKpis,
+  useItopIncidents,
   useKpiSummary,
   useKpiTrend,
+  useOrganisations,
   useOverview,
   useSlaIncidents,
 } from "../hooks/queries";
@@ -51,6 +60,9 @@ import {
  *      site puis à l'équipement.
  *   3. Ce qui demande une décision : des points d'attention rédigés.
  *   4. L'évolution et le détail des engagements.
+ *   5. La grille « KPI incidents » du document de l'agence (cible, réel,
+ *      statut), puis qui souffre : organisations, sites, équipements
+ *      récurrents, causes.
  *
  * Tout suit le périmètre de la barre commune : choisir une région montre
  * ses provinces, une province ses sites, un site ses équipements.
@@ -100,7 +112,7 @@ function availabilityVerdict(value) {
 }
 
 /** Points d'attention rédigés à partir des données, du plus grave au moins grave. */
-function buildInsights({ overview, breakdown, sla, level }) {
+function buildInsights({ overview, breakdown, sla, level, kpis, openIncidents }) {
   const insights = [];
   const rows = (breakdown?.rows ?? []).filter((row) => !row.unlocated);
   const levelLabel = LEVEL[level]?.label ?? "Zone";
@@ -109,6 +121,13 @@ function buildInsights({ overview, breakdown, sla, level }) {
     insights.push({
       tone: "critical",
       text: `${num(overview.incidents_critical)} incident(s) iTop critique(s) ouvert(s).`,
+      to: "/incidents?severity=critical",
+    });
+  }
+  if (openIncidents?.critical_unassigned) {
+    insights.push({
+      tone: "critical",
+      text: `${num(openIncidents.critical_unassigned)} incident(s) critique(s) sans agent : personne ne les traite.`,
       to: "/incidents?severity=critical",
     });
   }
@@ -127,6 +146,20 @@ function buildInsights({ overview, breakdown, sla, level }) {
         1,
       )}).`,
       to: "/sla",
+    });
+  }
+  if (kpis?.recurrent_nodes) {
+    insights.push({
+      tone: "warning",
+      text: `${num(kpis.recurrent_nodes)} équipement(s) récurrent(s) : ${num(
+        kpis.recurrent_incidents,
+      )} tickets sur 30 jours (au moins ${kpis.recurrent_threshold} chacun).`,
+    });
+  }
+  if (kpis?.without_cause_pct != null && kpis.without_cause_pct > 5) {
+    insights.push({
+      tone: "warning",
+      text: `${pct(kpis.without_cause_pct, 0)} des incidents résolus sans cause identifiée dans iTop (cible ≤ 5 %).`,
     });
   }
   if (level !== "node") {
@@ -258,7 +291,10 @@ export default function DirectionView() {
   const sla = useSlaIncidents({ groupBy: level });
   const summary = useKpiSummary();
   const trend = useKpiTrend(180);
-  const causes = useKpiCauses();
+  const kpis = useIncidentKpis();
+  // Compteurs seuls : la liste n'est pas affichée ici.
+  const openIncidents = useItopIncidents({ limit: 1 });
+  const organisations = useOrganisations();
 
   const [downloadError, setDownloadError] = useState(null);
   const [downloading, setDownloading] = useState(null);
@@ -276,9 +312,20 @@ export default function DirectionView() {
     return index;
   }, [sla.data, level]);
 
-  const insights = buildInsights({ overview: o, breakdown: breakdown.data, sla: sla.data, level });
+  const insights = buildInsights({
+    overview: o,
+    breakdown: breakdown.data,
+    sla: sla.data,
+    level,
+    kpis: kpis.data,
+    openIncidents: openIncidents.data,
+  });
   const trendData = (trend.data ?? []).filter((point) => point.availability_pct != null);
-  const causeItems = (causes.data ?? []).slice(0, 6);
+  const causeItems = (kpis.data?.causes ?? []).slice(0, 6);
+  const monthDelta = summary.data?.vs_previous_month?.availability_delta;
+  const orgRows = (organisations.data ?? []).slice(0, 12);
+  const recurrentRows = kpis.data?.recurrent ?? [];
+  const topSites = kpis.data?.top_sites ?? [];
   const severityRows = sla.data?.by_severity ?? [];
   const showTrend = national && trendData.length > 1;
 
@@ -347,7 +394,11 @@ export default function DirectionView() {
               o.nodes_total - (o.nodes_by_state?.maintenance ?? 0),
             )}${
               national && summary.data?.kpi?.network_availability_pct != null
-                ? ` · moyenne du mois ${pct(summary.data.kpi.network_availability_pct, 1)}`
+                ? ` · moyenne du mois ${pct(summary.data.kpi.network_availability_pct, 1)}${
+                    monthDelta != null
+                      ? ` (${delta(monthDelta, (v) => `${decimal(v, 1)} pt`)} vs mois préc.)`
+                      : ""
+                  }`
                 : ""
             }`
           }
@@ -564,22 +615,73 @@ export default function DirectionView() {
           {causeItems.length > 0 && (
             <Panel
               title="Principales causes"
-              subtitle="qualifiées par les équipes, 90 j"
+              subtitle={`code de résolution iTop, 30 j${
+                kpis.data?.without_cause_pct != null
+                  ? ` · ${pct(kpis.data.without_cause_pct, 0)} sans cause`
+                  : ""
+              }`}
               className={`col-span-12 ${severityRows.length ? "xl:col-span-5" : ""}`}
             >
-              <div className="space-y-1">
-                {causeItems.map((cause) => (
-                  <div key={cause.category}>
-                    <div className="flex items-baseline gap-2 text-[12px]">
-                      <span className="flex-1 truncate">{cause.label || cause.category}</span>
-                      <span className="num" style={{ width: 44, textAlign: "right" }}>
-                        {pct(cause.share_pct, 0)}
-                      </span>
-                    </div>
-                    <Meter value={cause.share_pct} height={3} />
-                  </div>
-                ))}
-              </div>
+              <CauseList causes={causeItems} />
+            </Panel>
+          )}
+        </div>
+      )}
+
+      {/* 5. Grille de l'agence et organisations */}
+      <div className="grid grid-cols-12 gap-2 items-start">
+        <Panel
+          title="KPI incidents"
+          subtitle="grille de l'agence · tickets iTop, 30 j et file en cours"
+          className={`col-span-12 ${orgRows.length ? "xl:col-span-6" : ""}`}
+          to="/incidents"
+          toLabel="Incidents"
+          flush
+        >
+          <QueryBoundary
+            query={kpis}
+            skeleton={<SkeletonRows rows={8} columns={4} />}
+          >
+            {(data) => <IncidentScorecard kpis={data} open={openIncidents.data} sla={slaTotals} />}
+          </QueryBoundary>
+        </Panel>
+        {orgRows.length > 0 && (
+          <Panel
+            title="Disponibilité par organisation"
+            subtitle="ministères et structures (CI iTop) · incidents et SLA sur 30 j"
+            className="col-span-12 xl:col-span-6"
+            flush
+          >
+            <div style={{ maxHeight: 420, overflow: "auto" }}>
+              <OrganisationTable organisations={orgRows} incidents={kpis.data?.by_organisation} />
+            </div>
+          </Panel>
+        )}
+      </div>
+
+      {(topSites.length > 0 || recurrentRows.length > 0) && (
+        <div className="grid grid-cols-12 gap-2 items-start">
+          {topSites.length > 0 && (
+            <Panel
+              title="Top 10 des sites les plus incidentés"
+              subtitle="tickets iTop ouverts sur 30 j"
+              className={`col-span-12 ${recurrentRows.length ? "xl:col-span-6" : ""}`}
+              to="/territoire"
+              toLabel="Territoire"
+              flush
+            >
+              <TopSitesTable rows={topSites} />
+            </Panel>
+          )}
+          {recurrentRows.length > 0 && (
+            <Panel
+              title="Équipements récurrents"
+              subtitle={`au moins ${kpis.data.recurrent_threshold} tickets sur 30 j`}
+              accent="var(--sev-medium)"
+              className={`col-span-12 ${topSites.length ? "xl:col-span-6" : ""}`}
+              flush
+            >
+              <RecurrentTable rows={recurrentRows} />
             </Panel>
           )}
         </div>

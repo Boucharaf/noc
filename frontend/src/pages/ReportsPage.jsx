@@ -11,7 +11,7 @@ import { MONTHS_FR_SHORT, decimal, duration, monthLabel, num, pct } from "../lib
 import { errorMessage } from "../api/client";
 import { report } from "../api/noc";
 import { saveBlob } from "../lib/download";
-import { useKpiSummary, useKpiTrend, useSla } from "../hooks/queries";
+import { useKpiSummary, useKpiTrend, useSlaIncidents } from "../hooks/queries";
 import { usePeriodStore } from "../store/ui";
 
 /**
@@ -31,7 +31,12 @@ export default function ReportsPage() {
   const isCurrent = usePeriodStore((s) => s.isCurrentPeriod());
 
   const summary = useKpiSummary();
-  const sla = useSla();
+  // SLA des tickets iTop ouverts dans le mois choisi (bornes UTC).
+  const sla = useSlaIncidents({
+    startAt: new Date(Date.UTC(year, month - 1, 1)).toISOString(),
+    endAt: new Date(Date.UTC(year, month, 1)).toISOString(),
+  });
+  const slaTotals = sla.data?.totals;
   // 12 MOIS, soit ~365 lignes journalières regroupées ci-dessous par mois.
   const trend = useKpiTrend(365);
 
@@ -119,12 +124,16 @@ export default function ReportsPage() {
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
         <Stat label="Disponibilité" value={pct(kpi?.network_availability_pct, 2)} target="≥ 99 %" />
         <Stat label="Alertes actives (moy.)" value={decimal(kpi?.avg_active_alerts, 1)} />
-        <Stat label="Résolus" value={num(kpi?.resolved)} />
+        <Stat
+          label="Incidents résolus"
+          value={num(slaTotals?.resolved)}
+          hint={slaTotals ? `sur ${num(slaTotals.incidents)} ticket(s) iTop` : undefined}
+        />
         <Stat label="Critiques actives (moy.)" value={decimal(kpi?.avg_active_critical, 1)} />
-        <Stat label="MTTR" value={duration(kpi?.avg_mttr_minutes)} target="≤ 4 h" />
+        <Stat label="MTTR" value={duration(slaTotals?.mttr_minutes)} target="≤ 4 h" />
         <Stat
           label="Conformité SLA"
-          value={pct(sla.data?.global_compliance_pct, 1)}
+          value={pct(slaTotals?.compliance_pct, 1)}
           target="≥ 95 %"
         />
       </div>

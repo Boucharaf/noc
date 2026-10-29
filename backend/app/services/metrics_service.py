@@ -58,8 +58,78 @@ async def network_snapshot(
         # Latence, pertes, débits, CPU… : dernières valeurs relevées par le
         # collecteur, moyennées sur le périmètre.
         **_fleet_averages(nodes, await live_service.get_latest()),
+        "links": link_summary(nodes),
+        "agency_availability": agency_availability(nodes),
         "snapshot_age_s": await live_service.snapshot_age_s(),
         "stale": await live_service.is_stale(),
+    }
+
+
+def _facts(node: dict, key: str) -> list[dict]:
+    """Un fait de fiche (Node.details) chez chaque outil qui le publie."""
+    return [
+        facts[key] for facts in (node.get("details") or {}).values()
+        if isinstance(facts, dict) and isinstance(facts.get(key), dict)
+    ]
+
+
+def link_summary(nodes: list[dict]) -> dict | None:
+    """Disponibilité des liens : état réel des interfaces (NetXMS).
+
+    Deux lectures (voir integrations.netxms.interface_summary) : les
+    interfaces ACTIVÉES — dont des ports libres, inactifs sans être en panne —
+    et les interfaces SURVEILLÉES, que l'outil attend actives. La seconde est
+    la disponibilité des liens au sens strict ; la première dit combien de
+    ports activés ne transmettent rien. None si aucune source ne publie
+    l'état des interfaces sur le périmètre.
+    """
+    totals = {key: 0 for key in (
+        "total", "enabled", "enabled_up", "enabled_down", "watched", "watched_down",
+        "capacity_bps",
+    )}
+    covered = 0
+    for node in nodes:
+        summaries = _facts(node, "interfaces")
+        if not summaries:
+            continue
+        covered += 1
+        for summary in summaries:
+            for key in totals:
+                totals[key] += int(summary.get(key) or 0)
+    if not covered:
+        return None
+    measured = totals["enabled_up"] + totals["enabled_down"]
+    return {
+        "nodes": covered,
+        **totals,
+        "enabled_up_pct": round(100 * totals["enabled_up"] / measured, 2) if measured else None,
+        "watched_up_pct": (
+            round(100 * (totals["watched"] - totals["watched_down"]) / totals["watched"], 2)
+            if totals["watched"] else None
+        ),
+    }
+
+
+def agency_availability(nodes: list[dict]) -> dict | None:
+    """Disponibilité calculée par l'agence dans NetXMS (attributs
+    personnalisés), moyennée sur les équipements qui la portent. None si
+    aucun équipement du périmètre n'en a."""
+    values = [item for node in nodes for item in _facts(node, "availability")[:1]]
+    if not values:
+        return None
+
+    def mean(key: str) -> float | None:
+        numbers = [v[key] for v in values if v.get(key) is not None]
+        return round(sum(numbers) / len(numbers), 3) if numbers else None
+
+    return {
+        "nodes": len(values),
+        "avg_pct": mean("pct"),
+        "avg_mttr_h": mean("mttr_h"),
+        "avg_mtbf_h": mean("mtbf_h"),
+        "failures": sum(v.get("failures") or 0 for v in values),
+        "computed_at": max((v["computed_at"] for v in values if v.get("computed_at")),
+                           default=None),
     }
 
 

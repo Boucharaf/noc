@@ -49,6 +49,7 @@ const IntegrationsPage = lazy(() => import("./pages/IntegrationsPage"));
 const MaintenancePage = lazy(() => import("./pages/MaintenancePage"));
 const ReportsPage = lazy(() => import("./pages/ReportsPage"));
 const UsersPage = lazy(() => import("./pages/UsersPage"));
+const AuditPage = lazy(() => import("./pages/AuditPage"));
 const AccountPage = lazy(() => import("./pages/AccountPage"));
 const WallboardPage = lazy(() => import("./pages/WallboardPage"));
 
@@ -250,6 +251,14 @@ export default function App() {
               element={
                 <Guard permission={PERMISSIONS.MANAGE_USERS}>
                   <UsersPage />
+                </Guard>
+              }
+            />
+            <Route
+              path="/audit"
+              element={
+                <Guard permission={PERMISSIONS.VIEW_AUDIT}>
+                  <AuditPage />
                 </Guard>
               }
             />

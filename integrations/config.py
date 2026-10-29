@@ -104,6 +104,13 @@ def build_client(name: str):
             config.verify_ssl, config.timeout_s,
         )
     if name == "centreon":
+        # Même interrupteur que NetXMS : en production, l'API (https://…) ;
+        # file://… rejoue un export du journal de Centreon, pour visualiser
+        # en local les données fournies par l'agence.
+        if config.url.startswith("file://"):
+            from .centreon_logs import CentreonLogClient
+
+            return CentreonLogClient(config.url)
         from .centreon import CentreonClient
 
         return CentreonClient(
@@ -121,9 +128,9 @@ def build_client(name: str):
         )
     if name == "netxms":
         # DEUX ACCÈS, choisis par la forme de l'URL — le même interrupteur
-        # unique que pour les autres outils. C'est ce que l'agence accorde qui
-        # décide (compte sur l'API Web, ou compte de lecture sur la base), pas
-        # le code : passer de l'un à l'autre ne change que cette variable.
+        # unique que pour les autres outils. En production, l'API Web
+        # (https://…) ; la base (postgresql://…) sert à visualiser en local le
+        # dump restauré. Passer de l'un à l'autre ne change que cette variable.
         if config.url.startswith(("postgresql://", "postgres://")):
             from .netxms_db import NetXMSDatabaseClient
 
@@ -133,7 +140,9 @@ def build_client(name: str):
         from .netxms import NetXMSClient
 
         return NetXMSClient(
-            config.url, config.user, config.password, config.verify_ssl, config.timeout_s
+            config.url, config.user, config.password, config.verify_ssl, config.timeout_s,
+            os.getenv("NETXMS_SITE_ATTRIBUTE", "").strip(),
+            _bool("NETXMS_COLLECT_INTERFACES", True),
         )
     if name == "nagios":
         from .nagios import NagiosClient

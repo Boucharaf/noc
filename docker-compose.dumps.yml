@@ -1,0 +1,22 @@
+# Visualisation LOCALE des exports fournis par l'agence — jamais en production.
+#
+# En production, toutes les données viennent des API des outils : ce fichier
+# n'y est pas utilisé, et docker-compose.yml reste la configuration de base.
+# Ici, il donne au collecteur un accès en LECTURE SEULE au dossier database/,
+# où se trouvent les exports (journal Centreon, alertes.sql).
+#
+# Utilisation, au choix :
+#   docker compose -f docker-compose.yml -f docker-compose.dumps.yml up -d collector
+# ou, une fois pour toutes, dans .env :
+#   COMPOSE_FILE=docker-compose.yml;docker-compose.dumps.yml
+#   COMPOSE_PATH_SEPARATOR=;
+#
+# Puis, dans .env :
+#   CENTREON_API_URL=file:///srv/dumps/alertes.sql
+#
+# Le dump NetXMS, lui, passe par sa propre base (service netxms-db, profil
+# « netxms ») : voir README § 3.1.
+services:
+  collector:
+    volumes:
+      - ./database:/srv/dumps:ro

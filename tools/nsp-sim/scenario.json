@@ -1,0 +1,21 @@
+{
+  "_comment": "Scénario du simulateur NSP (laboratoire). Modifiable à chaud : le simulateur le relit quand il change. Noms préfixés LAB- : jamais confondus avec un équipement de l'agence. since_minutes = ancienneté de l'alarme au démarrage. flap = panne périodique automatique.",
+  "network-elements": [
+    {"ne-id": "LAB-NSP-1", "ne-name": "LAB-OUAGA-1830PSS-01", "ip-address": "10.250.0.1", "ne-type": "1830 PSS-32", "communication-state": "up"},
+    {"ne-id": "LAB-NSP-2", "ne-name": "LAB-BOBO-1830PSS-01", "ip-address": "10.250.0.2", "ne-type": "1830 PSS-16", "communication-state": "up"},
+    {"ne-id": "LAB-NSP-3", "ne-name": "LAB-KOUDOUGOU-7750SR-01", "ip-address": "10.250.0.3", "ne-type": "7750 SR-7", "communication-state": "up"},
+    {"ne-id": "LAB-NSP-4", "ne-name": "LAB-OUAHIGOUYA-7705SAR-01", "ip-address": "10.250.0.4", "ne-type": "7705 SAR-8", "communication-state": "degraded"},
+    {"ne-id": "LAB-NSP-5", "ne-name": "LAB-FADA-7705SAR-01", "ip-address": "10.250.0.5", "ne-type": "7705 SAR-8", "communication-state": "up"},
+    {"ne-id": "LAB-NSP-6", "ne-name": "LAB-DORI-WAVENCE-01", "ip-address": "10.250.0.6", "ne-type": "Wavence UBT-SA", "communication-state": "up"},
+    {"ne-id": "LAB-NSP-7", "ne-name": "LAB-TENKODOGO-7250IXR-01", "ip-address": "10.250.0.7", "ne-type": "7250 IXR-e", "communication-state": "up"},
+    {"ne-id": "LAB-NSP-8", "ne-name": "LAB-GAOUA-WAVENCE-01", "ip-address": "10.250.0.8", "ne-type": "Wavence UBT-SA", "communication-state": "up",
+     "flap": {"period_min": 60, "down_min": 15, "severity": "critical", "name": "Radio link down", "text": "Liaison hertzienne Gaoua - Diébougou coupée (perte de signal)"}}
+  ],
+  "alarms": [
+    {"ne_id": "LAB-NSP-2", "severity": "critical", "name": "Loss of signal", "text": "LOS sur le port 1/2/3 (fibre Bobo - Banfora)", "since_minutes": 95},
+    {"ne_id": "LAB-NSP-4", "severity": "major", "name": "Link down", "text": "Lien 1/1/2 vers Yako hors service", "since_minutes": 40},
+    {"ne_id": "LAB-NSP-3", "severity": "minor", "name": "High temperature", "text": "Température châssis élevée (62 °C)", "since_minutes": 300, "acknowledged": true},
+    {"ne_id": "LAB-NSP-5", "severity": "warning", "name": "Power supply degraded", "text": "Alimentation B en défaut, alimentation A seule", "since_minutes": 15},
+    {"ne_id": "LAB-NSP-1", "severity": "cleared", "name": "Loss of signal", "text": "LOS résolu (doit être ignoré par le NOC)", "since_minutes": 600}
+  ]
+}

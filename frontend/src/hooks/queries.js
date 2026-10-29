@@ -82,21 +82,36 @@ export function useOverview({ global = false } = {}) {
  * déclarent (groupe « Site/… » côté Zabbix et Centreon, Location côté
  * iTop), et il se lit sur l'équipement.
  */
+/**
+ * Disponibilité par organisation (ministère, structure) : la « disponibilité
+ * par ministère » du document métier. L'organisation est celle des CI iTop.
+ */
+export function useOrganisations() {
+  const scope = useScopeParams();
+  return useQuery({
+    queryKey: ["organisations", scope],
+    queryFn: () => api.overview.organisations(scope),
+    refetchInterval: useInterval(REFRESH.OPERATIONAL),
+  });
+}
+
+/** Journal d'audit, du plus récent au plus ancien. */
+export function useAuditLog({ action, limit = 100, offset = 0 } = {}) {
+  const params = { action, limit, offset };
+  return useQuery({
+    queryKey: ["audit", params],
+    queryFn: () => api.audit.list(params),
+    refetchInterval: useInterval(REFRESH.OPERATIONAL),
+    placeholderData: (previous) => previous,
+  });
+}
+
 export function useSites() {
   const scope = useScopeParams();
   return useQuery({
     queryKey: ["sites", scope],
     queryFn: () => api.sites.list(scope),
     refetchInterval: useInterval(REFRESH.OPERATIONAL),
-  });
-}
-
-export function useAlertsBySeverity() {
-  const scope = useScopeParams();
-  return useQuery({
-    queryKey: ["alerts", "by-severity", scope],
-    queryFn: () => api.overview.alertsBySeverity(scope),
-    refetchInterval: useInterval(REFRESH.LIVE),
   });
 }
 
@@ -151,36 +166,6 @@ export function useAlert(alertKey) {
     enabled: Boolean(alertKey),
     refetchInterval: useInterval(REFRESH.OPERATIONAL),
   });
-}
-
-/**
- * Actions sur une alerte.
- *
- * Toutes invalident `["alerts"]` en bloc plutôt que la seule fiche : un
- * acquittement change aussi les compteurs de la vue d'ensemble et la
- * répartition par gravité. Invalider finement obligerait à tenir à jour la
- * liste des écrans concernés à chaque nouvelle action.
- */
-export function useAlertActions() {
-  const queryClient = useQueryClient();
-  const invalidate = () => {
-    queryClient.invalidateQueries({ queryKey: ["alerts"] });
-    queryClient.invalidateQueries({ queryKey: ["overview"] });
-  };
-
-  // Les alertes des outils sont en LECTURE SEULE : acquittement, affectation
-  // et clôture relèvent d'iTop. Restent les signalements manuels (panne
-  // constatée sur le terrain, qu'aucune sonde ne voit).
-  return {
-    createManual: useMutation({
-      mutationFn: (payload) => api.manualIncidents.create(payload),
-      onSuccess: invalidate,
-    }),
-    resolveManual: useMutation({
-      mutationFn: (id) => api.manualIncidents.resolve(id),
-      onSuccess: invalidate,
-    }),
-  };
 }
 
 /* ================================================================== */
@@ -528,12 +513,6 @@ export function useKpiMonthly(params) {
           avg_nodes_down: current.avg_down,
           days_with_data: current.days_with_data,
           reliable: data.reliable,
-          resolution_rate_pct: null,
-          avg_mttr_minutes: null,
-          avg_mtta_minutes: null,
-          critical_localities: null,
-          recurrent_nodes: null,
-          off_hours_detected: null,
         },
         // Pas de comparaison avec un mois précédent trop lacunaire : l'écart
         // mesurerait les trous de collecte, pas l'évolution du réseau.
@@ -550,6 +529,25 @@ export function useKpiMonthly(params) {
   });
 }
 
+/**
+ * Indicateurs d'incidents iTop de la période, dans le périmètre : volumes,
+ * taux de résolution, équipements récurrents, causes, réouvertures, sites
+ * et organisations les plus touchés.
+ * ⚠️ Lit l'historique iTop : régime ANALYTIC, comme useSlaIncidents.
+ */
+export function useIncidentKpis({ days = 30 } = {}) {
+  const { search: _search, ...place } = useScopeParams();
+  const params = { days, ...place };
+  return useQuery({
+    queryKey: ["kpi", "incidents", params],
+    queryFn: () => api.kpi.incidents(params),
+    refetchInterval: useInterval(REFRESH.ANALYTIC),
+    placeholderData: (previous) => previous,
+    staleTime: 120_000,
+    retry: 1,
+  });
+}
+
 export function useKpiSites({ days = 30, limit = 20, sort = "availability" } = {}) {
   const { search: _search, ...place } = useScopeParams();
   const params = { days, limit, sort, ...place };
@@ -560,62 +558,22 @@ export function useKpiSites({ days = 30, limit = 20, sort = "availability" } = {
   });
 }
 
-export function useKpiCauses({ days = 90 } = {}) {
-  return useQuery({
-    queryKey: ["kpi", "causes", days],
-    queryFn: () => api.kpi.causes({ days }),
-    select: (rows) => {
-      const total = (rows ?? []).reduce((sum, row) => sum + (row.count ?? 0), 0);
-      return (rows ?? []).map((row) => ({
-        ...row,
-        category: row.category ?? row.cause,
-        label: row.label ?? row.cause,
-        total_incidents: row.total_incidents ?? row.count,
-        share_pct: row.share_pct ?? (total ? (row.count / total) * 100 : 0),
-      }));
-    },
-    refetchInterval: useInterval(REFRESH.ANALYTIC),
-  });
-}
-
-export function useResolutionTimes({ days = 30 } = {}) {
-  return useQuery({
-    queryKey: ["kpi", "resolution", days],
-    queryFn: () => api.kpi.resolutionTimes({ days }),
-    refetchInterval: useInterval(REFRESH.ANALYTIC),
-  });
-}
-
 /* ================================================================== */
 /* Engagements de service                                              */
 /* ================================================================== */
-export function useSlaCompliance({ days = 30 } = {}) {
-  return useQuery({
-    queryKey: ["sla", "compliance", days],
-    queryFn: () => api.sla.compliance({ days }),
-    refetchInterval: useInterval(REFRESH.ANALYTIC),
-  });
-}
-
-export function useSlaBreaches({ days = 30 } = {}) {
-  return useQuery({
-    queryKey: ["sla", "breaches", days],
-    queryFn: () => api.sla.breaches({ days }),
-    refetchInterval: useInterval(REFRESH.ANALYTIC),
-  });
-}
-
 /**
- * Alertes en cours qui vont manquer leur objectif.
+ * Incidents iTop ouverts qui vont manquer leur objectif de résolution (moins
+ * de 25 % du délai restant) ou l'ont déjà manqué, dans le périmètre.
  *
  * Rafraîchi au régime LIVE et non ANALYTIC : c'est le seul indicateur SLA
  * sur lequel on peut encore agir, il perd tout intérêt s'il a cinq minutes
- * de retard.
+ * de retard. Lu sur l'instantané : aucun appel à iTop.
  */
 export function useSlaAtRisk() {
+  const { search: _search, ...place } = useScopeParams();
   return useQuery({
-    queryKey: ["sla", "at-risk"],
-    queryFn: api.sla.atRisk,
+    queryKey: ["sla", "at-risk", place],
+    queryFn: () => api.sla.atRisk(place),
     refetchInterval: useInterval(REFRESH.LIVE),
   });
 }
@@ -625,6 +583,39 @@ export function useSlaTargets() {
     queryKey: ["sla", "targets"],
     queryFn: api.sla.targets,
     staleTime: 10 * 60_000,
+  });
+}
+
+/**
+ * Historique de disponibilité d'un équipement (journal, base du NOC).
+ * Régime ANALYTIC : le journal ne change qu'aux changements d'état.
+ */
+export function useNodeHistory(nodeId, days = 30) {
+  return useQuery({
+    queryKey: ["history", "node", nodeId, days],
+    queryFn: () => api.history.node(nodeId, days),
+    enabled: Boolean(nodeId),
+    refetchInterval: useInterval(REFRESH.ANALYTIC),
+  });
+}
+
+/** Équipements ou liens les moins disponibles sur la période, dans le périmètre. */
+export function useHistoryRanking({ kind = "node", days = 30, limit = 15 } = {}) {
+  const { search: _search, ...place } = useScopeParams();
+  return useQuery({
+    queryKey: ["history", "ranking", kind, days, limit, place],
+    queryFn: () => api.history.ranking({ kind, days, limit, ...place }),
+    refetchInterval: useInterval(REFRESH.ANALYTIC),
+  });
+}
+
+/** Engagements contractuels iTop (SLT), comparés aux objectifs du NOC. */
+export function useSlaContract() {
+  return useQuery({
+    queryKey: ["sla", "contract"],
+    queryFn: api.sla.contract,
+    staleTime: 5 * 60_000,
+    retry: false,
   });
 }
 
@@ -862,9 +853,6 @@ function toIncident(alert) {
     node_id: alert.node_key,
     source_tool: alert.tool,
     external_id: alert.ref,
-    assigned_to_full_name: alert.assigned_to,
-    cause_label: alert.cause ?? alert.cause_label ?? alert.cause_category,
-    cause_category: alert.cause_category ?? alert.cause,
     itop_ticket_ref: alert.ticket_ref,
   };
 }
@@ -1031,12 +1019,6 @@ export function useIncident(alertKey) {
   return { ...query, data: query.data ? toIncident(query.data) : undefined };
 }
 
-/** Signalements manuels — seule action restante sur la file d'alertes. */
-export function useIncidentActions() {
-  const { createManual, resolveManual } = useAlertActions();
-  return { createManual, resolveManual };
-}
-
 export function useCoverage() {
   const coverage = useNodeCoverage();
   const nodes = useNodes({ limit: 2000 });
@@ -1121,61 +1103,10 @@ export function useKpiLocalities(params = {}) {
       ...row,
       locality: row.site,
       locality_id: row.site,
-      region: null,
       average_alerts: row.avg_alerts,
       critical: row.avg_critical ?? null,
     })),
   };
-}
-
-/**
- * Carte des sites. Les coordonnées viennent des équipements de
- * l'instantané lorsqu'un connecteur source les fournit ; elles ne sont
- * jamais estimées à partir du seul nom du site.
- */
-export function useKpiLocalitiesMap() {
-  const scope = useScopeParams();
-  const query = useQuery({
-    queryKey: ["sites", "map", scope],
-    queryFn: () => api.sites.list(scope),
-    refetchInterval: useInterval(REFRESH.OPERATIONAL),
-  });
-  return {
-    ...query,
-    data: query.data?.map((row) => ({
-      ...row,
-      locality: row.site,
-      locality_id: row.site,
-      region: null,
-      total_incidents: row.alerts ?? 0,
-      critical: row.critical ?? null,
-      nb_nodes: row.nodes ?? 0,
-    })),
-  };
-}
-
-/**
- * Ministères — VOLONTAIREMENT VIDE.
- *
- * Concept de l'entrepôt supprimé. L'équivalent est `organisation`, porté
- * par les CI d'iTop et déjà lisible sur chaque équipement ; il manque
- * seulement un agrégat par organisation côté backend.
- */
-export function useKpiMinistries() {
-  return { data: [], isLoading: false, isError: false, error: null };
-}
-
-/** Équipements récurrents, devenus les plus alertants de l'instantané. */
-export function useKpiRecurrent({ limit = 10 } = {}) {
-  return useTopNodes(limit);
-}
-
-export function useKpiHourDistribution() {
-  return useHourDistribution();
-}
-
-export function useLocalityNodes(site) {
-  return useNodes(site ? { site } : {});
 }
 
 /** Alertes actives d'un équipement — déjà portées par sa fiche. */
@@ -1203,73 +1134,6 @@ export function useNodeLatest(nodeId) {
     staleTime: 60_000,
     retry: 1,
   });
-}
-
-/**
- * Engagements de service, sous la forme de l'ancien écran SLA.
- *
- * Le backend rend, par gravité, les délais moyens et si l'objectif est tenu
- * EN MOYENNE ; les dépassements individuels viennent de /sla/breaches. Les
- * taux de conformité sont recalculés ici à partir de ces deux sources. Les
- * « indicateurs de service » réseau (latence, disponibilité contractuelle)
- * n'ont plus de source : la liste est vide plutôt qu'inventée.
- */
-export function useSla(params = {}) {
-  const compliance = useSlaCompliance(params);
-  const breaches = useSlaBreaches(params);
-  const data = compliance.data;
-  const breachList = Array.isArray(breaches.data) ? breaches.data : [];
-
-  // Taux et dépassements viennent du backend, comptés alerte par alerte en
-  // base. Les recalculer ici à partir de /sla/breaches — une liste PLAFONNÉE
-  // à 50 lignes — et d'un dénominateur incluant les alertes non résolues
-  // surestimait le respect des engagements.
-  return {
-    ...compliance,
-    breaches: breachList,
-    data: data
-      ? {
-          ...data,
-          global_compliance_pct: data.global_compliance_pct ?? null,
-          total_breached: data.breached_total ?? null,
-          indicators: [],
-          by_severity: (data.by_severity ?? []).map((row) => ({
-            ...row,
-            total_incidents: row.alerts,
-            avg_mtta_minutes: row.mtta_minutes,
-            avg_mttr_minutes: row.mttr_minutes,
-            breached: row.breached ?? null,
-            ttr_compliance_pct: row.ttr_compliance_pct ?? null,
-          })),
-        }
-      : undefined,
-  };
-}
-
-/**
- * Ancien référentiel géographique.
- *
- * Régions et ministères n'existent plus : ils vivaient dans l'entrepôt
- * supprimé. Le seul axe de regroupement qui subsiste est le SITE, tel que
- * les outils sources le déclarent. Les listes vides sont délibérées — elles
- * font apparaître des sélecteurs sans options, signal correct que ces
- * filtres doivent être remplacés par un filtre sur le site.
- */
-export function useReference() {
-  const sites = useSites();
-  return {
-    ...sites,
-    data: {
-      sites: sites.data ?? [],
-      localities: (sites.data ?? []).map((entry) => ({
-        id: entry.site,
-        name: entry.site,
-        region_id: null,
-      })),
-      regions: [],
-      ministries: [],
-    },
-  };
 }
 
 /* ================================================================== */
@@ -1352,10 +1216,22 @@ export function useItopIncident(incidentKey) {
  * SLA des incidents iTop, ventilés par région, province, site ou nœud.
  * ⚠️ Lit l'historique chez iTop : régime ANALYTIC, pas de sondage rapide.
  */
-export function useSlaIncidents({ groupBy = "region", days = 30, global = false } = {}) {
+export function useSlaIncidents({
+  groupBy = "region",
+  days = 30,
+  startAt,
+  endAt,
+  global = false,
+} = {}) {
   const scope = useScopeParams();
   const { search: _search, ...place } = scope;
-  const params = { group_by: groupBy, days, ...(global ? {} : place) };
+  const params = {
+    group_by: groupBy,
+    days,
+    // Bornes explicites (mois d'un rapport) : elles l'emportent sur `days`.
+    ...(startAt ? { start_at: startAt, end_at: endAt } : {}),
+    ...(global ? {} : place),
+  };
   return useQuery({
     queryKey: ["sla", "incidents", params],
     queryFn: () => api.itopIncidents.sla(params),

@@ -40,6 +40,9 @@ export default function AlertDrawer({ alertKey, open, onClose }) {
   const query = useIncident(open ? alertKey : null);
   const alert = query.data;
   const node = alert?.node;
+  const details = alert?.details ?? {};
+  const hasContext =
+    details.tags?.length || details.cause_ref || details.actions?.length;
 
   return (
     <Drawer
@@ -59,7 +62,9 @@ export default function AlertDrawer({ alertKey, open, onClose }) {
                 <Wrench size={10} /> maintenance planifiée
               </Badge>
             )}
-            {alert.cleared && <Badge color="var(--state-up)">close à la source</Badge>}
+            {details.suppressed && !alert.is_maintenance && (
+              <Badge color="var(--state-maintenance)">masquée par une maintenance Zabbix</Badge>
+            )}
           </span>
         )
       }
@@ -73,8 +78,9 @@ export default function AlertDrawer({ alertKey, open, onClose }) {
             <DefRow label="Référence" mono>{alert.ref ?? alert.key}</DefRow>
             <DefRow label={`Gravité ${toolLabel(alert.tool)}`}><SeverityBadge severity={alert.severity} source={alert.source_severity} tool={alert.tool} /></DefRow>
             <DefRow label="Type">
-              {alert.kind === "manual_incident" ? "Signalement manuel" : "Alerte technique"}
+              Alerte technique
             </DefRow>
+            {details.opdata && <DefRow label="Valeur mesurée" mono>{details.opdata}</DefRow>}
             <DefRow label="Détectée le">{dateTime(alert.since)}</DefRow>
             <DefRow label="Durée">{duration(alert.age_minutes)}</DefRow>
             <DefRow label="Dernière lecture">{dateTime(alert.last_observed_at)}</DefRow>
@@ -101,6 +107,48 @@ export default function AlertDrawer({ alertKey, open, onClose }) {
             </DefRow>
             <DefRow label="Organisation">{node?.organisation}</DefRow>
           </Section>
+
+          {hasContext && (
+            <div className="sm:col-span-2">
+              <Section title={`Contexte ${toolLabel(alert.tool)}`}>
+                {details.cause_ref && (
+                  <DefRow label="Symptôme de">
+                    <Link
+                      to={`/alertes?q=${encodeURIComponent(details.cause_ref)}`}
+                      className="hover:underline mono-xs"
+                    >
+                      problème {details.cause_ref}
+                    </Link>
+                    <span className="block text-[11px]" style={{ color: "var(--ink-3)" }}>
+                      Zabbix rattache ce problème à une cause : traiter la cause d'abord.
+                    </span>
+                  </DefRow>
+                )}
+                {details.tags?.length > 0 && (
+                  <div className="flex flex-wrap gap-1 my-1.5">
+                    {details.tags.map((tag) => (
+                      <Badge key={`${tag.tag}=${tag.value}`} color="var(--ink-2)">
+                        {tag.value ? `${tag.tag} : ${tag.value}` : tag.tag}
+                      </Badge>
+                    ))}
+                  </div>
+                )}
+                {details.actions?.length > 0 && (
+                  <ul className="space-y-1.5 mt-1.5 text-[12px]">
+                    {details.actions.map((action, index) => (
+                      <li key={`${action.at}-${index}`}>
+                        <span className="text-[11px] num" style={{ color: "var(--ink-3)" }}>
+                          {dateTime(action.at)}
+                          {action.user ? ` · ${action.user}` : ""}
+                        </span>
+                        <span className="block whitespace-pre-wrap">{action.message}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </Section>
+            </div>
+          )}
 
           <div className="sm:col-span-2">
             <Section

@@ -27,6 +27,8 @@ x-tool-sources: &tool-sources
   NETXMS_API_USER: ${NETXMS_API_USER:-}
   NETXMS_API_PASSWORD: ${NETXMS_API_PASSWORD:-}
   NETXMS_VERIFY_SSL: ${NETXMS_VERIFY_SSL:-true}
+  NETXMS_SITE_ATTRIBUTE: ${NETXMS_SITE_ATTRIBUTE:-}
+  NETXMS_COLLECT_INTERFACES: ${NETXMS_COLLECT_INTERFACES:-true}
   NAGIOS_API_URL: ${NAGIOS_API_URL:-}
   NAGIOS_API_USER: ${NAGIOS_API_USER:-}
   NAGIOS_API_PASSWORD: ${NAGIOS_API_PASSWORD:-}
@@ -92,6 +94,10 @@ services:
       COLLECT_INTERVAL_S: ${COLLECT_INTERVAL_S:-300}
       ROLLUP_ENABLED: ${ROLLUP_ENABLED:-true}
       ROLLUP_HOUR: ${ROLLUP_HOUR:-1}
+      ROLLUP_RETRY_S: ${ROLLUP_RETRY_S:-900}
+      HISTORY_ENABLED: ${HISTORY_ENABLED:-true}
+      HISTORY_RETENTION_DAYS: ${HISTORY_RETENTION_DAYS:-0}
+      HISTORY_TIMEOUT_S: ${HISTORY_TIMEOUT_S:-60}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       TZ: ${TZ:-Africa/Ouagadougou}
     depends_on:
@@ -159,6 +165,9 @@ services:
       NOTIFY_SEVERITIES: ${NOTIFY_SEVERITIES:-critical,high}
       # Notifications
       NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-false}
+      NOTIFY_RETRY_MAX_ATTEMPTS: ${NOTIFY_RETRY_MAX_ATTEMPTS:-6}
+      NOTIFY_RETRY_MAX_AGE_MIN: ${NOTIFY_RETRY_MAX_AGE_MIN:-360}
+      NOTIFY_BURST_MAX: ${NOTIFY_BURST_MAX:-10}
       VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
       VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
       VAPID_CLAIMS_EMAIL: ${VAPID_CLAIMS_EMAIL:-noc@anptic.bf}
@@ -613,6 +622,30 @@ services:
       interval: 15s
       timeout: 5s
       retries: 10
+
+  # ─────────────────────── Simulateur Nokia NSP (laboratoire) ───────────────────────
+  # Nokia ne distribue pas NSP : ce simulateur (tools/nsp-sim) répond aux
+  # requêtes du connecteur, pour VOIR des données NSP dans le NOC. Il ne
+  # prouve pas la compatibilité avec le NSP de l'agence (tools/README.md).
+  #
+  #     docker compose --profile nsp up -d nsp-sim
+  #     .env : NSP_API_URL=http://nsp-sim:8080  NSP_FM_MODE=yang (ou classic)
+  #
+  # Pilotage : http://localhost:8086/_sim/state ; scénario modifiable à chaud
+  # dans tools/nsp-sim/scenario.json.
+  nsp-sim:
+    profiles: ["tools", "nsp"]
+    build:
+      context: ./tools/nsp-sim
+    hostname: nsp-sim
+    environment:
+      - NSP_SIM_USER=${NSP_API_USER:-admin}
+      - NSP_SIM_PASSWORD=${NSP_API_PASSWORD:-NspLab!2026}
+    ports:
+      - "127.0.0.1:8086:8080"
+    volumes:
+      - ./tools/nsp-sim/scenario.json:/app/scenario.json:ro
+    restart: unless-stopped
 
   # ─────────────────────────── Réseau de laboratoire ───────────────────────────
   # Six « équipements » de site (tools/netdevice) : vrai agent SNMP, vrai

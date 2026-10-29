@@ -16,15 +16,20 @@ différentes qu'il faut pouvoir distinguer d'un coup d'œil :
                  (Une exception assumée : /nodes/{id}/metrics interroge
                  l'outil source, et son en-tête le dit.)
 
-  operations.py  ÉCRITURE dans PostgreSQL, et lecture des agrégats
-                 journaliers. Acquittements, causes, maintenances,
-                 engagements de service.
+  operations.py  Paramètres du NOC (objectifs SLA) et lecture des agrégats
+                 journaliers ; maintenances et interventions lues dans les
+                 outils. Le NOC ne crée ni ne traite aucune alerte.
+
+  history.py     LECTURE du journal historique (base du NOC) : disponibilité
+                 sur la durée par équipement et par lien.
 
 Les autres modules restent séparés parce qu'ils ont chacun une contrainte
 propre : authentification, chargement de fichiers, WebSocket, PDF.
 """
+from app.routes.audit import router as audit_router
 from app.routes.auth import router as auth_router
 from app.routes.health import router as health_router
+from app.routes.history import router as history_router
 from app.routes.live import router as live_router
 from app.routes.notifications import router as notifications_router
 from app.routes.operations import router as operations_router
@@ -37,8 +42,10 @@ all_routers = [
     health_router,
     auth_router,
     users_router,
+    audit_router,
     live_router,
     territory_router,
+    history_router,
     operations_router,
     report_router,
     internal_router,

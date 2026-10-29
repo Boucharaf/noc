@@ -1,0 +1,286 @@
+# Supervision du NOC RESINA par Zabbix 7.0 — à importer dans Zabbix
+# (Collecte de données > Modèles > Importer), puis à lier à un hôte « NOC ».
+# Fichier à modifier directement ; garder les UUID existants (Zabbix s'en sert pour mettre à jour un modèle déjà importé).
+zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: 48024809bf0a5ed3bd830a56f06c6a08
+      name: Templates/Applications
+  templates:
+    - uuid: 4a4653711cbc5b1b808c2d30e20d85ae
+      template: 'NOC RESINA by HTTP'
+      name: 'NOC RESINA by HTTP'
+      description: 'Surveille la plateforme NOC RESINA par sa sonde /api/health : disponibilité, Redis, collecteur, base, outils sources, notifications. Les alertes partent de Zabbix, indépendamment du NOC.'
+      groups:
+        - name: Templates/Applications
+      items:
+        - uuid: 1cc24119cb86594bba6f4ba57d15c3f3
+          name: 'NOC : réponse de /api/health'
+          type: HTTP_AGENT
+          key: noc.health.raw
+          delay: 1m
+          history: 1d
+          trends: '0'
+          value_type: TEXT
+          timeout: 10s
+          url: '{$NOC.URL}/api/health'
+          status_codes: '200,503'
+          description: 'Sonde de santé publique du NOC. 503 = au moins une dépendance en erreur.'
+          tags:
+            - tag: component
+              value: noc
+          triggers:
+            - uuid: 5acb4c41afbb5fd0803b7703f8591e38
+              expression: 'nodata(/NOC RESINA by HTTP/noc.health.raw,{$NOC.NODATA})=1'
+              name: 'NOC : /api/health ne répond plus'
+              priority: HIGH
+              description: 'Le NOC (nginx ou backend) ne répond plus. Plus aucun écran ni aucune notification.'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: abaa2e7a666451978f6a9215744ed257
+          name: 'NOC : état global'
+          type: DEPENDENT
+          key: noc.health.status
+          delay: '0'
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.status'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: 'error'
+          master_item:
+            key: noc.health.raw
+          tags:
+            - tag: component
+              value: noc
+          triggers:
+            - uuid: 3c9fef28d9b859fd9ff676b4ad427255
+              expression: 'last(/NOC RESINA by HTTP/noc.health.status)="error"'
+              name: 'NOC : en panne (état global « error »)'
+              priority: HIGH
+              description: 'Une dépendance du NOC est en erreur ; voir les autres éléments de ce modèle.'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: c83acb8059e95787b73b9f66841c967b
+          name: 'NOC : Redis'
+          type: DEPENDENT
+          key: noc.redis.status
+          delay: '0'
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.checks.redis.status'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: 'unknown'
+          master_item:
+            key: noc.health.raw
+          tags:
+            - tag: component
+              value: noc
+          triggers:
+            - uuid: b38085bdf13d509f93d946a4eae6ef3c
+              expression: 'last(/NOC RESINA by HTTP/noc.redis.status)="error"'
+              name: 'NOC : Redis injoignable'
+              priority: DISASTER
+              description: 'Sans Redis, aucun écran du NOC ne fonctionne.'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: bfc9b86c58ba55b7a2c433212e4e9f14
+          name: 'NOC : collecteur'
+          type: DEPENDENT
+          key: noc.collector.status
+          delay: '0'
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.checks.collector.status'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: 'unknown'
+          master_item:
+            key: noc.health.raw
+          tags:
+            - tag: component
+              value: noc
+          triggers:
+            - uuid: 75737681cad85a65821648c13b4da74c
+              expression: 'last(/NOC RESINA by HTTP/noc.collector.status)="error"'
+              name: 'NOC : collecte interrompue'
+              priority: HIGH
+              description: 'Aucun instantané : le collecteur ne publie plus. Les écrans affichent « collecte interrompue » et aucune nouvelle alerte n''est notifiée.'
+              tags:
+                - tag: scope
+                  value: availability
+            - uuid: c46e996fae665b7db87adde0ff1c669a
+              expression: 'last(/NOC RESINA by HTTP/noc.collector.status)="degraded"'
+              name: 'NOC : collecte en retard'
+              priority: AVERAGE
+              description: 'Instantané plus vieux que deux cycles de collecte.'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: e157e2149d0f5d169a4a6934b8181eed
+          name: 'NOC : âge de l''instantané'
+          type: DEPENDENT
+          key: noc.collector.age
+          delay: '0'
+          history: 7d
+          value_type: FLOAT
+          units: s
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.checks.collector.age_s'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: noc.health.raw
+          tags:
+            - tag: component
+              value: noc
+        - uuid: d49ad2e60aa85631978e55bd9cc29650
+          name: 'NOC : base de données'
+          type: DEPENDENT
+          key: noc.database.status
+          delay: '0'
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.checks.database.status'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: 'unknown'
+          master_item:
+            key: noc.health.raw
+          tags:
+            - tag: component
+              value: noc
+          triggers:
+            - uuid: d6bcfa35745654d0bee034c8ba08b3fb
+              expression: 'last(/NOC RESINA by HTTP/noc.database.status)="error"'
+              name: 'NOC : base de données injoignable'
+              priority: HIGH
+              description: 'Connexions impossibles ; objectifs SLA, audit, rapports et notifications indisponibles.'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: d8a2145552e754a18ae7a1c5560bf9c9
+          name: 'NOC : outils sources en échec'
+          type: DEPENDENT
+          key: noc.sources.failed
+          delay: '0'
+          history: 7d
+          value_type: UNSIGNED
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.checks.sources.failed'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: noc.health.raw
+          tags:
+            - tag: component
+              value: noc
+          triggers:
+            - uuid: c7cebfb75a7c55aaaecddedc0ac67fe9
+              expression: 'min(/NOC RESINA by HTTP/noc.sources.failed,15m)>0'
+              name: 'NOC : un outil source ne répond plus depuis 15 min'
+              priority: WARNING
+              description: 'Ses équipements restent affichés avec leur dernier état connu. Voir l''écran Collecte ETL.'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: 95ec23aa30b754b4891ddda26b32487e
+          name: 'NOC : outils sources en échec (noms)'
+          type: DEPENDENT
+          key: noc.sources.failed_tools
+          delay: '0'
+          history: 7d
+          trends: '0'
+          value_type: TEXT
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.checks.sources.failed_tools'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: noc.health.raw
+          tags:
+            - tag: component
+              value: noc
+        - uuid: 8d5bc000f4d25fcc9e3ff1d820902dbf
+          name: 'NOC : notifications à retenter'
+          type: DEPENDENT
+          key: noc.notifications.pending
+          delay: '0'
+          history: 7d
+          value_type: UNSIGNED
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.checks.notifications.pending'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: noc.health.raw
+          tags:
+            - tag: component
+              value: noc
+          triggers:
+            - uuid: 9bfdaf43be455581b888c9e8787804d7
+              expression: 'min(/NOC RESINA by HTTP/noc.notifications.pending,30m)>0'
+              name: 'NOC : notifications en échec depuis 30 min'
+              priority: AVERAGE
+              description: 'Le serveur de messagerie ou la passerelle SMS refuse les envois ; le NOC retente.'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: 393321d661b85c68ae2dea06eedc5f8c
+          name: 'NOC : notifications abandonnées (24 h)'
+          type: DEPENDENT
+          key: noc.notifications.abandoned
+          delay: '0'
+          history: 7d
+          value_type: UNSIGNED
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.checks.notifications.abandoned_24h'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: noc.health.raw
+          tags:
+            - tag: component
+              value: noc
+          triggers:
+            - uuid: 1413ba6978d05cf5abb12c0cb3a50a15
+              expression: 'last(/NOC RESINA by HTTP/noc.notifications.abandoned)>0'
+              name: 'NOC : notification d''alerte abandonnée'
+              priority: HIGH
+              description: 'Une alerte grave n''a pu être notifiée après toutes les tentatives : personne n''a été prévenu par le NOC. Voir ops_notification_log.'
+              tags:
+                - tag: scope
+                  value: availability
+      tags:
+        - tag: class
+          value: application
+        - tag: target
+          value: noc-resina
+      macros:
+        - macro: '{$NOC.URL}'
+          value: 'https://noc.anptic.bf'
+          description: 'Adresse publique du NOC, sans / final.'
+        - macro: '{$NOC.NODATA}'
+          value: 10m
+          description: 'Délai sans réponse avant l''alerte « /api/health ne répond plus ».'

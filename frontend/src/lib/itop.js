@@ -47,6 +47,19 @@ export const ITOP_PRIORITY = { 1: "P1 · critique", 2: "P2 · haute", 3: "P3 · 
 
 export const priorityLabel = (priority) => ITOP_PRIORITY[priority] ?? (priority ? `P${priority}` : "—");
 
+/** Codes de résolution iTop (UserRequest / Incident ITIL) : la cause retenue à la clôture. */
+export const RESOLUTION_CODE = {
+  assistance: "Assistance",
+  "bug fixed": "Correction d'anomalie",
+  "hardware repair": "Réparation matérielle",
+  other: "Autre",
+  "software patch": "Correctif logiciel",
+  "system update": "Mise à jour système",
+  training: "Formation",
+};
+
+export const resolutionCodeLabel = (code) => RESOLUTION_CODE[code] ?? code ?? "—";
+
 /** Couleur d'un taux de respect des SLA (objectif 95 %). */
 export function complianceColor(value) {
   if (value == null) return "var(--ink-3)";

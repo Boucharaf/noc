@@ -1,79 +1,58 @@
-from datetime import UTC, datetime
+"""Objectifs SLA par gravité — seul contenu SLA conservé en base."""
 from types import SimpleNamespace
-
-from sqlalchemy.dialects import postgresql
 
 from app.services import sla_service
 
 
-class _Result:
-    def all(self):
-        return [
-            SimpleNamespace(
-                severity="critical",
-                total=10,
-                acknowledged=8,
-                resolved=4,
-                resolved_with_target=4,
-                breached=3,
-                tta_s=120,
-                ttr_s=900,
-            )
-        ]
-
-
 class _Session:
-    def __init__(self):
-        self.query = None
+    def __init__(self, existing=None):
+        self.existing = existing
+        self.added = []
+        self.commits = 0
 
-    def execute(self, query):
-        self.query = query
-        return _Result()
+    def execute(self, _query):
+        existing = self.existing
+        return SimpleNamespace(scalar_one_or_none=lambda: existing)
+
+    def add(self, row):
+        self.added.append(row)
+
+    def commit(self):
+        self.commits += 1
+
+    def refresh(self, _row):
+        pass
 
 
-def test_compliance_counts_only_resolved_alerts_with_a_target(monkeypatch):
+def test_list_targets_follows_severity_order(monkeypatch):
     monkeypatch.setattr(
         sla_service,
         "targets",
         lambda _db: {
-            "critical": SimpleNamespace(
-                tta_target_minutes=15,
-                ttr_target_minutes=60,
-            )
+            "low": SimpleNamespace(tta_target_minutes=480, ttr_target_minutes=4320),
+            "critical": SimpleNamespace(tta_target_minutes=15, ttr_target_minutes=240),
         },
     )
 
+    assert [row["severity"] for row in sla_service.list_targets(None)] == ["critical", "low"]
+
+
+def test_update_target_changes_only_the_fields_sent():
+    row = SimpleNamespace(severity="critical", tta_target_minutes=15, ttr_target_minutes=240)
+    db = _Session(existing=row)
+
+    result = sla_service.update_target(db, "critical", ttr_target_minutes=180)
+
+    assert result == {"severity": "critical", "tta_target_minutes": 15, "ttr_target_minutes": 180}
+    assert db.commits == 1
+    assert db.added == []
+
+
+def test_update_target_creates_a_missing_severity():
     db = _Session()
-    result = sla_service.compliance(db, days=30)
-    sql = str(db.query.compile(dialect=postgresql.dialect()))
 
-    assert result["handled_total"] == 10
-    assert result["resolved_total"] == 4
-    assert result["breached_total"] == 3
-    assert result["by_severity"][0]["breached"] == 3
-    assert "resolved_with_target" in sql
-    assert "breached" in sql
+    result = sla_service.update_target(db, "info", tta_target_minutes=600)
 
-
-def test_compliance_accepts_an_explicit_half_open_period(monkeypatch):
-    monkeypatch.setattr(
-        sla_service,
-        "targets",
-        lambda _db: {
-            "critical": SimpleNamespace(
-                tta_target_minutes=15,
-                ttr_target_minutes=60,
-            )
-        },
-    )
-    db = _Session()
-    start = datetime(2026, 2, 1, tzinfo=UTC)
-    end = datetime(2026, 3, 1, tzinfo=UTC)
-
-    sla_service.compliance(db, start_at=start, end_at=end)
-
-    compiled = db.query.compile(dialect=postgresql.dialect())
-    assert start in compiled.params.values()
-    assert end in compiled.params.values()
-    assert "detected_at >=" in str(compiled)
-    assert "detected_at <" in str(compiled)
+    assert result["tta_target_minutes"] == 600
+    assert result["ttr_target_minutes"] == 480
+    assert len(db.added) == 1

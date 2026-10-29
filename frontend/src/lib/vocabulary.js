@@ -222,7 +222,6 @@ export const TOOL_LABEL = {
   centreon: "Centreon",
   nagios: "Nagios",
   nsp: "Nokia NSP",
-  manual: "Saisie manuelle",
 };
 
 export const toolLabel = (tool) => TOOL_LABEL[tool] ?? tool ?? "—";

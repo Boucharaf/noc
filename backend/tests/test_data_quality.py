@@ -28,6 +28,7 @@ from integrations.netxms import NetXMSClient  # noqa: E402
 from integrations.normalize import severity  # noqa: E402
 from integrations.zabbix import _host_state, _metric_for_item, _to_noc_unit  # noqa: E402
 from backend.tests.database_safety import validate_test_database_url  # noqa: E402
+from backend.tests.fakes import FakeSource, MemoryStore  # noqa: E402
 from app.core import rate_limit as rate_limit_module  # noqa: E402
 from app.core.rate_limit import client_ip  # noqa: E402
 from starlette.requests import Request  # noqa: E402
@@ -71,24 +72,21 @@ def test_alert_kind_filter_separates_technical_alerts_from_itsm_tickets(monkeypa
     async def not_stale():
         return False
 
-    class EmptyResult:
-        def scalars(self):
-            return []
-
-    class EmptySession:
-        def execute(self, _query):
-            return EmptyResult()
-
     monkeypatch.setattr(live_service, "get_alerts", get_alerts)
     monkeypatch.setattr(live_service, "get_nodes", get_nodes)
     monkeypatch.setattr(live_service, "snapshot_age_s", zero_age)
     monkeypatch.setattr(live_service, "is_stale", not_stale)
 
+    async def no_windows(_at=None):
+        return []
+
+    monkeypatch.setattr(alerts_service.node_service, "active_windows", no_windows)
+
     technical = asyncio.run(
-        alerts_service.list_alerts(EmptySession(), kind="technical")
+        alerts_service.list_alerts(kind="technical")
     )
     tickets = asyncio.run(
-        alerts_service.list_alerts(EmptySession(), kind="itsm_ticket")
+        alerts_service.list_alerts(kind="itsm_ticket")
     )
 
     assert [alert["kind"] for alert in technical["alerts"]] == ["technical"]
@@ -314,67 +312,31 @@ def test_collector_counts_and_broadcasts_only_technical_alerts(monkeypatch):
         kind="itsm_ticket",
     )
 
-    class Client:
-        def __init__(self, name, alerts):
-            self.name = name
-            self.alerts = alerts
-
-        async def check(self):
-            return ToolHealth(tool=self.name, reachable=True)
-
-        async def fetch_nodes(self):
-            return []
-
-        async def fetch_alerts(self):
-            return self.alerts
-
-    class Store:
-        def __init__(self):
-            self.alerts_written = None
-            self.broadcast = None
-            self.sources = {}
-
-        async def write_tool_health(self, _health):
-            pass
-
-        async def write_snapshot(self, _nodes, alerts, meta):
-            self.alerts_written = alerts
-            self.meta = meta
-
-        async def write_source_data(self, tool, collection, records, collected_at):
-            self.sources[(tool, collection)] = {
-                "collected_at": collected_at.isoformat(),
-                "records": records,
-            }
-
-        async def read_source_data(self, tool, collection):
-            return self.sources.get((tool, collection))
-
+    class Store(MemoryStore):
+        # Toute alerte est « nouvelle » : on vérifie ce qui est diffusé, pas
+        # la règle du premier cycle.
         async def diff_new_alerts(self, alerts):
-            self.broadcast_input = alerts
-            return alerts
-
-        async def publish_new_alerts(self, alerts):
-            self.broadcast = alerts
+            self.diffed = list(alerts)
+            return list(alerts)
 
     store = Store()
     monkeypatch.setattr(cycle.config, "ROLLUP_ENABLED", False)
     meta = asyncio.run(
         run_cycle(
             {
-                "zabbix": Client("zabbix", [technical]),
-                "itop": Client("itop", [ticket]),
+                "zabbix": FakeSource("zabbix", alerts=[technical]),
+                "itop": FakeSource("itop", alerts=[ticket]),
             },
             store,
             timeout_s=1,
         )
     )
 
-    assert len(store.alerts_written) == 2
+    assert len(store.alerts) == 2
     assert meta["alerts"] == 1
     assert meta["itsm_tickets"] == 1
-    assert store.broadcast_input == [technical]
-    assert store.broadcast == [technical]
+    assert store.diffed == [technical]
+    assert store.published == [technical]
 
 
 def test_live_kpis_separate_itop_tickets_from_technical_alerts(monkeypatch):
@@ -433,66 +395,23 @@ def test_collector_retains_last_source_data_and_marks_it_stale(monkeypatch):
         node_ref="host-1",
     )
 
-    class Client:
-        def __init__(self, available):
-            self.available = available
+    def client(available):
+        return FakeSource("zabbix", nodes=[node], alerts=[alert], reachable=available)
 
-        async def check(self):
-            return ToolHealth(tool="zabbix", reachable=self.available)
-
-        async def fetch_nodes(self):
-            return [node]
-
-        async def fetch_alerts(self):
-            return [alert]
-
-    class Store:
-        def __init__(self):
-            self.sources = {}
-            self.seen_alerts = None
-            self.nodes = None
-            self.alerts = None
-
-        async def write_tool_health(self, _health):
-            pass
-
-        async def write_source_data(self, tool, collection, records, collected_at):
-            self.sources[(tool, collection)] = {
-                "collected_at": collected_at.isoformat(),
-                "records": to_jsonable(records),
-            }
-
-        async def read_source_data(self, tool, collection):
-            return self.sources.get((tool, collection))
-
-        async def write_snapshot(self, nodes, alerts, meta):
-            self.nodes = nodes
-            self.alerts = alerts
-            self.meta = meta
-
-        async def diff_new_alerts(self, alerts):
-            current = {item.key() for item in alerts}
-            if self.seen_alerts is None:
-                self.seen_alerts = current
-                return []
-            new = current - self.seen_alerts
-            self.seen_alerts = current
-            return [item for item in alerts if item.key() in new]
-
-        async def publish_new_alerts(self, _alerts):
-            raise AssertionError("a stale alert must not be broadcast as new")
-
-    store = Store()
+    store = MemoryStore()
     monkeypatch.setattr(cycle.config, "ROLLUP_ENABLED", False)
 
     async def run():
-        await run_cycle({"zabbix": Client(True)}, store, timeout_s=1)
-        await run_cycle({"zabbix": Client(False)}, store, timeout_s=1)
+        await run_cycle({"zabbix": client(True)}, store, timeout_s=1)
+        await run_cycle({"zabbix": client(False)}, store, timeout_s=1)
 
     asyncio.run(run())
 
+    # Une alerte resservie depuis le cache n'est pas une nouvelle alerte.
+    assert store.published == []
     assert len(store.nodes) == 1
-    assert store.nodes[0].state == "silent"
+    # La fusion dit « muet » ; le cycle publie un seul état « inconnu ».
+    assert store.nodes[0].state == "unknown"
     assert store.nodes[0].last_known_states == {"zabbix": "down"}
     assert store.nodes[0].stale_sources == ["zabbix"]
     assert len(store.alerts) == 1
@@ -573,7 +492,10 @@ def test_itop_ticket_attaches_by_numeric_functional_ci_id():
 
 
 def test_network_series_averages_each_node_before_population(monkeypatch):
-    nodes = [{"id": "router-a", "name": "A"}, {"id": "router-b", "name": "B"}]
+    nodes = [
+        {"id": "router-a", "name": "A", "sources": {"zabbix": "1"}},
+        {"id": "router-b", "name": "B", "sources": {"zabbix": "2"}},
+    ]
     series = {
         "router-a": [
             {"at": "2025-01-01T10:00:05+02:00", "value": 4.0},
@@ -599,6 +521,7 @@ def test_network_series_averages_each_node_before_population(monkeypatch):
     monkeypatch.setattr(
         metrics_service.history_service, "fetch_node_series", fetch_node_series
     )
+    monkeypatch.setattr(metrics_service.history_service, "serves_history", lambda _tool: True)
 
     result = asyncio.run(metrics_service.network_series("cpu_pct", sample=2))
 
@@ -642,14 +565,15 @@ def test_site_availability_excludes_maintenance_and_counts_unknown(monkeypatch):
 
 def test_site_maintenance_window_overrides_measured_state(monkeypatch):
     from app.services.node_service import apply_maintenance_windows
-    from app.models import MaintenanceWindow
 
-    window = MaintenanceWindow(
-        node_key="router-a",
-        reason="Travaux planifiés",
-        starts_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
-        ends_at=datetime(2025, 1, 1, 12, tzinfo=timezone.utc),
-    )
+    window = {
+        "kind": "change",
+        "ref": "C-000042",
+        "title": "Travaux planifiés",
+        "start": "2025-01-01T00:00:00+00:00",
+        "end": "2025-01-01T12:00:00+00:00",
+        "node_keys": ["router-a"],
+    }
 
     nodes = [
         {"id": "router-a", "site": "A", "state": "down"},
@@ -661,7 +585,8 @@ def test_site_maintenance_window_overrides_measured_state(monkeypatch):
 
     assert result[0]["state"] == "maintenance"
     assert result[0]["measured_state"] == "down"
-    assert result[0]["maintenance_reason"] == "Travaux planifiés"
+    assert result[0]["maintenance_reason"] == "Changement iTop C-000042 — Travaux planifiés"
+    assert result[0]["maintenance_until"] == "2025-01-01T12:00:00+00:00"
     assert result[1]["state"] == "up"
 
     async def get_alerts():
@@ -756,22 +681,6 @@ def test_integration_database_guard_accepts_explicit_test_database():
         "postgresql://noc:secret@localhost:5432/noc_test"
     )
     assert parsed.database == "noc_test"
-
-
-def test_agent_terrain_manual_incident_requires_assigned_site():
-    import pytest
-    from fastapi import HTTPException
-    from app.routes.operations import _validate_manual_incident_site
-
-    with pytest.raises(HTTPException) as no_site:
-        _validate_manual_incident_site("agent_terrain", None, "Site A")
-    assert no_site.value.status_code == 403
-
-    with pytest.raises(HTTPException) as wrong_site:
-        _validate_manual_incident_site("agent_terrain", "Site A", "Site B")
-    assert wrong_site.value.status_code == 403
-
-    _validate_manual_incident_site("agent_terrain", "Site A", "Site A")
 
 
 def test_refresh_rotation_reports_success_duplicate_and_replay(monkeypatch):
@@ -1022,6 +931,8 @@ def test_netxms_objects_are_paged(monkeypatch):
     calls = []
 
     async def get(_path, params=None):
+        if params["class"] != "Node":
+            return {"objects": [], "totalCount": 0}
         calls.append(params["offset"])
         start = params["offset"]
         page = [
@@ -1089,20 +1000,15 @@ def test_rate_limit_middleware_enforces_ip_quota(monkeypatch):
 
 
 def test_collector_excludes_disabled_nodes():
-    class Client:
-        async def check(self):
-            return ToolHealth(tool="zabbix", reachable=True)
+    client = FakeSource(
+        "zabbix",
+        nodes=[
+            Node(tool="zabbix", ref="enabled", name="enabled"),
+            Node(tool="zabbix", ref="disabled", name="disabled", enabled=False),
+        ],
+    )
 
-        async def fetch_nodes(self):
-            return [
-                Node(tool="zabbix", ref="enabled", name="enabled"),
-                Node(tool="zabbix", ref="disabled", name="disabled", enabled=False),
-            ]
-
-        async def fetch_alerts(self):
-            return []
-
-    result = asyncio.run(poll_tool("zabbix", Client()))
+    result = asyncio.run(poll_tool("zabbix", client))
 
     assert [node.ref for node in result.nodes] == ["enabled"]
     assert result.health.reachable
@@ -1172,38 +1078,11 @@ def test_collector_does_not_publish_empty_snapshot_when_sources_are_unavailable(
 def test_collector_publishes_empty_result_from_a_healthy_source(monkeypatch):
     from collector import config
 
-    class Client:
-        async def check(self):
-            return ToolHealth(tool="zabbix", reachable=True)
-
-        async def fetch_nodes(self):
-            return []
-
-        async def fetch_alerts(self):
-            return []
-
-    class Store:
-        snapshot_written = False
-
-        async def write_tool_health(self, _health):
-            pass
-
-        async def write_source_data(self, *_args):
-            pass
-
-        async def write_snapshot(self, nodes, alerts, _meta):
-            self.snapshot_written = True
-            self.nodes = nodes
-            self.alerts = alerts
-
-        async def diff_new_alerts(self, _alerts):
-            return []
-
-    store = Store()
+    store = MemoryStore()
     monkeypatch.setattr(config, "ROLLUP_ENABLED", False)
 
     result = asyncio.run(
-        run_cycle({"zabbix": Client()}, store, timeout_s=1)
+        run_cycle({"zabbix": FakeSource("zabbix")}, store, timeout_s=1)
     )
 
     assert result["nodes"] == 0

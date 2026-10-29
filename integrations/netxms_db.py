@@ -17,8 +17,9 @@ l'API, ou le compte de lecture décrit dans database/netxms_readonly_role.sql.
 GARANTIES ENVERS LA BASE DE PRODUCTION :
   * chaque connexion est ouverte en lecture seule et avec un délai de garde,
     côté client ici, et doublée côté serveur par le rôle `noc_reader` ;
-  * deux requêtes par cycle de collecte, jamais sur les tables de séries
-    temporelles ;
+  * quelques requêtes par cycle de collecte (inventaire, alarmes, et les
+    lectures complémentaires de la fiche d'équipement si le compte en a le
+    droit), jamais sur les tables de séries temporelles ;
   * aucune colonne secrète n'est lue (communautés SNMP, secrets d'agent).
 
 CE QUE LA BASE NE DONNE PAS : l'historique des mesures. idata_* et tdata_*
@@ -32,7 +33,13 @@ import logging
 
 from .base import SourceClient, ToolUnavailable
 from .models import Alert, Node, ToolHealth
-from .netxms import _OBJECT_STATE
+from .netxms import (
+    _OBJECT_STATE,
+    AVAILABILITY_ATTRIBUTES,
+    availability_from_attributes,
+    interface_summary,
+    watched_links,
+)
 from .normalize import display_locality, epoch_to_dt, severity, source_severity
 
 logger = logging.getLogger(__name__)
@@ -143,6 +150,47 @@ WHERE (a.alarm_state & 15) IN (0, 1)
 """
 
 
+# Lectures COMPLÉMENTAIRES, chacune faite seulement si le compte de lecture a
+# les droits sur ses colonnes (bloc « Fiche d'équipement » de
+# database/netxms_readonly_role.sql) : une base restaurée avec les droits
+# d'avant fonctionne comme avant, sans ces faits.
+_EXTRAS = {
+    "facts": (
+        ("nodes", ("boot_time", "down_since", "vendor", "product_name", "serial_number")),
+    ),
+    # Vue créée par le script de droits, limitée aux attributs de
+    # disponibilité : la table entière peut contenir des identifiants.
+    "attributes": (
+        ("noc_availability_attributes", ("object_id", "attr_name", "attr_value")),
+    ),
+    "interfaces": (
+        ("interfaces", ("node_id", "admin_state", "oper_state", "speed")),
+        ("object_properties", ("flags",)),
+    ),
+}
+
+_FACTS_SQL = """
+SELECT id, boot_time, down_since, vendor, product_name, serial_number,
+       platform_name, snmp_sys_location
+FROM nodes
+"""
+
+_ATTRIBUTES_SQL = """
+SELECT object_id, attr_name, attr_value
+FROM noc_availability_attributes
+"""
+
+# État attendu d'une interface : bits 28-29 de ses drapeaux d'objet
+# (0 actif, 1 inactif, 2 à ignorer), comme dans le serveur NetXMS.
+_INTERFACES_SQL = """
+SELECT i.node_id, i.admin_state, i.oper_state, (p.flags >> 28) & 3, i.speed,
+       i.id, p.name
+FROM interfaces i
+JOIN object_properties p ON p.object_id = i.id
+WHERE p.is_deleted = 0
+"""
+
+
 def _first_line(exc: Exception) -> str:
     """Message d'erreur PostgreSQL sans ses lignes de contexte : il s'affiche
     tel quel sur l'écran Interopérabilité."""
@@ -180,6 +228,7 @@ class NetXMSDatabaseClient(SourceClient):
         super().__init__(dsn, user, password, verify_ssl, timeout_s)
         self._site_referential: bool | None = None
         self._geography: bool | None = None
+        self._extras: dict[str, bool] = {}
 
     async def _query(self, sql: str) -> list[tuple]:
         """Une requête, sur une connexion ouverte pour elle.
@@ -266,6 +315,67 @@ class NetXMSDatabaseClient(SourceClient):
             )
         return self._geography
 
+    async def _allowed(self, extra: str) -> bool:
+        """Le compte de lecture voit-il les colonnes de cette lecture ?"""
+        if extra not in self._extras:
+            wanted = _EXTRAS[extra]
+            condition = " OR ".join(
+                f"(table_name = '{table}' AND column_name IN "
+                f"({', '.join(repr(column) for column in columns)}))"
+                for table, columns in wanted
+            )
+            rows = await self._query(
+                "SELECT count(*) FROM information_schema.columns "
+                f"WHERE table_schema = 'public' AND ({condition})"
+            )
+            expected = sum(len(columns) for _table, columns in wanted)
+            self._extras[extra] = bool(rows and rows[0][0] == expected)
+            if not self._extras[extra]:
+                logger.info(
+                    "netxms : lecture « %s » ignorée, droits absents pour ce compte "
+                    "(voir database/netxms_readonly_role.sql)", extra,
+                )
+        return self._extras[extra]
+
+    async def _details(self) -> dict[str, dict]:
+        """Faits de fiche d'équipement, par nœud — mêmes clés que netxms.py."""
+        details: dict[str, dict] = {}
+        if await self._allowed("facts"):
+            for (node_id, boot, down, vendor, model, serial, os_name, location) in (
+                await self._query(_FACTS_SQL)
+            ):
+                facts = details.setdefault(str(node_id), {})
+                inventory = {
+                    name: str(value).strip()
+                    for name, value in (
+                        ("vendor", vendor), ("model", model), ("serial", serial),
+                        ("os", os_name), ("location", location),
+                    )
+                    if value and str(value).strip()
+                }
+                if inventory:
+                    facts["inventory"] = inventory
+                for name, value in (("boot_time", boot), ("down_since", down)):
+                    when = epoch_to_dt(value)
+                    if when is not None:
+                        facts[name] = when
+        if await self._allowed("attributes"):
+            attributes: dict[str, dict[str, str]] = {}
+            for object_id, name, value in await self._query(_ATTRIBUTES_SQL):
+                if name in AVAILABILITY_ATTRIBUTES:
+                    attributes.setdefault(str(object_id), {})[name] = value
+            for node_id, values in attributes.items():
+                availability = availability_from_attributes(values)
+                if availability:
+                    details.setdefault(node_id, {})["availability"] = availability
+        if await self._allowed("interfaces"):
+            rows = await self._query(_INTERFACES_SQL)
+            for node_id, summary in interface_summary(rows).items():
+                details.setdefault(node_id, {})["interfaces"] = summary
+            for node_id, links in watched_links(rows).items():
+                details.setdefault(node_id, {})["links"] = links
+        return details
+
     async def fetch_nodes(self) -> list[Node]:
         geography = False
         if await self._uses_site_referential():
@@ -301,6 +411,7 @@ class NetXMSDatabaseClient(SourceClient):
 
         nodes: list[Node] = []
         rows = await self._query(sql)
+        details = await self._details()
         for (
             node_id, name, primary_name, ip, status, city, site,
             latitude, longitude, province, region, containers,
@@ -332,6 +443,7 @@ class NetXMSDatabaseClient(SourceClient):
                     region=display_locality(region),
                     latitude=float(latitude) if latitude is not None else None,
                     longitude=float(longitude) if longitude is not None else None,
+                    details=details.get(str(node_id), {}),
                 )
             )
         return nodes

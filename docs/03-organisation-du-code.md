@@ -8,6 +8,7 @@ noc/
 ├── ARCHITECTURE.md            Le raisonnement derrière l'architecture
 ├── docs/                      Cette documentation
 ├── docker-compose.yml         Tous les services, cœur et profils
+├── docker-compose.dumps.yml   Local : exports de l'agence lus par le collecteur (lecture seule)
 ├── .env.example               Toutes les variables, commentées (copier en .env)
 ├── deployment.sh              Mise à jour : down + up --build (sans perte de données)
 │
@@ -17,7 +18,9 @@ noc/
 │   ├── cycle.py               Un cycle : interroger, fusionner, publier
 │   ├── merge.py               Fusion des équipements multi-outils
 │   ├── state.py               Contrat Redis (noms de clés) — partagé avec le backend
-│   └── rollup.py              Bilan journalier (kpi_daily)
+│   ├── rollup.py              Bilan journalier (kpi_daily)
+│   ├── history.py             Journal historique (périodes d'état, alertes) et recalcul des bilans
+│   └── probe.py               Diagnostic d'un connecteur contre l'outil réel
 │
 ├── integrations/              BIBLIOTHÈQUE — un connecteur par outil (collecteur + backend)
 │   ├── base.py                Contrat commun, client HTTP, disjoncteur
@@ -25,8 +28,11 @@ noc/
 │   ├── models.py              Vocabulaire commun : Node, Alert, ToolHealth…
 │   ├── normalize.py           Traduction des gravités et des dates de chaque outil
 │   ├── zabbix.py  centreon.py  itop.py  nagios.py  nsp.py
-│   ├── netxms.py              NetXMS par son API Web
-│   └── netxms_db.py           NetXMS par sa base, en lecture seule
+│   ├── netxms.py              NetXMS par son API Web (production)
+│   ├── netxms_db.py           NetXMS par sa base, en lecture seule (dump local)
+│   ├── centreon_logs.py       Centreon par un export de son journal (local)
+│   ├── localities.py          Province et région d'après la ville ou les coordonnées
+│   └── data/localities.json   Référentiel figé : villes, provinces, contours des régions
 │
 ├── backend/                   SERVICE — API FastAPI
 │   ├── app/
@@ -40,7 +46,7 @@ noc/
 │   │   └── services/          La logique métier
 │   ├── sql/schema.sql         Schéma de la base du NOC (rejouable)
 │   ├── scripts/create_user.py Création/réinitialisation de compte en ligne de commande
-│   └── tests/                 ⚠️ obsolète (voir chapitre 10)
+│   └── tests/                 Tests sans base ni Redis réels (doublures : tests/fakes.py)
 │
 ├── frontend/                  SERVICE — interface React
 │   └── src/
@@ -56,11 +62,15 @@ noc/
 │   ├── nginx.conf             Routage /api, /ws, /
 │   └── generate_cert.sh       Certificat auto-signé (certs/ exclu de git)
 │
-├── database/                  Base NetXMS de production (dump)
+├── database/                  Exports de production — visualisation LOCALE uniquement
 │   ├── restore_netxms_dump.sh Restauration + purge + compte de lecture
 │   ├── netxms_sanitize.sql    Purge des secrets du dump
 │   ├── netxms_readonly_role.sql Compte noc_reader (aussi : la demande de droits à l'agence)
-│   └── netxmsbd07082026.sql   Le dump (exclu de git, à copier à la main)
+│   ├── export_localities.py   Fige le découpage administratif dans integrations/data/
+│   ├── netxmsbd07082026.sql   Le dump NetXMS (exclu de git, à copier à la main)
+│   └── alertes.sql            Export du journal Centreon (exclu de git)
+│
+├── monitoring/zabbix/         Modèle Zabbix pour superviser le NOC lui-même (/api/health)
 │
 └── tools/                     Outils de laboratoire (Zabbix, iTop, Centreon)
     ├── README.md
@@ -98,6 +108,8 @@ la racine du dépôt et non le dossier de chaque service.
 | Brancher un **nouvel outil** | Un fichier dans `integrations/`, une branche dans `integrations/config.py`, sa table de gravités dans `normalize.py`, ses variables dans `docker-compose.yml` et `.env.example` | [4](04-sources-de-donnees.md) |
 | Changer la **traduction des gravités** | `integrations/normalize.py` | [4](04-sources-de-donnees.md) |
 | Changer les règles de **fusion** des équipements | `collector/merge.py` | [4](04-sources-de-donnees.md) |
+| Afficher une **nouvelle donnée d'un outil** sur une fiche | Le connecteur (`Node.details` ou `Alert.details`), puis l'écran (`components/domain/SourceFacts.jsx`, `AlertDrawer.jsx`) : la donnée traverse l'instantané sans autre changement | [4](04-sources-de-donnees.md) |
+| Vérifier ce qu'un **outil renvoie réellement** | `python -m collector.probe <outil>` (`collector/probe.py`) | [9](09-exploitation.md) |
 | Modifier le **contenu des courriels** | `backend/app/services/notification_service.py` | [6](06-alertes-et-notifications.md) |
 | Ajouter une **variable de configuration** | `backend/app/core/config.py` (ou `collector/config.py`), `docker-compose.yml` (section `environment` du service), `.env.example` | [9](09-exploitation.md) |
 | Modifier le **rapport mensuel** | `backend/app/services/report_service.py` | [7](07-backend.md) |

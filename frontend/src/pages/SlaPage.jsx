@@ -4,6 +4,7 @@ import { Pencil } from "lucide-react";
 
 import Panel from "../components/ui/Panel";
 import Stat from "../components/ui/Stat";
+import SlaAtRisk from "../components/domain/SlaAtRisk";
 import SlaBreakdown from "../components/domain/SlaBreakdown";
 import { BarChart, LineChart } from "../components/charts";
 import { complianceColor } from "../lib/itop";
@@ -17,7 +18,12 @@ import { LEVEL } from "../lib/locality";
 import { severityMeta } from "../lib/vocabulary";
 import { errorMessage } from "../api/client";
 import { PERMISSIONS } from "../lib/permissions";
-import { useSlaIncidents, useSlaTargets, useUpdateSlaTarget } from "../hooks/queries";
+import {
+  useSlaContract,
+  useSlaIncidents,
+  useSlaTargets,
+  useUpdateSlaTarget,
+} from "../hooks/queries";
 import { scopeLabel, useScopeStore } from "../store/scope";
 import { usePermission } from "../hooks/useSession";
 
@@ -155,6 +161,9 @@ export default function SlaPage() {
           hint={delayHint(totals?.ttr_count, totals?.median_ttr_minutes, totals?.incidents)}
         />
       </div>
+
+      {/* Les taux ci-dessus racontent le passé ; ceci est encore rattrapable. */}
+      <SlaAtRisk limit={10} />
 
       {sla.data && (
         <div className="grid grid-cols-12 gap-2 items-start">
@@ -312,8 +321,88 @@ export default function SlaPage() {
         </QueryBoundary>
       </Panel>
 
+      <ContractPanel goals={sla.data?.targets} />
+
       <TargetModal target={editing} onClose={() => setEditing(null)} />
     </div>
+  );
+}
+
+/**
+ * Objectifs du NOC face au contrat déclaré dans iTop (SLT). iTop porte le
+ * contrat ; le NOC ne s'y aligne pas en silence : un écart se voit ici et
+ * se corrige par le crayon du tableau « Par gravité ».
+ */
+function ContractPanel({ goals }) {
+  const contract = useSlaContract();
+  const severities = ["critical", "high", "medium", "low"];
+  const gap = (noc, itop) =>
+    noc != null && itop != null && Math.round(noc) !== Math.round(itop);
+
+  return (
+    <Panel
+      title="Contrat iTop (SLT)"
+      subtitle="engagements déclarés dans iTop, comparés aux objectifs du NOC"
+      flush
+    >
+      <QueryBoundary
+        query={contract}
+        compact
+        empty={(d) => !d?.available || !Object.keys(d.by_severity ?? {}).length}
+        emptyMessage="Aucun engagement de service déclaré dans iTop"
+        emptyHint={
+          contract.data?.reason ??
+          "Aucun SLT de type incident n'est défini dans les contrats iTop."
+        }
+      >
+        {(data) => (
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th style={{ width: 100 }}>Gravité</th>
+                <th style={{ textAlign: "right" }}>TTO iTop</th>
+                <th style={{ textAlign: "right" }}>TTO NOC</th>
+                <th style={{ textAlign: "right" }}>TTR iTop</th>
+                <th style={{ textAlign: "right" }}>TTR NOC</th>
+              </tr>
+            </thead>
+            <tbody>
+              {severities.map((severity) => {
+                const itop = data.by_severity[severity] ?? {};
+                const noc = goals?.[severity] ?? {};
+                return (
+                  <tr key={severity}>
+                    <td>
+                      <SeverityBadge severity={severity} />
+                    </td>
+                    <td className="num" style={{ textAlign: "right" }}>{duration(itop.tto)}</td>
+                    <td
+                      className="num"
+                      style={{
+                        textAlign: "right",
+                        color: gap(noc.tto, itop.tto) ? "var(--sev-medium)" : "var(--ink-3)",
+                      }}
+                    >
+                      {duration(noc.tto)}
+                    </td>
+                    <td className="num" style={{ textAlign: "right" }}>{duration(itop.ttr)}</td>
+                    <td
+                      className="num"
+                      style={{
+                        textAlign: "right",
+                        color: gap(noc.ttr, itop.ttr) ? "var(--sev-medium)" : "var(--ink-3)",
+                      }}
+                    >
+                      {duration(noc.ttr)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </QueryBoundary>
+    </Panel>
   );
 }
 

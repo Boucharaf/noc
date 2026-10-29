@@ -49,6 +49,8 @@ class MergedNode:
     state_conflict: dict[str, str] = field(default_factory=dict)
     last_known_states: dict[str, str] = field(default_factory=dict)
     stale_sources: list[str] = field(default_factory=list)
+    # Faits propres à chaque source (Node.details), par outil.
+    details: dict[str, dict] = field(default_factory=dict)
 
 
 @dataclass
@@ -65,7 +67,8 @@ class MergeReport:
     state_conflicts: list[dict[str, object]] = field(default_factory=list)
     # Équipements qu'un seul outil connaît : souvent le signe d'un défaut de
     # couverture (supervisé par Zabbix mais absent de la CMDB, ou l'inverse).
-    single_source: list[str] = field(default_factory=list)
+    # {id, name, tool} — l'identifiant mène à la fiche d'équipement.
+    single_source: list[dict[str, str]] = field(default_factory=list)
 
 
 def _normalise_name(name: str) -> str:
@@ -178,7 +181,11 @@ def merge_nodes(nodes: list[Node]) -> tuple[list[MergedNode], MergeReport]:
     merged.sort(key=lambda n: (_STATE_RANK.get(n.state, 9), n.name.lower()))
 
     report.total_merged = len(merged)
-    report.single_source = [n.name for n in merged if len(n.sources) == 1]
+    report.single_source = [
+        {"id": n.id, "name": n.name, "tool": next(iter(n.sources))}
+        for n in merged
+        if len(n.sources) == 1
+    ]
     report.state_conflicts = [
         {"id": node.id, "states": node.state_conflict}
         for node in merged
@@ -269,6 +276,7 @@ def _fold(group_id: str, members: list[Node]) -> MergedNode:
         state_conflict=state_conflict,
         last_known_states=stale_states if not fresh_states else {},
         stale_sources=[node.tool for node in members if node.stale],
+        details={node.tool: node.details for node in members if node.details},
     )
 
 

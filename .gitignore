@@ -25,6 +25,8 @@ netxmsbd07082026.sql
 *.dump
 *.backup
 database/*dump*.sql
+# Export du journal Centreon de l'agence (hôtes, comptes de notification).
+database/alertes*.sql
 
 
 

@@ -32,7 +32,7 @@ class InternalMonthlyReportIn(BaseModel):
 
 
 @router.get("/monthly")
-def download_monthly_report(
+async def download_monthly_report(
     month: int | None = Query(None, ge=1, le=12),
     year: int | None = Query(None, ge=2000, le=2100),
     format: str = Query("pdf", pattern="^(pdf|docx)$"),
@@ -43,7 +43,7 @@ def download_monthly_report(
     m, y = month or now.month, year or now.year
 
     try:
-        path = report_service.generate(db, m, y, format)
+        path = await report_service.generate(db, m, y, format)
     except Exception as exc:
         # La cause reste dans les journaux du backend. Le message d'une
         # exception (requête SQL, chemin du disque, nom d'hôte de la base)
@@ -64,7 +64,7 @@ def download_monthly_report(
 
 
 @internal_router.post("/reports/monthly")
-def generate_internal_monthly_report(
+async def generate_internal_monthly_report(
     body: InternalMonthlyReportIn,
     db: Session = Depends(get_db),
     _internal: None = Depends(require_internal_key),
@@ -72,7 +72,7 @@ def generate_internal_monthly_report(
     now = datetime.now(UTC)
     month, year = body.month or now.month, body.year or now.year
     try:
-        path = report_service.generate(db, month, year, body.format)
+        path = await report_service.generate(db, month, year, body.format)
     except Exception as exc:
         logger.exception(
             "Rapport interne %s %02d/%d : génération en échec",

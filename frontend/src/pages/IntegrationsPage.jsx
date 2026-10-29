@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 
 import Panel from "../components/ui/Panel";
 import Stat, { Meter } from "../components/ui/Stat";
@@ -228,6 +229,86 @@ export default function IntegrationsPage() {
           )}
         </QueryBoundary>
       </Panel>
+
+      <div className="grid grid-cols-12 gap-2.5">
+        <div className="col-span-12 lg:col-span-6">
+          <Panel
+            title="Vus par un seul outil"
+            subtitle="si cet outil tombe, l'équipement sort de la vue sans que rien ne le signale"
+            flush
+          >
+            <QueryBoundary
+              query={merge}
+              compact
+              empty={(d) => !d?.single_source_nodes?.length}
+              emptyMessage="Chaque équipement est vu par au moins deux outils"
+            >
+              {(data) => (
+                <>
+                  <p className="px-3 pt-2 text-[11.5px]" style={{ color: "var(--ink-3)" }}>
+                    {num(data.single_source_total ?? data.single_source_nodes.length)} équipement(s)
+                    {data.single_source_total > data.single_source_nodes.length &&
+                      ` — les ${data.single_source_nodes.length} premiers`}
+                  </p>
+                  <ul className="max-h-64 overflow-auto px-3 py-2 space-y-1 text-[12px]">
+                    {data.single_source_nodes.map((item) => (
+                      <li key={item.id ?? item.name} className="flex items-center gap-2">
+                        {item.id ? (
+                          <Link to={`/equipements/${encodeURIComponent(item.id)}`} className="truncate hover:underline">
+                            {item.name}
+                          </Link>
+                        ) : (
+                          <span className="truncate">{item.name}</span>
+                        )}
+                        {item.tool && (
+                          <span className="ml-auto shrink-0 text-[11px]" style={{ color: "var(--ink-3)" }}>
+                            {toolLabel(item.tool)} seul
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </QueryBoundary>
+          </Panel>
+        </div>
+        <div className="col-span-12 lg:col-span-6">
+          <Panel
+            title="Alertes sans équipement"
+            subtitle="la source cite un équipement absent de l'inventaire collecté"
+            flush
+          >
+            <QueryBoundary
+              query={merge}
+              compact
+              empty={(d) => !d?.orphan_alerts}
+              emptyMessage="Toutes les alertes sont rattachées à un équipement"
+            >
+              {(data) => (
+                <>
+                  <p className="px-3 pt-2 text-[11.5px]" style={{ color: "var(--sev-medium)" }}>
+                    {num(data.orphan_alerts)} alerte(s) ou ticket(s) non rattaché(s)
+                    {data.orphan_samples?.length < data.orphan_alerts &&
+                      ` — les ${data.orphan_samples.length} premiers`}
+                  </p>
+                  <ul className="max-h-64 overflow-auto px-3 py-2 space-y-1.5 text-[12px]">
+                    {(data.orphan_samples ?? []).map((alert) => (
+                      <li key={alert.key}>
+                        <span className="font-medium">{toolLabel(alert.tool)}</span>
+                        {alert.kind === "itsm_ticket" && " (ticket)"} — {alert.message}
+                        <span className="block text-[11px]" style={{ color: "var(--ink-3)" }}>
+                          équipement cité : {alert.node_name || alert.node_ref || "aucun"}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </QueryBoundary>
+          </Panel>
+        </div>
+      </div>
 
       <div className="grid grid-cols-12 gap-2.5">
         <div className="col-span-12 lg:col-span-4">

@@ -32,11 +32,13 @@ from .state import SnapshotStore
 
 logger = logging.getLogger(__name__)
 
-# Compteurs accumulés en mémoire entre deux écritures. Volontairement pas en
-# Redis : perdre le bilan partiel d'une journée sur un redémarrage n'a aucune
-# conséquence — la moyenne du jour sera calculée sur moins d'échantillons, et
-# le collecteur reprend au cycle suivant.
+# Compteurs accumulés entre deux écritures, en mémoire ET sauvegardés dans
+# Redis à chaque cycle (SnapshotStore.save_rollup) : un redémarrage du
+# collecteur en cours de journée reprend les compteurs du jour au lieu de
+# repartir de zéro, et un bilan non écrit (base indisponible) reste en
+# attente jusqu'à ce qu'il le soit.
 _ACCUMULATOR: dict[tuple[date, str | None], dict] = {}
+_COUNTERS = ("samples", "nodes", "up", "down", "degraded", "maintenance", "alerts", "critical")
 
 
 def rollup_key(level: str, name: str) -> str:
@@ -87,8 +89,53 @@ def observe(
     bucket["critical"] += sum(1 for a in alerts if a.severity == "critical")
 
 
+def export_accumulator() -> list[dict]:
+    """Compteurs en cours, sous une forme JSON (sauvegarde Redis)."""
+    return [
+        {"day": day.isoformat(), "site": site, **counters}
+        for (day, site), counters in _ACCUMULATOR.items()
+    ]
+
+
+def restore_accumulator(payload: list) -> int:
+    """Recharge les compteurs sauvegardés, au démarrage du collecteur.
+
+    Les compteurs rechargés REMPLACENT ceux du même jour et du même site :
+    appelé deux fois, il ne double rien. Une entrée illisible est ignorée.
+    """
+    restored = 0
+    for item in payload or []:
+        try:
+            key = (date.fromisoformat(item["day"]), item.get("site"))
+            counters = {name: int(item.get(name) or 0) for name in _COUNTERS}
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+        _ACCUMULATOR[key] = counters
+        restored += 1
+    return restored
+
+
+def pending_days(now: datetime | None = None) -> list[date]:
+    """Jours dont le bilan peut être écrit : avant aujourd'hui, et, pour la
+    veille, seulement après ROLLUP_HOUR — un cycle commencé avant minuit doit
+    avoir le temps de verser ses observations."""
+    now = now or datetime.now(timezone.utc)
+    today = now.date()
+    return sorted({
+        day for day, _site in _ACCUMULATOR
+        if day < today - timedelta(days=1)
+        or (day == today - timedelta(days=1) and now.hour >= config.ROLLUP_HOUR)
+    })
+
+
+def discard(day: date) -> None:
+    """Oublie les compteurs d'un jour dont le bilan est écrit."""
+    for key in [key for key in _ACCUMULATOR if key[0] == day]:
+        del _ACCUMULATOR[key]
+
+
 def _drain(day: date) -> list[dict]:
-    """Extrait et vide les compteurs du jour donné.
+    """Calcule le bilan du jour donné et vide ses compteurs.
 
     Les moyennes sont calculées ici plutôt qu'à la lecture : le nombre
     d'échantillons dépend du nombre de cycles réellement exécutés, et une
@@ -125,6 +172,15 @@ def _drain(day: date) -> list[dict]:
             }
         )
         del _ACCUMULATOR[(bucket_day, site)]
+    return rows
+
+
+def rows_for(day: date) -> list[dict]:
+    """Bilan du jour SANS vider ses compteurs : ils ne sont oubliés
+    qu'une fois le bilan écrit (`discard`), pour pouvoir réessayer."""
+    saved = {key: dict(value) for key, value in _ACCUMULATOR.items() if key[0] == day}
+    rows = _drain(day)
+    _ACCUMULATOR.update(saved)
     return rows
 
 
@@ -173,34 +229,53 @@ async def write_rows(rows: list[dict]) -> None:
 
 
 async def rollup_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
-    """Écrit le bilan de la veille une fois par jour, puis attend.
+    """Écrit les bilans en attente, puis attend la prochaine échéance.
 
-    L'écriture a lieu après minuit et non à minuit pile : un cycle de
-    collecte en cours au changement de date doit avoir le temps de verser ses
-    observations avant qu'on ne clôture la journée.
+    Échéance : chaque nuit à ROLLUP_HOUR pour la veille. Un bilan dont
+    l'écriture échoue (base indisponible) reste en attente, sauvegardé dans
+    Redis, et est réessayé toutes les ROLLUP_RETRY_S secondes jusqu'à ce
+    qu'il soit écrit ; un collecteur arrêté à l'heure du bilan l'écrit à son
+    redémarrage. Ensuite, les jours restés sans bilan sont recalculés depuis
+    le journal historique (collector/history.py).
     """
     while not stop.is_set():
+        failed = await write_pending(store)
+        if config.HISTORY_ENABLED and not failed:
+            from .history import backfill_missing
+
+            try:
+                await backfill_missing(7)
+            except Exception:  # noqa: BLE001 — la collecte d'abord
+                logger.exception("Rattrapage des bilans journaliers impossible")
+
         now = datetime.now(timezone.utc)
-        target = now.replace(
-            hour=config.ROLLUP_HOUR, minute=0, second=0, microsecond=0
-        )
+        target = now.replace(hour=config.ROLLUP_HOUR, minute=0, second=0, microsecond=0)
         if target <= now:
             target += timedelta(days=1)
-
+        wait = (target - now).total_seconds()
+        if failed:
+            wait = min(wait, config.ROLLUP_RETRY_S)
         with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(
-                stop.wait(), timeout=(target - now).total_seconds()
-            )
-        if stop.is_set():
-            return
+            await asyncio.wait_for(stop.wait(), timeout=wait)
 
-        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date()
+
+async def write_pending(store: SnapshotStore, now: datetime | None = None) -> bool:
+    """Écrit les bilans en attente. Rend True si l'un d'eux a échoué."""
+    failed = False
+    for day in pending_days(now):
         try:
-            await write_rows(_drain(yesterday))
+            await write_rows(rows_for(day))
         except Exception:  # noqa: BLE001 — une base indisponible ne doit pas
             # arrêter la collecte, qui est la fonction vitale.
             logger.exception(
-                "Écriture des agrégats du %s impossible — journée perdue, "
-                "la collecte continue",
-                yesterday,
+                "Écriture du bilan du %s impossible — nouvel essai dans %d s",
+                day, config.ROLLUP_RETRY_S,
             )
+            failed = True
+            continue
+        discard(day)
+    try:
+        await store.save_rollup(export_accumulator())
+    except Exception:  # noqa: BLE001
+        logger.exception("Sauvegarde des compteurs du bilan impossible")
+    return failed

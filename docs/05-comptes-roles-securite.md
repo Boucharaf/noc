@@ -5,9 +5,9 @@
 | Rôle (code) | Libellé | Vocation |
 |---|---|---|
 | `directeur` | Directeur | Pilotage : indicateurs, SLA, rapports |
-| `chef_noc` | Chef NOC | Salle de supervision : répartition du travail, maintenances, **gestion des comptes** |
-| `technicien` | Technicien NOC | Traitement des alertes |
-| `agent_terrain` | Agent terrain | Interventions sur site, signalement de pannes |
+| `chef_noc` | Chef NOC | Salle de supervision : état du réseau, santé de la collecte, **gestion des comptes** |
+| `technicien` | Technicien NOC | Suivi des alertes et des incidents iTop |
+| `agent_terrain` | Agent terrain | Interventions sur site (ordres de travail iTop) |
 
 Un rôle est défini à **trois endroits qui doivent rester identiques** :
 `backend/app/core/config.py` (`VALID_ROLES`), `backend/app/schemas/users.py`
@@ -25,21 +25,20 @@ Droits réellement appliqués par le backend :
 | Action | Directeur | Chef NOC | Technicien | Agent terrain |
 |---|:---:|:---:|:---:|:---:|
 | Consulter l'état du réseau, les alertes, les équipements, les SLA | ✅ | ✅ | ✅ | ✅ |
-| Acquitter, affecter, résoudre une alerte | ✅ | ✅ | ✅ | — |
-| Ajouter une note à une alerte | ✅ | ✅ | ✅ | ✅ |
-| Signaler / clore un incident manuel | ✅ | ✅ | ✅ | ✅* |
 | Consulter les maintenances (planifiées dans iTop / Zabbix) | ✅ | ✅ | ✅ | ✅ |
 | Modifier les cibles SLA | ✅ | ✅ | — | — |
 | Consulter les interventions (ordres de travail iTop) | ✅ | ✅ | ✅ | ✅ |
 | Télécharger le rapport mensuel | ✅ | ✅ | — | — |
 | **Créer un compte, attribuer un rôle, désactiver, réinitialiser un mot de passe ou un PIN** | — | ✅ | — | — |
 | Couper les sessions d'un utilisateur | — | ✅ | — | — |
+| Consulter le journal d'audit | ✅ | ✅ | — | — |
 | Consulter et tester la configuration des courriels | — | ✅ | — | — |
 | **Modifier ses propres identifiants** (identifiant, nom, téléphone, courriel, mot de passe, abonnement aux alertes) | ✅ | ✅ | ✅ | ✅ |
 | Modifier **son propre rôle** | — | — | — | — |
 
-* Un agent terrain ne peut signaler un incident que sur son site affecté ; la
-  création est refusée si aucun site n'est affecté.
+Acquitter, affecter et résoudre une alerte ou un incident se fait dans
+l'outil source ou dans iTop : le NOC n'offre aucun de ces gestes, et aucune
+panne ne s'y signale à la main.
 
 Les permissions du frontend ne sont qu'un contrôle d'affichage. Les routes
 backend restent l'autorité ; les tests de régression couvrent notamment les

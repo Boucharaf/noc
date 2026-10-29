@@ -22,7 +22,7 @@ import logging
 from datetime import datetime, timezone
 
 from app.core.config import COLLECT_INTERVAL_S
-from app.services import live_service
+from app.services import live_service, node_service
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +133,16 @@ async def merge_report() -> dict:
         "ambiguous_total": merge.get("ambiguous_total", 0),
         "ambiguities": merge.get("ambiguities", []),
         "state_conflicts": merge.get("state_conflicts", []),
-        "single_source_nodes": merge.get("single_source", []),
+        # Anciens instantanés : de simples noms, sans identifiant ni outil.
+        "single_source_nodes": [
+            item if isinstance(item, dict) else {"id": None, "name": item, "tool": None}
+            for item in merge.get("single_source", [])
+        ],
+        "single_source_total": next(
+            (row["nodes"] for row in await node_service.coverage_by_tool()
+             if row["tool"] == "_single_source"),
+            0,
+        ),
         "orphan_alerts": meta.get("orphan_alerts", 0),
+        "orphan_samples": meta.get("orphan_samples", []),
     }
