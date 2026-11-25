@@ -50,7 +50,7 @@ elle est fermée par défaut.
 | Méthode | Route | Rôle requis | Rôle |
 |---|---|---|---|
 | POST | `/auth/login` | — | Connexion par identifiant et mot de passe |
-| POST | `/auth/pin-login` | — (agent terrain) | Connexion par PIN |
+| POST | `/auth/pin-login` | — (agent terrain) | Connexion par identifiant et PIN |
 | POST | `/auth/refresh` | cookie | Renouveler le jeton d'accès |
 | POST | `/auth/logout` | — | Déconnexion |
 | GET / PATCH | `/auth/me` | connecté | Lire / modifier ses identifiants (sans le rôle) |
@@ -73,7 +73,7 @@ elle est fermée par défaut.
 | GET | `/alerts/{clé}` | Détail d'une alerte : contexte de l'outil (tags, donnée opérationnelle, commentaires…), équipement concerné |
 | GET | `/alerts/by-severity`, `/alerts/by-tool`, `/alerts/ages`, `/alerts/hour-distribution` | Répartitions |
 | GET | `/nodes` | Équipements (filtres : `state`, `site`, `tool`, `search`, `sort`, `limit`, `offset`) |
-| GET | `/nodes/{id}` | Fiche d'un équipement : sources, état chez chaque outil, faits de fiche (`details` : inventaire, interfaces, disponibilité de l'agence), panne en cours, dernier démarrage, maintenances et interventions |
+| GET | `/nodes/{id}` | Fiche d'un équipement (l'ancien identifiant d'un équipement réuni mène à celui qui continue) : sources, état chez chaque outil, faits de fiche (`details` : inventaire, interfaces, disponibilité de l'agence), panne en cours, dernier démarrage, maintenances et interventions |
 | GET | `/nodes/{id}/metrics` | Courbe d'un équipement — **interroge l'outil source** |
 | GET | `/nodes/{id}/metrics-latest` | Dernières mesures d'un équipement |
 | GET | `/nodes/states`, `/nodes/coverage` | Comptes par état, couverture par outil |
@@ -108,9 +108,13 @@ paramètres (objectifs SLA), ses comptes et son journal d'audit.
 | GET | `/trend/live` | Historique court du périmètre (24 h, un point par cycle de collecte : disponibilité, équipements HS, alertes, incidents) — mini-courbes des tuiles |
 | GET | `/search/suggest` | Suggestions des barres de recherche (`q`, `kinds`, `limit`), lues dans l'instantané |
 | GET | `/report/monthly?month=&year=&format=pdf\|docx` | directeur, chef NOC — disponibilité et sites (`kpi_daily`), incidents, délais, causes et dépassements (tickets iTop du mois) |
-| GET | `/history/nodes/{id}?days=` | Disponibilité d'un équipement et de ses liens sur la période, pannes, MTTR, MTBF, frise des états, alertes ; `available: false` si le journal n'existe pas |
+| GET | `/history/nodes/{id}?days=` | Disponibilité d'un équipement et de ses liens sur la période, pannes, MTTR, MTBF, frise des états, alertes et acquittements, identité (`identity` : références d'outils, décisions) ; `available: false` si le journal n'existe pas |
 | GET | `/history/ranking?kind=node\|link&days=&limit=` | Équipements ou liens les moins disponibles sur la période, dans le périmètre (`region`, `province`, `site`) |
 | GET | `/history/status` | Profondeur du journal : depuis quand, combien d'équipements, de liens, d'alertes |
+| GET | `/history/tools?days=` | Disponibilité de chaque outil et ses interruptions ; le temps sans collecte n'est pas compté |
+| GET | `/report/archive` | directeur, chef NOC — rapports figés et leurs empreintes |
+| POST | `/report/archive` | directeur, chef NOC — fige un mois clos (`year`, `month`, `reason`) ; 409 si le mois n'est pas clos, sans données, ou déjà figé sans motif |
+| GET | `/report/archive/{id}/pdf\|json` | directeur, chef NOC — contenu figé ; 409 s'il ne correspond plus à son empreinte |
 | GET | `/audit?action=&user_id=&limit=&offset=` | directeur, chef NOC — journal d'audit, du plus récent au plus ancien |
 
 ### Notifications, santé, temps réel
@@ -134,7 +138,7 @@ automatiquement au premier démarrage d'un volume vide.
 
 `schema.sql` est le chemin de migration faisant autorité : l'image ne lance
 aucune migration. Les révisions Alembic de `backend/migrations/versions`
-(jusqu'à `0004`, suppression des tables qui n'étaient plus alimentées)
+(jusqu'à `0013`)
 existent pour qui préfère cet outil ; elles mènent au même schéma.
 **Rejouer `schema.sql` supprime les tables `ops_alert_state`,
 `ops_alert_timeline`, `ops_manual_incident`, `ops_maintenance_window` et
@@ -142,9 +146,9 @@ existent pour qui préfère cet outil ; elles mènent au même schéma.
 `kpi_daily` représente le site global par `COALESCE(site, '')`, car la clé de
 ce total contient volontairement `site=NULL`.
 
-La base ne contient que ce que le NOC produit lui-même. Équipements,
-alertes, incidents, maintenances et interventions vivent dans Redis
-(instantané) et chez les outils sources.
+La base contient ce que le NOC produit lui-même, plus le journal de ce qu'il a
+observé. L'état **courant** des équipements, alertes, incidents, maintenances
+et interventions vit dans Redis (instantané) et chez les outils sources.
 
 | Table | Contenu |
 |---|---|
@@ -154,10 +158,18 @@ alertes, incidents, maintenances et interventions vivent dans Redis
 | `ops_notification_log` | Journal des envois (courriel, SMS) |
 | `ops_alert_notified` | Verrou anti-doublon des notifications |
 | `ops_notification_retry` | Envois échoués en attente d'une nouvelle tentative (courriel, SMS), puis envoyés ou abandonnés |
-| `ops_audit_log` | Journal d'audit : connexions (réussies et refusées), comptes créés, modifiés, désactivés, mots de passe et PIN fixés, sessions coupées, objectifs SLA modifiés — auteur, cible, détail (jamais de secret), adresse IP |
+| `ops_audit_log` | Journal d'audit : connexions (réussies et refusées), comptes créés, modifiés, désactivés, mots de passe et PIN fixés, sessions coupées, objectifs SLA modifiés, rapports figés, purges — auteur, cible, détail (jamais de secret), adresse IP |
 | `kpi_daily` | Bilan journalier par site (écrit par le collecteur, rattrapé depuis le journal) |
 | `hist_state` | Journal : périodes d'état de chaque équipement et de chaque lien surveillé (écrit par le collecteur) |
-| `hist_alert` | Journal : chaque alerte et chaque ticket iTop, de l'ouverture à la fermeture (écrit par le collecteur) |
+| `hist_alert` | Journal : chaque alerte et chaque ticket iTop, de l'ouverture à la fermeture, avec son premier acquittement (date, auteur, fiabilité de la date) |
+| `hist_alert_event` | Chaque changement d'une alerte : ouverture, acquittement, gravité, fermeture. Ajout seulement |
+| `hist_downtime` | Pannes enregistrées par les outils (NetXMS, Centreon, Zabbix, Nagios), copiées si `*_DOWNTIME_ENABLED` |
+| `hist_source_object`, `hist_source_sync` | Équipements suivis par ces sources ; dernière synchronisation |
+| `hist_tool_health` | Périodes `up`, `partial`, `down` de chaque outil |
+| `noc_asset` | Un équipement et son identifiant stable ; `merged_into` s'il a été réuni à un autre |
+| `noc_asset_source` | À quel équipement appartient chaque référence d'outil |
+| `noc_asset_event` | Décisions d'identité. Ajout seulement |
+| `report_snapshot` | Rapports mensuels figés : données, PDF, empreintes, révision, motif. La base refuse toute modification |
 
 ## Développer sur le backend
 

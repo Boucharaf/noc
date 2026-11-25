@@ -39,6 +39,7 @@
  * `hooks/queries.js`.
  */
 import apiClient from "./client";
+import { applyThresholds } from "../lib/vocabulary";
 
 const get = (url, params) => apiClient.get(url, { params }).then((r) => r.data);
 const post = (url, body) => apiClient.post(url, body).then((r) => r.data);
@@ -59,7 +60,15 @@ const key = (value) => encodeURIComponent(String(value));
 /* ------------------------------------------------------------------ */
 export const auth = {
   login: (username, password) => post("/auth/login", { username, password }),
-  pinLogin: (pin) => post("/auth/pin-login", { pin }),
+  pinLogin: (username, pin) => post("/auth/pin-login", { username, pin }),
+  /** Attente restante avant une nouvelle tentative. */
+  lockStatus: (username, mode) => post("/auth/lock-status", { username, mode }),
+  /** Contact du support — public, pour l'écran de connexion. */
+  support: () => get("/auth/support"),
+  /** Réinitialisation par courriel : demande (réponse identique dans tous les cas). */
+  requestPasswordReset: (identifier) => post("/auth/password-reset/request", { identifier }),
+  confirmPasswordReset: (token, newPassword) =>
+    post("/auth/password-reset/confirm", { token, new_password: newPassword }),
   logout: () => post("/auth/logout"),
   me: () => get("/auth/me"),
   /**
@@ -93,12 +102,18 @@ export const users = {
 /* ------------------------------------------------------------------ */
 /* Vue d'ensemble — tout vient de l'instantané Redis                    */
 /* ------------------------------------------------------------------ */
+/** Seuils de disponibilité configurés côté serveur. */
+function withThresholds(data) {
+  applyThresholds(data?.thresholds);
+  return data;
+}
+
 export const overview = {
   /**
    * Tuiles de tête : parc, alertes, incidents iTop, fraîcheur de la
    * collecte — sur le périmètre (`region`, `province`, `site`, `search`).
    */
-  summary: (params) => get("/overview", params),
+  summary: (params) => get("/overview", params).then(withThresholds),
   /** Synthèse par site, du plus dégradé au plus sain. */
   sites: (params) => get("/sites", params),
   /** Disponibilité par organisation (ministère, structure) du périmètre. */
@@ -326,12 +341,26 @@ export const notifications = {
   sendTestEmail: (to) => post("/notifications/email/test", to?.length ? { to } : {}),
 };
 
+// Générer un rapport prend 20 à 30 s : le délai général (20 s) l'abandonnait.
+const REPORT_TIMEOUT_MS = 180_000;
+
 export const report = {
   monthly: ({ month, year, format = "pdf" } = {}) =>
     apiClient.get("/report/monthly", {
       params: { month, year, format },
       responseType: "blob",
+      timeout: REPORT_TIMEOUT_MS,
     }).then((response) => response.data),
+  /** Rapport des sept derniers jours (AM-27), PDF. */
+  weekly: () =>
+    apiClient.get("/report/weekly", { responseType: "blob", timeout: REPORT_TIMEOUT_MS }).then((response) => response.data),
+  /** Rapports mensuels figés. */
+  archive: () => get("/report/archive"),
+  freeze: (body) =>
+    apiClient.post("/report/archive", body, { timeout: REPORT_TIMEOUT_MS }).then((r) => r.data),
+  archived: (id, part) =>
+    apiClient.get(`/report/archive/${id}/${part}`, { responseType: "blob" })
+      .then((response) => response.data),
 };
 
 export const health = () => get("/health");
@@ -341,10 +370,16 @@ export const health = () => get("/health");
 /* ------------------------------------------------------------------ */
 export const history = {
   status: () => get("/history/status"),
+  /** Disponibilité des outils de supervision sur `days` jours. */
+  tools: (days = 30) => get("/history/tools", { days }),
+  /** Équipements instables (≥ 5 changements d'état en 1 h). */
+  flapping: (params) => get("/history/flapping", params),
   /** Disponibilité, pannes, liens et alertes d'un équipement sur `days` jours. */
   node: (nodeId, days = 30) => get(`/history/nodes/${encodeURIComponent(nodeId)}`, { days }),
+  /** Tableau de bord d'un mois : year, month, region, province, site. */
+  month: (params) => get("/history/month", params).then(withThresholds),
   /** Équipements (kind=node) ou liens (kind=link) les moins disponibles. */
-  ranking: (params) => get("/history/ranking", params),
+  ranking: (params) => get("/history/ranking", params).then(withThresholds),
 };
 
 export default {

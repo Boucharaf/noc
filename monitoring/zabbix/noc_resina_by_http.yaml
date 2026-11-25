@@ -24,8 +24,11 @@ zabbix_export:
           value_type: TEXT
           timeout: 10s
           url: '{$NOC.URL}/api/health'
+          headers:
+            - name: Authorization
+              value: 'Bearer {$NOC.PROBE.KEY}'
           status_codes: '200,503'
-          description: 'Sonde de santé publique du NOC. 503 = au moins une dépendance en erreur.'
+          description: 'Sonde de santé du NOC. 503 = au moins une dépendance en erreur. Le détail des contrôles n''est rendu qu''avec la clé {$NOC.PROBE.KEY} (INTERNAL_API_KEY du NOC) ; sans elle, seul le verdict global.'
           tags:
             - tag: component
               value: noc
@@ -281,6 +284,10 @@ zabbix_export:
         - macro: '{$NOC.URL}'
           value: 'https://noc.anptic.bf'
           description: 'Adresse publique du NOC, sans / final.'
+        - macro: '{$NOC.PROBE.KEY}'
+          type: SECRET_TEXT
+          value: ''
+          description: 'Valeur de INTERNAL_API_KEY dans le .env du NOC : donne accès au détail des contrôles de /api/health.'
         - macro: '{$NOC.NODATA}'
           value: 10m
           description: 'Délai sans réponse avant l''alerte « /api/health ne répond plus ».'

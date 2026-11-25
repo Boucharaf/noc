@@ -275,7 +275,8 @@ situés.
 
 - La disponibilité instantanée et les agrégats journaliers excluent les
   équipements en maintenance planifiée du dénominateur. Un état inconnu,
-  muet, dégradé ou en panne n'est jamais assimilé à « disponible ».
+  muet ou en panne n'est jamais assimilé à « disponible » ; dégradé, il répond
+  et compte dans la disponibilité, pas dans le « parc en service ».
 - Une courbe réseau interroge un échantillon stable, sélectionné par hachage
   de l'identifiant, de la métrique et de la période, plafonné à 50 équipements
   par requête. La réponse et l'écran indiquent la taille du parc, la taille de
@@ -301,6 +302,25 @@ et que cette identité n'apparaît qu'une fois par outil. Il ne retire pas les
 suffixes DNS et ne fusionne ni sur l'IP seule ni sur le nom seul. Les collisions
 et équipements aux informations incomplètes restent séparés et sont exposés
 dans le rapport d'interopérabilité.
+
+**L'identifiant ne change plus.** La fusion décide, à chaque cycle, quelles
+références désignent le même équipement ; le registre (`collector/identity.py`)
+lui donne ensuite un identifiant permanent :
+
+| Ce qui arrive | Identifiant |
+|---|---|
+| Renommage **ou** changement d'adresse | conservé |
+| Outil ajouté, retiré ou remplacé ; hôte recréé avec les mêmes nom et adresse | conservé, s'il n'y a qu'un candidat et que les outils ont répondu |
+| Nom **et** adresse changés ensemble | nouvel équipement (référence peut-être réattribuée) ; réparable par `attach` |
+| Deux équipements réunis par la fusion | le plus ancien continue ; le passé de l'autre reste sous son identifiant |
+| Équipement séparé en deux | une part garde l'identifiant, l'autre retrouve ou reçoit le sien |
+
+L'identifiant a la forme `outil:référence` de sa création, mais il est
+**opaque** : pour savoir quels outils voient l'équipement, lire `sources`.
+
+**Acquittements.** Date et auteur viennent de Zabbix et de Centreon (API) ;
+NetXMS et NSP donnent la date ; Nagios ne donne que l'état (date du cycle, à
+5 min près). Pour un ticket iTop, l'agent et la date d'affectation.
 
 Les états techniques ne suivent pas de priorité d'outil arbitraire : iTop
 n'est pas une source de mesure. Si plusieurs sources supervisant un même
@@ -368,7 +388,7 @@ aucune alerte. Il est exclu de git.
 
 | Garantie | Comment elle est tenue |
 |---|---|
-| **Charge constante et connue** | Une série de requêtes par outil toutes les `COLLECT_INTERVAL_S` secondes (300 par défaut), quel que soit le nombre d'utilisateurs connectés. Les courbes à la demande sont mises en cache. |
+| **Charge constante et connue** | Une série de requêtes par outil toutes les `COLLECT_INTERVAL_S` secondes (60 par défaut), quel que soit le nombre d'utilisateurs connectés. Les courbes à la demande sont mises en cache. |
 | **Lecture seule** | Aucun connecteur n'écrit chez un outil : comptes en lecture sur les API (NetXMS, Centreon, Nagios, NSP), jeton d'API révocable pour Zabbix, compte de service dédié pour iTop. |
 | **Droits minimaux** | Les comptes ne demandent que la lecture des objets supervisés et des alertes ; aucun champ de contact Zabbix n'est lu. |
 | **Pas de copie brute des données** | L'inventaire et les alertes courantes résident dans l'instantané Redis, qui expire après trois cycles si la collecte s'arrête. PostgreSQL conserve les comptes, les objectifs SLA, le journal d'audit et des agrégats journaliers, pas une copie des données des outils. |

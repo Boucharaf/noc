@@ -4,7 +4,7 @@ import DataTable from "../ui/Table";
 import { NodeStateBadge, StateDot } from "../ui/Badge";
 import { Meter } from "../ui/Stat";
 import { ageFrom, decimal, num, pct } from "../../lib/format";
-import { thresholdColor, toolLabel } from "../../lib/vocabulary";
+import { nodeTypeInfo, nodeTypeLabel, thresholdColor, toolLabel } from "../../lib/vocabulary";
 
 /**
  * Inventaire des équipements.
@@ -16,8 +16,9 @@ import { thresholdColor, toolLabel } from "../../lib/vocabulary";
  * alphabétique ne remonterait jamais l'équipement en panne de la page 7.
  *
  * Les colonnes de métriques affichent la DERNIÈRE valeur connue (fenêtre
- * de 6 h). Une case vide y signifie « rien reçu », ce que la colonne
- * « Vu » qualifie explicitement — et ce que l'état « Muet » résume.
+ * de 6 h). Une case vide y signifie « métrique non collectée pour cet
+ * équipement » ; la colonne « Vu » dit quand un outil l'a observé pour la
+ * dernière fois, et l'état « Inconnu » qu'aucune observation n'est récente.
  */
 function MetricCell({ value, metricType, formatter, showBar = false }) {
   if (value === null || value === undefined) {
@@ -88,7 +89,9 @@ export default function NodeTable({ nodes, sort, onSort, selectedId, onSelect, v
       header: "Type",
       width: 92,
       render: (row) => (
-        <span style={{ color: "var(--ink-3)" }}>{row.node_type || "—"}</span>
+        <span style={{ color: "var(--ink-3)" }} title={nodeTypeInfo(row.node_type).model ?? undefined}>
+          {nodeTypeLabel(row.node_type) || "—"}
+        </span>
       ),
     });
     columns.push({
@@ -222,16 +225,23 @@ export default function NodeTable({ nodes, sort, onSort, selectedId, onSelect, v
       width: 72,
       align: "right",
       mono: true,
+      // Dernière OBSERVATION par un outil de supervision (backend :
+      // live_service.last_seen_at). « jamais » = aucun outil de supervision
+      // ne voit l'équipement (CMDB seule) : il est non supervisé.
       render: (row) => (
         <span
-          style={{ color: row.last_metric_at ? "var(--ink-3)" : "var(--sev-medium)" }}
+          style={{
+            color: row.last_seen_at && row.seen_recently ? "var(--ink-3)" : "var(--sev-medium)",
+          }}
           title={
-            row.last_metric_at
-              ? "Dernière métrique reçue"
-              : "Aucune métrique reçue depuis plus de 6 h"
+            row.last_seen_at
+              ? row.seen_recently
+                ? "Dernière observation par un outil de supervision"
+                : "Dernière observation ancienne : l'outil ne répond plus, état non démontré"
+              : "Aucun outil de supervision ne voit cet équipement : non supervisé"
           }
         >
-          {row.last_metric_at ? ageFrom(row.last_metric_at) : "jamais"}
+          {row.last_seen_at ? ageFrom(row.last_seen_at) : "jamais"}
         </span>
       ),
     },

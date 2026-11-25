@@ -81,3 +81,81 @@ def test_unavailable_redis_lets_requests_through(monkeypatch):
     # Mode ouvert assumé : la disponibilité du tableau de bord prime.
     assert client.get("/api/items", headers=headers).status_code == 200
     assert client.get("/api/items", headers=headers).status_code == 200
+
+
+class FakeSyncRedis:
+    """Juste ce qu'utilise le verrouillage après échecs (session_store)."""
+
+    def __init__(self):
+        self.values, self.ttls = {}, {}
+
+    def incr(self, key):
+        self.values[key] = int(self.values.get(key, 0)) + 1
+        return self.values[key]
+
+    def expire(self, key, seconds):
+        self.ttls[key] = seconds
+
+    def set(self, key, value, ex=None):
+        self.values[key] = value
+        self.ttls[key] = ex
+
+    def delete(self, key):
+        self.values.pop(key, None)
+        self.ttls.pop(key, None)
+
+    def ttl(self, key):
+        return self.ttls.get(key, -2) if key in self.values else -2
+
+
+def test_pin_is_locked_for_everyone_after_distributed_failures(monkeypatch):
+    """INC-43 : une énumération du PIN répartie sur plusieurs IP est arrêtée."""
+    from app.core import session_store
+
+    monkeypatch.setattr(session_store, "redis_client", FakeSyncRedis())
+    monkeypatch.setattr(session_store, "PIN_GLOBAL_MAX_FAILURES", 6)
+
+    # 3 échecs depuis chacune de deux IP : aucune n'atteint 5, mais 6 au total.
+    for ip in ("10.0.0.1", "10.0.0.2"):
+        for _ in range(3):
+            assert session_store.is_pin_locked(ip, ip) is None
+            session_store.register_pin_failure(ip, ip)
+
+    assert session_store.is_pin_locked("10.0.0.3", "x") == session_store.PIN_LOCK_WINDOW_SECONDS
+
+
+def test_pin_lock_per_ip_still_applies(monkeypatch):
+    from app.core import session_store
+
+    monkeypatch.setattr(session_store, "redis_client", FakeSyncRedis())
+    for _ in range(session_store.PIN_MAX_ATTEMPTS):
+        session_store.register_pin_failure("10.0.0.9", "agent")
+
+    assert session_store.is_pin_locked("10.0.0.9", "x") is not None
+    assert session_store.is_pin_locked("10.0.0.10", "x") is None
+    # Le compte visé, lui, est bloqué depuis toute adresse.
+    assert session_store.is_pin_locked("10.0.0.10", "Agent") is not None
+
+
+def test_password_locks_after_five_failures(monkeypatch):
+    """A03."""
+    import pytest
+    from fastapi import HTTPException
+
+    from app.core import session_store
+    from app.core.config import LOGIN_MAX_FAILURES_PER_USER
+    from app.routes import auth
+
+    monkeypatch.setattr(session_store, "redis_client", FakeSyncRedis())
+    monkeypatch.setattr(auth, "LOGIN_MAX_FAILURES_PER_USER", 5)
+    scopes = auth._login_scopes("10.0.0.1", "Chef")
+    for _ in range(5):
+        auth._ensure_not_locked(scopes)
+        auth._record_failure(scopes)
+    with pytest.raises(HTTPException) as refused:
+        auth._ensure_not_locked(scopes)
+    assert refused.value.status_code == 429
+    assert refused.value.detail["retry_after_seconds"] == 900
+    # Un collègue derrière la même adresse n'est pas bloqué.
+    auth._ensure_not_locked(auth._login_scopes("10.0.0.1", "autre"))
+    assert LOGIN_MAX_FAILURES_PER_USER <= 10

@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { CircleMarker, GeoJSON, MapContainer, TileLayer, Tooltip, useMap } from "react-leaflet";
 import { geoJSON, latLngBounds } from "leaflet";
 
-import { num, pct } from "../../lib/format";
-import { availabilityColor, nodeStateMeta } from "../../lib/vocabulary";
+import { num, availabilityPct } from "../../lib/format";
+import { fleetColor, fleetLegend, nodeStateMeta } from "../../lib/vocabulary";
 import { localityKey } from "../../lib/locality";
 
 /**
@@ -75,18 +75,31 @@ function TrackSize() {
   return null;
 }
 
-// Indicateur coloré sur la carte. La disponibilité a son échelle à seuils
-// (99 / 97 / 90 %) ; les volumes sont colorés RELATIVEMENT au plus touché du
+// Indicateur coloré sur la carte. Le parc en service a ses seuils
+// (KPI-02) ; les volumes sont colorés RELATIVEMENT au plus touché du
 // niveau affiché, du jaune pâle au rouge, et dessinés en cercles
 // proportionnels : on voit où et combien.
 const MAP_METRICS = [
-  { value: "availability", label: "Disponibilité" },
+  { value: "availability", label: "Parc en service" },
   { value: "incidents", label: "Incidents iTop", field: "incidents", noun: "incident(s) iTop" },
   { value: "alerts", label: "Alertes", field: "alerts", noun: "alerte(s) active(s)" },
   { value: "down", label: "En panne", field: "down", noun: "équipement(s) en panne" },
 ];
 
 const VOLUME_SCALE = ["#f6e3a1", "#f2b45c", "#e8833a", "#d9522b", "#b3261e"];
+
+/**
+ * Couleur d'une zone en mode « Disponibilité » (INC-18) : le PIRE de la
+ * disponibilité et de l'état des équipements. Une zone avec au moins un
+ * équipement en panne ou une alerte critique est rouge, quelle que soit la
+ * moyenne ; une zone sans équipement supervisé est grise (non supervisé).
+ */
+function siteColor(row) {
+  if ((row.down ?? 0) > 0 || (row.alerts_critical ?? row.critical ?? 0) > 0) {
+    return "var(--sev-critical)";
+  }
+  return fleetColor(row.availability_pct);
+}
 
 function volumeColor(value, max) {
   if (!value) return "#3f9f6b";
@@ -109,7 +122,7 @@ export default function TerritoryMap({
   const metricMax = Math.max(1, ...(rows ?? []).map((row) => row[metricMeta.field] ?? 0));
   const fillFor = (row) =>
     metric === "availability"
-      ? availabilityColor(row.availability_pct)
+      ? siteColor(row)
       : volumeColor(row[metricMeta.field] ?? 0, metricMax);
 
   const byRegion = useMemo(() => {
@@ -195,7 +208,7 @@ export default function TerritoryMap({
                   `<strong>${row?.name ?? feature.properties.nom}</strong><br/>` +
                     (row
                       ? (metricMeta.field ? `<strong>${num(row[metricMeta.field])}</strong> ${metricMeta.noun}<br/>` : "") +
-                        `Disponibilité ${pct(row.availability_pct, 1)} · ${num(row.nodes)} équipements<br/>` +
+                        `Parc en service ${availabilityPct(row.availability_pct, 1)} · ${num(row.nodes)} équipements<br/>` +
                         `${num(row.down)} en panne · ${num(row.incidents)} incident(s) iTop`
                       : "Aucun équipement suivi"),
                   { sticky: true },
@@ -255,7 +268,7 @@ export default function TerritoryMap({
                       </>
                     ) : (
                       <>
-                        Disponibilité {pct(row.availability_pct, 1)} · {num(row.nodes)} équip.
+                        Parc en service {availabilityPct(row.availability_pct, 1)} · {num(row.nodes)} équip.
                         <br />
                         {num(row.alerts)} alerte(s) · {num(row.incidents)} incident(s)
                       </>
@@ -268,13 +281,13 @@ export default function TerritoryMap({
         </MapContainer>
       </div>
       <div
-        className="shrink-0 flex items-center gap-3 flex-wrap px-2 py-1 border-t text-[10.5px]"
+        className="shrink-0 flex items-center gap-3 flex-wrap px-2 py-1 border-t text-[12px]"
         style={{ borderColor: "var(--border)", color: "var(--ink-3)" }}
       >
         {controls && level !== "node" && (
           <select
             className="select"
-            style={{ height: 22, fontSize: 11, width: 130 }}
+            style={{ height: 22, fontSize: 12, width: 130 }}
             value={metric}
             onChange={(event) => setMetric(event.target.value)}
             aria-label="Indicateur affiché sur la carte"
@@ -285,12 +298,17 @@ export default function TerritoryMap({
           </select>
         )}
         {metric === "availability" || level === "node"
-          ? [99.9, 98, 94, 50].map((value, index) => (
-              <span key={value} className="flex items-center gap-1">
-                <span className="dot" style={{ background: availabilityColor(value) }} />
-                {["≥ 99 %", "97–99 %", "90–97 %", "< 90 %"][index]}
+          ? fleetLegend().map(([color, label]) => (
+              <span key={label} className="flex items-center gap-1">
+                <span className="dot" style={{ background: color }} />
+                {label}
               </span>
-            ))
+            )).concat(
+              <span key="unsupervised" className="flex items-center gap-1">
+                <span className="dot" style={{ background: fleetColor(null) }} />
+                non supervisé
+              </span>,
+            )
           : (
               <span className="flex items-center gap-1">
                 <span className="dot" style={{ background: "#3f9f6b" }} /> aucun

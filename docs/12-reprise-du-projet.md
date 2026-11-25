@@ -15,7 +15,7 @@ Rien de ceci n'est dans git, volontairement.
 | Le fichier `.env` de chaque environnement (production, test) | Secrets : `SECRET_KEY`, mots de passe PostgreSQL et Redis, comptes des outils | Racine du dépôt, **jamais commité**, jamais copié d'un environnement à l'autre |
 | Les comptes de service en lecture seule chez l'agence : Zabbix (jeton d'API), iTop, NetXMS, Centreon, Nagios, NSP | Seule source des données en production | `.env` (`<OUTIL>_API_URL`, `_USER`, `_PASSWORD`, `_TOKEN`) |
 | Le certificat HTTPS de l'agence (ou la décision de garder l'auto-signé) | Accès sécurisé | `nginx/certs/` |
-| Une sauvegarde récente de la base du NOC | Comptes, objectifs SLA, journal d'audit, bilans journaliers : rien d'autre ne les redonne | Restauration : [chapitre 9](09-exploitation.md#sauvegarder-et-restaurer) |
+| Une sauvegarde récente de la base du NOC | Comptes, objectifs SLA, journal d'audit, bilans journaliers, historique, acquittements, identités, rapports figés : rien d'autre ne les redonne | Restauration : [chapitre 9](09-exploitation.md#sauvegarder-et-restaurer) |
 | Facultatif, pour travailler en local : le dump NetXMS et l'export du journal Centreon | Visualiser des données réelles sans accès à la production | `database/` (exclus de git) |
 | Le document de l'agence *« informations essentielles par profil »* | Le besoin métier d'origine (quatre niveaux de lecture) | Racine du dépôt |
 | Les contacts côté agence : administrateurs des outils, équipe sécurité | Droits d'accès, validation des connecteurs | — |
@@ -91,6 +91,7 @@ Dans l'ordre, du plus large au plus fin :
 Dans le code, l'en-tête de chaque fichier explique **pourquoi** il est écrit
 ainsi, souvent avec la panne que le choix évite. Les points d'entrée :
 `collector/cycle.py` (le cycle), `collector/merge.py` (la fusion),
+`collector/identity.py` (l'identité des équipements),
 `integrations/base.py` (le contrat des connecteurs),
 `backend/app/services/live_service.py` (la lecture de l'instantané),
 `frontend/src/hooks/queries.js` (toutes les requêtes de l'interface).
@@ -100,7 +101,8 @@ ainsi, souvent avec la panne que le choix évite. Les points d'entrée :
 Elles sont détaillées au [chapitre 2](02-architecture.md#principes-à-respecter-en-faisant-évoluer-le-projet).
 En une ligne chacune :
 
-1. **Ne pas recopier** les données des outils dans la base du NOC.
+1. **Ne pas recopier** l'état courant ni les mesures des outils ; ne garder que
+   des changements et des preuves.
 2. **En production, uniquement les API.** Les dumps et exports ne servent
    qu'en local.
 3. **Lecture seule** envers les outils ; le NOC n'acquitte, n'affecte ni ne
@@ -119,6 +121,10 @@ En une ligne chacune :
 | `docker compose down -v` | Supprime les volumes : comptes, objectifs SLA, audit, bilans perdus | Ne jamais utiliser `-v` ; sauvegarder chaque jour |
 | Une variable écrite deux fois dans `.env` | Compose garde la dernière sans prévenir | Chercher les doublons avant de diagnostiquer |
 | Rejouer `backend/sql/schema.sql` | **Supprime** les anciennes tables `ops_alert_state`, `ops_alert_timeline`, `ops_manual_incident`, `ops_maintenance_window`, `ops_field_intervention` et leur contenu | Sauvegarder avant ; c'est voulu, ces tables ne sont plus alimentées |
+| Relancer le collecteur ou le backend **avant** de rejouer `schema.sql` | L'historique ne s'écrit plus, ses écrans sont indisponibles | Schéma d'abord, conteneurs ensuite |
+| Figer un rapport avec des données de dump | Il ne s'efface pas | `REPORT_FREEZE_ENABLED=false`, et ne pas utiliser le bouton |
+| Éteindre le poste qui porte le collecteur | Trous définitifs dans les bilans | Un serveur permanent |
+| Redémarrer Docker | iTop et Centreon de laboratoire restent éteints | `docker compose --profile <outil> up -d` |
 | Changer `POSTGRES_PASSWORD` après la création du volume | La base devient inaccessible | Changer le mot de passe dans PostgreSQL, pas seulement dans `.env` |
 | Démarrer un serveur NetXMS sur le dump | Il enverrait les notifications de production à de vraies personnes | Ne jamais le faire ; le dump se lit par sa base |
 | Un connecteur jamais confronté à l'outil réel (NetXMS par API, NSP) | Réponses de forme inattendue, équipements sans localité | `python -m collector.probe <outil>` avant la mise en service |
@@ -148,8 +154,10 @@ En une ligne chacune :
 - [ ] NOC supervisé par Zabbix (`monitoring/zabbix/`, chapitre 9),
       déclencheurs dirigés vers les médias de Zabbix, et notifications
       propres aux outils conservées pour les alertes critiques.
-- [ ] Sauvegarde quotidienne de la base du NOC planifiée et une
-      restauration essayée.
+- [ ] `BACKUP_DIR` hors de tout dossier synchronisé, `BACKUP_OFFSITE_DIR` sur
+      une autre machine, conteneur `backup` sain, une restauration essayée.
+- [ ] Durées de conservation validées par l'agence avant `RETENTION_ENABLED`.
+- [ ] `REPORT_FREEZE_ENABLED=true` une fois les vraies sources branchées.
 - [ ] Premier compte Chef NOC créé ; comptes nominatifs pour chaque
       utilisateur ; journal d'audit consulté.
 

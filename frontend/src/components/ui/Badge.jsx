@@ -1,4 +1,15 @@
 import {
+  AlertTriangle,
+  CheckCircle2,
+  CircleHelp,
+  Info,
+  OctagonAlert,
+  PowerOff,
+  Wrench,
+  XCircle,
+} from "lucide-react";
+
+import {
   fieldStatusMeta,
   nodeStateMeta,
   severityMeta,
@@ -15,7 +26,7 @@ import {
  * plein attire autant l'œil qu'une alerte critique, ce qui ruine la
  * hiérarchie visuelle dès qu'il y en a douze dans un tableau.
  */
-export function Badge({ color = "var(--ink-3)", children, title, className = "" }) {
+export function Badge({ color = "var(--ink-3)", children, title, className = "", icon: Icon }) {
   return (
     <span
       className={`badge ${className}`}
@@ -24,12 +35,35 @@ export function Badge({ color = "var(--ink-3)", children, title, className = "" 
         color,
         background: `color-mix(in srgb, ${color} 14%, transparent)`,
         borderColor: `color-mix(in srgb, ${color} 32%, transparent)`,
+        gap: Icon ? 3 : undefined,
       }}
     >
+      {Icon && <Icon size={11} strokeWidth={2.2} aria-hidden="true" className="shrink-0" />}
       {children}
     </span>
   );
 }
+
+// AM-05 : chaque statut a une ICÔNE en plus de sa couleur et de son libellé,
+// pour rester lisible par un daltonien et sur un écran mal calibré.
+const STATE_ICON = {
+  up: CheckCircle2,
+  degraded: AlertTriangle,
+  down: XCircle,
+  unknown: CircleHelp,
+  silent: CircleHelp,
+  maintenance: Wrench,
+  inactive: PowerOff,
+};
+
+const SEVERITY_ICON = {
+  critical: OctagonAlert,
+  high: AlertTriangle,
+  medium: AlertTriangle,
+  low: Info,
+  info: Info,
+  unknown: CircleHelp,
+};
 
 /**
  * Gravité. Pour une alerte d'outil, `source` porte la gravité D'ORIGINE en
@@ -43,6 +77,7 @@ export function SeverityBadge({ severity, short = false, source, tool }) {
     return (
       <Badge
         color={meta.color}
+        icon={SEVERITY_ICON[severity] ?? CircleHelp}
         title={`Gravité ${tool ? `${toolLabel(tool)} ` : "d'origine "}: ${source} — niveau commun : ${meta.label}`}
       >
         {source}
@@ -50,7 +85,7 @@ export function SeverityBadge({ severity, short = false, source, tool }) {
     );
   }
   return (
-    <Badge color={meta.color} title={`Gravité : ${meta.label}`}>
+    <Badge color={meta.color} icon={SEVERITY_ICON[severity] ?? CircleHelp} title={`Gravité : ${meta.label}`}>
       {short ? meta.short : meta.label}
     </Badge>
   );
@@ -64,7 +99,7 @@ export function StatusBadge({ status }) {
 export function NodeStateBadge({ state }) {
   const meta = nodeStateMeta(state);
   return (
-    <Badge color={meta.color} title={meta.hint}>
+    <Badge color={meta.color} icon={STATE_ICON[state] ?? CircleHelp} title={meta.hint}>
       {meta.label}
     </Badge>
   );

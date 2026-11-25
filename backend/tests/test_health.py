@@ -1,6 +1,7 @@
 """Sonde /api/health : ce que la supervision du NOC (Zabbix) peut y lire."""
 import asyncio
 
+from fastapi.security import HTTPAuthorizationCredentials
 from starlette.responses import Response
 
 from app.routes import health as health_route
@@ -16,7 +17,12 @@ class _Db:
         return _Result()
 
 
-def _probe(monkeypatch, *, meta, notifications=True, retry=None):
+PROBE_KEY = "cle-de-sonde-" + "x" * 32
+
+
+def _probe(monkeypatch, *, meta, notifications=True, retry=None, key=PROBE_KEY):
+    """Sonde authentifiée par la clé de service (INTERNAL_API_KEY)."""
+    monkeypatch.setattr("app.core.config.INTERNAL_API_KEY", PROBE_KEY)
     monkeypatch.setattr(health_route.redis_sync, "ping", lambda: True)
 
     async def age():
@@ -35,7 +41,10 @@ def _probe(monkeypatch, *, meta, notifications=True, retry=None):
         lambda: retry or {"pending": 0, "abandoned_24h": 0},
     )
     response = Response()
-    body = asyncio.run(health_route.health(response, _Db()))
+    credentials = (
+        HTTPAuthorizationCredentials(scheme="Bearer", credentials=key) if key else None
+    )
+    body = asyncio.run(health_route.health(response, _Db(), credentials))
     return response.status_code, body
 
 
@@ -63,3 +72,16 @@ def test_healthy_noc_and_disabled_notifications(monkeypatch):
     assert body["checks"]["notifications"] == {"status": "disabled"}
     # Route publique : jamais de message d'erreur d'outil dans la réponse.
     assert "error" not in str(body["checks"]["sources"])
+
+
+def test_anonymous_visitor_only_gets_the_verdict(monkeypatch):
+    """Sans jeton : le verdict et le code HTTP (ce que lisent les sondes),
+    jamais l'état interne (outils en panne, schéma, notifications)."""
+    status, body = _probe(
+        monkeypatch, meta={"tools_ok": ["zabbix"], "tools_failed": ["netxms"]}, key=None
+    )
+    assert (status, body) == (200, {"status": "degraded"})
+    _status, wrong = _probe(
+        monkeypatch, meta={"tools_ok": ["zabbix"], "tools_failed": []}, key="mauvaise-cle"
+    )
+    assert "checks" not in wrong

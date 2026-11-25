@@ -1,5 +1,8 @@
 import { Link } from "react-router-dom";
 
+import ScopePill from "./ScopePill";
+import SourceWarning from "./SourceWarning";
+
 /**
  * Panneau — brique de base de toutes les pages.
  *
@@ -13,6 +16,11 @@ import { Link } from "react-router-dom";
 export default function Panel({
   title,
   subtitle,
+  // Pastille périmètre · période : { period: "window" | "live" | "24 h",
+  // territorial?: bool } — voir ScopePill.
+  scope,
+  // Dépendance envers un outil source (INC-24) : clé de lib/sources.js.
+  sources,
   actions,
   to,
   toLabel = "Détail",
@@ -36,13 +44,15 @@ export default function Panel({
         <h2 className="panel-title">{title}</h2>
         {subtitle && (
           <span
-            className="min-w-0 text-[11px] leading-tight"
+            className="min-w-0 text-[12px] leading-tight"
             style={{ color: "var(--ink-3)", overflowWrap: "anywhere" }}
           >
             {subtitle}
           </span>
         )}
         <div className="ml-auto flex max-w-full flex-wrap items-center gap-1.5">
+          {sources && <SourceWarning sources={sources} inline />}
+          {scope && <ScopePill {...scope} />}
           {actions}
           {to && (
             <Link to={to} className="btn btn-ghost btn-sm">

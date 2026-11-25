@@ -53,9 +53,9 @@ conteneur `frontend`, lui-même derrière la passerelle `nginx`.
 | `/equipements`, `/equipements/:id` | `NodesPage.jsx`, `NodeDetailPage.jsx` | tous |
 | `/performance` | `PerformancePage.jsx` — courbes, liens et interfaces, disponibilité calculée par l'agence | tous |
 | `/sla` | `SlaPage.jsx` — respect des SLA, incidents à risque, contrat iTop | tous |
-| `/integrations` | `IntegrationsPage.jsx` — santé de la collecte, fusion, équipements vus par un seul outil, alertes sans équipement | directeur, chef NOC, technicien |
+| `/integrations` | `IntegrationsPage.jsx` — santé de la collecte, disponibilité des outils sur 30 jours, fusion, équipements vus par un seul outil, alertes sans équipement | directeur, chef NOC, technicien |
 | `/maintenances` | `MaintenancePage.jsx` | tous (changements iTop et maintenances Zabbix, lecture seule) |
-| `/rapports` | `ReportsPage.jsx` | directeur, chef NOC |
+| `/rapports` | `ReportsPage.jsx` — rapports mensuel et hebdomadaire, rapports figés | directeur, chef NOC |
 | `/utilisateurs` | `UsersPage.jsx` | chef NOC |
 | `/audit` | `AuditPage.jsx` — journal d'audit, lecture seule | directeur, chef NOC |
 | `/compte` | `AccountPage.jsx` | tous |

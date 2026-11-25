@@ -2,8 +2,8 @@ import { Link } from "react-router-dom";
 
 import { Meter } from "../ui/Stat";
 import { complianceColor, resolutionCodeLabel } from "../../lib/itop";
-import { duration, num, pct } from "../../lib/format";
-import { availabilityColor } from "../../lib/vocabulary";
+import { plural, duration, num, pct, availabilityPct } from "../../lib/format";
+import { fleetColor } from "../../lib/vocabulary";
 
 /**
  * Blocs « incidents » du document métier, lus sur les tickets iTop :
@@ -108,7 +108,7 @@ export function IncidentScorecard({ kpis, open, sla }) {
               </td>
               <td>
                 {status && (
-                  <span className="text-[11.5px] font-medium" style={{ color: status.color }}>
+                  <span className="text-[12px] font-medium" style={{ color: status.color }}>
                     {status.label}
                   </span>
                 )}
@@ -146,7 +146,7 @@ export function RecurrentTable({ rows }) {
               ) : (
                 <span className="font-medium">{row.name}</span>
               )}
-              <span className="block text-[10.5px]" style={{ color: "var(--ink-3)" }}>
+              <span className="block text-[12px]" style={{ color: "var(--ink-3)" }}>
                 {row.site || "site non renseigné"}
               </span>
             </td>
@@ -187,7 +187,7 @@ export function TopSitesTable({ rows }) {
                 {row.site}
               </Link>
               {row.region && (
-                <span className="block text-[10.5px]" style={{ color: "var(--ink-3)" }}>
+                <span className="block text-[12px]" style={{ color: "var(--ink-3)" }}>
                   {row.region}
                 </span>
               )}
@@ -243,7 +243,7 @@ export function OrganisationTable({ organisations, incidents }) {
       <thead>
         <tr>
           <th>Organisation</th>
-          <th style={{ width: 150 }}>Disponibilité</th>
+          <th style={{ width: 150 }}>Parc en service</th>
           <th style={{ textAlign: "right", width: 56 }}>Panne</th>
           {showIncidents && <th style={{ textAlign: "right", width: 68 }}>Incidents</th>}
           {showIncidents && <th style={{ textAlign: "right", width: 56 }}>SLA</th>}
@@ -256,20 +256,20 @@ export function OrganisationTable({ organisations, incidents }) {
             <tr key={row.organisation}>
               <td>
                 <span className="font-medium">{row.organisation}</span>
-                <span className="block text-[10.5px]" style={{ color: "var(--ink-3)" }}>
-                  {num(row.nodes)} équipements
+                <span className="block text-[12px]" style={{ color: "var(--ink-3)" }}>
+                  {plural(row.nodes, "équipement")}
                 </span>
               </td>
               <td>
                 <div className="flex items-center gap-2">
                   <div className="flex-1">
-                    <Meter value={row.availability_pct} color={availabilityColor(row.availability_pct)} />
+                    <Meter value={row.availability_pct} color={fleetColor(row.availability_pct)} />
                   </div>
                   <span
-                    className="num text-[11.5px]"
-                    style={{ minWidth: 44, color: availabilityColor(row.availability_pct) }}
+                    className="num text-[12px]"
+                    style={{ minWidth: 44, color: fleetColor(row.availability_pct) }}
                   >
-                    {pct(row.availability_pct, 1)}
+                    {availabilityPct(row.availability_pct, 1)}
                   </span>
                 </div>
               </td>

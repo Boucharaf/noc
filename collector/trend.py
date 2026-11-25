@@ -79,7 +79,8 @@ def sample(
                     bucket["cr"] += 1
 
     def finish(bucket: dict) -> dict:
-        measured = bucket["n"] - bucket["mnt"]
+        # AM-29 : un état inconnu n'est ni en service ni en panne.
+        measured = bucket["up"] + bucket["deg"] + bucket["down"]
         bucket["av"] = round(100.0 * bucket["up"] / measured, 2) if measured else None
         return bucket
 

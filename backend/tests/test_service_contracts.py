@@ -43,7 +43,9 @@ def test_organisation_summary_counts_unknown_and_maintenance_nodes():
 
     assert result[0]["nodes"] == 3
     assert result[0]["up"] == result[0]["unknown"] == result[0]["maintenance"] == 1
-    assert result[0]["availability_pct"] == 50.0
+    # L'inconnu est non supervisé : hors dénominateur (AM-29).
+    assert result[0]["availability_pct"] == 100.0
+    assert result[0]["unsupervised"] == 1
     assert result[0]["alerts"] == 3
 
 

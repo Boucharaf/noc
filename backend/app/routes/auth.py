@@ -1,7 +1,16 @@
 """Authentification : connexion, PIN, rafraîchissement, déconnexion."""
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Cookie,
+    Depends,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from sqlalchemy.orm import Session
 
 from app.core import session_store
@@ -10,6 +19,8 @@ from app.core.config import (
     LOGIN_LOCK_WINDOW_SECONDS,
     LOGIN_MAX_FAILURES_PER_IP,
     LOGIN_MAX_FAILURES_PER_USER,
+    PIN_DEVICE_DAYS,
+    PIN_REQUIRE_KNOWN_DEVICE,
     REFRESH_COOKIE_SECURE,
 )
 from app.core.rate_limit import client_ip
@@ -17,8 +28,11 @@ from app.db.session import get_db
 from app.dependencies.auth import get_current_user, require_role
 from app.models import User
 from app.schemas.auth import (
+    LockStatusPayload,
     LoginPayload,
     PasswordChangePayload,
+    PasswordResetConfirmPayload,
+    PasswordResetRequestPayload,
     PinLoginPayload,
     TokenResponse,
 )
@@ -26,6 +40,28 @@ from app.schemas.users import UserOut, UserSelfUpdate
 from app.services import audit_service, auth_service, user_service
 
 router = APIRouter(prefix="/api/auth", tags=["authentification"])
+
+
+@router.get("/support")
+def support_contacts() -> dict:
+    """Contact du support, affiché sur l'écran de connexion (INC-45).
+
+    PUBLIC par nature : il sert précisément à qui ne peut pas se connecter.
+    Ne contient que ce que l'agence choisit de publier (SUPPORT_EMAIL,
+    SUPPORT_PHONE, SUPPORT_HOURS) ; vide si rien n'est configuré.
+    """
+    import os
+
+    from app.core.config import SMTP_HOST
+
+    return {
+        "email": os.getenv("SUPPORT_EMAIL", "").strip() or None,
+        "phone": os.getenv("SUPPORT_PHONE", "").strip() or None,
+        "hours": os.getenv("SUPPORT_HOURS", "").strip() or None,
+        # Sans serveur de courriel, aucun lien ne peut partir : l'écran le dit
+        # au lieu de faire attendre un message qui ne viendra pas.
+        "password_reset_by_email": bool(SMTP_HOST),
+    }
 
 REFRESH_COOKIE_NAME = "noc_refresh"
 # Chemin restreint : le navigateur n'envoie le cookie que sur les routes
@@ -75,8 +111,12 @@ def _login_scopes(ip: str, username: str) -> tuple[tuple[str, str, int], ...]:
     )
 
 
+def _lock_remaining(scopes) -> int:
+    return max((session_store.lock_ttl(scope, subject) or 0) for scope, subject, _ in scopes)
+
+
 def _ensure_not_locked(scopes) -> None:
-    remaining = max((session_store.lock_ttl(scope, subject) or 0) for scope, subject, _ in scopes)
+    remaining = _lock_remaining(scopes)
     if remaining:
         # Même forme de détail que le verrouillage du PIN : l'écran de
         # connexion sait déjà l'afficher (LoginPage.jsx).
@@ -107,6 +147,23 @@ def _issue_session(db: Session, user: User, response: Response) -> TokenResponse
     )
 
 
+@router.post("/lock-status")
+def lock_status(payload: LockStatusPayload, request: Request) -> dict:
+    """Temps d'attente restant avant une nouvelle tentative (0 : aucun).
+
+    Lu par l'écran de connexion au chargement : le décompte survit ainsi à une
+    actualisation, et disparaît si le verrou a été levé entre-temps. Ne dit
+    rien de plus que la connexion elle-même : un identifiant inconnu se
+    verrouille comme un autre.
+    """
+    ip = client_ip(request)
+    if payload.mode == "pin":
+        remaining = session_store.is_pin_locked(ip, payload.username) or 0
+    else:
+        remaining = _lock_remaining(_login_scopes(ip, payload.username))
+    return {"retry_after_seconds": remaining}
+
+
 @router.post("/login", response_model=TokenResponse)
 def login(
     payload: LoginPayload,
@@ -125,6 +182,9 @@ def login(
         audit_service.record(
             db, "auth.login_failed", target=payload.username[:150], request=request
         )
+        # L'échec qui déclenche le verrou l'annonce tout de suite, avec sa
+        # durée, au lieu d'un « identifiants invalides » trompeur.
+        _ensure_not_locked(scopes)
         raise
 
     # Le compteur de l'IP n'est PAS remis à zéro : un attaquant qui détient
@@ -132,7 +192,44 @@ def login(
     for scope, subject, _ in scopes[1:]:
         session_store.clear_failures(scope, subject)
     audit_service.record(db, "auth.login", actor=user, target=user.username, request=request)
+    _remember_device(request, response)
     return _issue_session(db, user, response)
+
+
+def _remember_device(request: Request, response: Response) -> None:
+    """Marque ce navigateur comme poste reconnu (INC-43), ou prolonge la
+    marque : un mot de passe valide vient d'y être saisi.
+
+    Cookie HttpOnly, limité aux routes d'authentification, SameSite strict.
+    La déconnexion ne l'efface pas : il décrit le POSTE, pas la session —
+    c'est ce qui permet la relève par PIN sur une console partagée.
+    """
+    current = request.cookies.get(auth_service.DEVICE_COOKIE_NAME)
+    # Renouvelé au-delà de la moitié de sa vie, pour ne pas expirer en
+    # pleine relève sur un poste utilisé tous les jours.
+    if auth_service.is_known_device(current, PIN_DEVICE_DAYS // 2):
+        return
+    response.set_cookie(
+        key=auth_service.DEVICE_COOKIE_NAME,
+        value=auth_service.create_device_token(),
+        max_age=PIN_DEVICE_DAYS * 86400,
+        path="/api/auth",
+        httponly=True,
+        secure=REFRESH_COOKIE_SECURE,
+        samesite="strict",
+    )
+
+
+def _ensure_pin_not_locked(ip: str, username: str) -> None:
+    locked_ttl = session_store.is_pin_locked(ip, username)
+    if locked_ttl is not None:
+        raise HTTPException(
+            status.HTTP_423_LOCKED,
+            detail={
+                "message": "Trop de tentatives — réessayez plus tard.",
+                "retry_after_seconds": locked_ttl,
+            },
+        )
 
 
 @router.post("/pin-login", response_model=TokenResponse)
@@ -143,36 +240,52 @@ def pin_login(
     db: Session = Depends(get_db),
 ):
     ip = client_ip(request)
-    locked_ttl = session_store.is_pin_locked(ip)
-    if locked_ttl is not None:
+    # INC-43 : PIN refusé sur un navigateur où aucun mot de passe n'a été
+    # saisi. Vérifié AVANT le PIN : rien n'est essayé, donc rien n'est appris
+    # du code saisi, depuis un poste inconnu.
+    if PIN_REQUIRE_KNOWN_DEVICE and not auth_service.is_known_device(
+        request.cookies.get(auth_service.DEVICE_COOKIE_NAME), PIN_DEVICE_DAYS
+    ):
+        audit_service.record(
+            db, "auth.pin_login_failed", target=payload.username,
+            detail={"reason": "unknown_device"}, request=request,
+        )
         raise HTTPException(
-            status.HTTP_423_LOCKED,
+            status.HTTP_403_FORBIDDEN,
             detail={
-                "message": "Trop de tentatives — réessayez plus tard.",
-                "retry_after_seconds": locked_ttl,
+                "error": "unknown_device",
+                "message": (
+                    "Ce poste n'est pas reconnu pour la connexion par PIN. Connectez-vous "
+                    "une première fois avec un identifiant et un mot de passe sur ce navigateur."
+                ),
             },
         )
+    _ensure_pin_not_locked(ip, payload.username)
 
     try:
-        user = auth_service.authenticate_with_pin(db, payload.pin)
+        user = auth_service.authenticate_with_pin(db, payload.username, payload.pin)
     except HTTPException:
-        session_store.register_pin_failure(ip)
-        audit_service.record(db, "auth.pin_login_failed", request=request)
+        session_store.register_pin_failure(ip, payload.username)
+        audit_service.record(
+            db, "auth.pin_login_failed", target=payload.username, request=request
+        )
+        _ensure_pin_not_locked(ip, payload.username)
         raise
 
     if user.role not in PIN_LOGIN_ALLOWED_ROLES:
         # Même erreur générique qu'un PIN invalide : révéler que le compte
         # existe mais n'a pas le droit d'utiliser ce mode renseignerait un
         # attaquant sur la validité du PIN saisi.
-        session_store.register_pin_failure(ip)
+        session_store.register_pin_failure(ip, payload.username)
         # Le journal, lui, peut nommer le compte : il n'est lu que par la salle.
         audit_service.record(
             db, "auth.pin_login_failed", actor=user, target=user.username,
             detail={"reason": "role"}, request=request,
         )
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Code PIN invalide.")
+        _ensure_pin_not_locked(ip, payload.username)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Identifiant ou code PIN invalide.")
 
-    session_store.clear_pin_failures(ip)
+    session_store.clear_pin_failures(ip, payload.username)
     audit_service.record(db, "auth.pin_login", actor=user, target=user.username, request=request)
     return _issue_session(db, user, response)
 
@@ -291,6 +404,10 @@ def change_my_password(
     except HTTPException:
         _record_failure(scopes)
         raise
+    if payload.new_password == payload.current_password:
+        raise HTTPException(
+            422, "Le nouveau mot de passe doit être différent de l'ancien."
+        )
     auth_service.set_password(db, current_user.id, payload.new_password)
     # Changer son mot de passe invalide les autres sessions : c'est le
     # geste attendu quand on soupçonne une compromission.
@@ -314,4 +431,109 @@ def revoke_user_sessions(
         db, "auth.sessions_revoked", actor=admin,
         target=target.username if target is not None else None,
         detail={"user_id": user_id}, request=request,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Réinitialisation du mot de passe par courriel (INC-45)
+# ---------------------------------------------------------------------------
+_RESET_SENT = {
+    "message": (
+        "Si un compte actif correspond et qu'une adresse électronique y est "
+        "associée, un lien de réinitialisation vient d'y être envoyé. Pensez à "
+        "vérifier les courriels indésirables."
+    )
+}
+# Demandes par adresse IP et par compte, dans la fenêtre de verrouillage.
+RESET_MAX_PER_IP = 5
+RESET_MAX_PER_ACCOUNT = 3
+
+
+@router.post("/password-reset/request", status_code=status.HTTP_202_ACCEPTED)
+def request_password_reset(
+    payload: PasswordResetRequestPayload,
+    request: Request,
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Envoie un lien de réinitialisation au compte désigné.
+
+    La réponse est la MÊME que le compte existe ou non, ait une adresse ou
+    non : la route ne doit pas servir à découvrir des identifiants. L'envoi
+    se fait après la réponse (tâche de fond), pour que la durée de réponse
+    ne le trahisse pas non plus. Les comptes à PIN seul (agents terrain) se
+    réinitialisent par le Chef NOC.
+    """
+    from app.core.config import NOC_PUBLIC_URL
+    from app.services import notification_service
+
+    ip = client_ip(request)
+    identifier = payload.identifier.strip().lower()
+    scopes = (
+        ("pwreset_ip", ip, RESET_MAX_PER_IP),
+        ("pwreset_account", identifier, RESET_MAX_PER_ACCOUNT),
+    )
+    _ensure_not_locked(scopes)
+    # Chaque DEMANDE compte (pas seulement les échecs) : on limite le
+    # nombre de courriels qu'un tiers peut faire envoyer à quelqu'un.
+    _record_failure(scopes)
+
+    user = auth_service.find_for_password_reset(db, identifier)
+    audit_service.record(
+        db, "auth.password_reset_requested",
+        actor=user, target=user.username if user else None,
+        detail={"account_found": bool(user), "has_email": bool(user and user.email)},
+        request=request,
+    )
+    # Un compte à PIN seul n'a pas de mot de passe à réinitialiser : lui en
+    # donner un ouvrirait un second mode de connexion.
+    if user is not None and user.email and user.password_hash:
+        token = session_store.store_password_reset(user.id)
+        # Après « # » : le navigateur n'envoie jamais cette partie au serveur,
+        # le jeton n'apparaît donc dans aucun journal d'accès.
+        link = f"{NOC_PUBLIC_URL}/reinitialiser#jeton={token}"
+        background.add_task(
+            notification_service.send_password_reset_email,
+            user.email,
+            user.full_name or user.username,
+            link,
+            session_store.PASSWORD_RESET_TTL_SECONDS // 60,
+        )
+    return _RESET_SENT
+
+
+@router.post("/password-reset/confirm", status_code=status.HTTP_204_NO_CONTENT)
+def confirm_password_reset(
+    payload: PasswordResetConfirmPayload,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Fixe le nouveau mot de passe avec un jeton reçu par courriel.
+
+    Le jeton est consommé même si la suite échoue : un lien ne sert qu'une
+    fois. Toutes les sessions ouvertes du compte sont coupées — c'est le
+    geste attendu si la réinitialisation fait suite à une compromission.
+    """
+    ip = client_ip(request)
+    scopes = (("pwreset_confirm_ip", ip, RESET_MAX_PER_IP * 2),)
+    _ensure_not_locked(scopes)
+    user_id = session_store.consume_password_reset(payload.token)
+    user = db.get(User, user_id) if user_id is not None else None
+    # Le compte a pu être désactivé ou passer au PIN seul depuis l'envoi.
+    if user is None or not user.is_active or not user.password_hash:
+        _record_failure(scopes)
+        audit_service.record(db, "auth.password_reset_failed", request=request)
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Lien invalide, expiré ou déjà utilisé. Demandez un nouveau lien.",
+        )
+    auth_service.set_password(db, user.id, payload.new_password)
+    session_store.revoke_all_sessions(user.id)
+    # Le compte était peut-être verrouillé par des échecs : le nouveau mot de
+    # passe doit être utilisable tout de suite.
+    # Pas le compteur de l'IP : il protège aussi les autres comptes.
+    for scope, subject, _limit in _login_scopes(ip, user.username)[1:]:
+        session_store.clear_lock(scope, subject)
+    audit_service.record(
+        db, "auth.password_reset_completed", actor=user, target=user.username, request=request,
     )

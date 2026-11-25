@@ -9,16 +9,19 @@ import SlaBreakdown from "../components/domain/SlaBreakdown";
 import { BarChart, LineChart } from "../components/charts";
 import { complianceColor } from "../lib/itop";
 import { Field, Notice, Segmented } from "../components/ui/Controls";
+import { useWindowStore, windowDays, windowLabel } from "../store/ui";
 import { Modal } from "../components/ui/Overlay";
 import { PageHeader } from "../components/layout/TopBar";
-import { QueryBoundary } from "../components/ui/States";
+import { LoadingState, QueryBoundary } from "../components/ui/States";
 import { SeverityBadge } from "../components/ui/Badge";
-import { duration, num, pct } from "../lib/format";
+import { decimal, duration, num, pct } from "../lib/format";
 import { LEVEL } from "../lib/locality";
-import { severityMeta } from "../lib/vocabulary";
+import { availabilityColor, classHint, thresholdTarget, severityMeta } from "../lib/vocabulary";
 import { errorMessage } from "../api/client";
 import { PERMISSIONS } from "../lib/permissions";
 import {
+  useHistoryRanking,
+  useOverview,
   useSlaContract,
   useSlaIncidents,
   useSlaTargets,
@@ -43,12 +46,6 @@ const GROUPS = ["region", "province", "site", "node"].map((value) => ({
   label: LEVEL[value].label,
 }));
 
-const WINDOWS = [
-  { value: 7, label: "7 j" },
-  { value: 30, label: "30 j" },
-  { value: 90, label: "90 j" },
-  { value: 365, label: "12 mois" },
-];
 
 /** « sur 2 / 278 tickets · médiane 45 j » : une moyenne dit sur quoi elle porte. */
 function delayHint(count, median, total) {
@@ -57,7 +54,74 @@ function delayHint(count, median, total) {
   return `sur ${num(count)}/${num(total)} ticket(s) · médiane ${duration(median)}`;
 }
 
-const dateShort = (iso) => (iso ? new Date(iso).toLocaleDateString("fr-FR") : "—");
+const dateShort = (iso) => (iso ? new Date(iso).toLocaleDateString("fr-FR", { timeZone: "Africa/Ouagadougou" }) : "—");
+
+/**
+ * MTTA, MTTD, MTTR et MTBF techniques (AM-10, KPI-04 à KPI-07, KPI-29).
+ * Pannes = épisodes continus du journal historique (INC-39), pas alertes.
+ */
+function TechnicalReliability({ days, period }) {
+  const overview = useOverview();
+  const history = useHistoryRanking({ kind: "node", days, limit: 1 });
+  const h = history.data?.available ? history.data : null;
+  const o = overview.data;
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+      <Stat
+        label="Disponibilité"
+        value={h?.average_pct == null ? "Non évaluable" : pct(h.average_pct, 2)}
+        color={availabilityColor(h?.average_pct)}
+        target={thresholdTarget("access")}
+        hint={
+          h
+            ? `${num(h.subjects)} équipement(s) supervisés${
+                h.basis?.unsupervised ? ` · ${num(h.basis.unsupervised)} non supervisé(s) à part` : ""
+              }${classHint(h.classes) ? ` · ${classHint(h.classes)}` : ""}`
+            : "journal historique indisponible"
+        }
+        footer={`${period} · journal historique`}
+        sources="fleet"
+      />
+      <Stat
+        label="MTTA alertes"
+        value={duration(o?.alerts_mtta_minutes)}
+        hint={o?.alerts_mtta_count ? `sur ${num(o.alerts_mtta_count)} alerte(s) acquittée(s)` : "aucune alerte acquittée datée"}
+        target="critique < 15 min"
+        help="Mean Time To Acknowledge : délai moyen entre la détection d'une alerte et sa prise en compte (acquittement) dans l'outil. Calculé sur les alertes acquittées des 30 derniers jours, résolues ou non, d'après le journal du NOC ; tant que le journal est vide, sur les seules alertes actives. Sans date de l'outil, l'acquittement est daté du cycle de collecte qui le constate."
+        footer={o?.alerts_mtta_basis === "journal" ? "30 jours · journal historique" : "instantané · alertes actives"}
+        sources="alerts"
+      />
+      <Stat
+        label="MTTD"
+        value="Non mesurable"
+        color="var(--ink-3)"
+        hint="heure réelle de début de panne inconnue"
+        help="Mean Time To Detect : délai entre le début RÉEL d'une panne et sa détection. Aucun outil ne publie l'heure réelle de début : l'heure de détection est la seule connue. Mesurable plus tard si une source (sondes, journaux d'équipement) fournit l'heure de la coupure."
+        footer="—"
+      />
+      <Stat
+        label="MTTR équipements"
+        value={duration(h?.mttr_minutes)}
+        hint={h ? `${num(h.failures)} panne(s) sur ${num(h.subjects)} équipement(s)` : "journal historique indisponible"}
+        help="Durée moyenne d'une panne d'équipement, de la coupure au rétablissement, sur les pannes closes. Une panne = un épisode continu : les coupures rapprochées sont fusionnées."
+        footer={`${period} · journal historique`}
+      />
+      <Stat
+        label="MTBF équipements"
+        value={h?.mtbf_hours != null ? duration(h.mtbf_hours * 60) : "—"}
+        help="Temps moyen de bon fonctionnement entre deux pannes : temps en service ÷ nombre de pannes (épisodes). Plus il est élevé, plus le parc est fiable."
+        footer={`${period} · journal historique`}
+      />
+      <Stat
+        label="Pannes (épisodes)"
+        value={num(h?.failures)}
+        hint={h?.subjects ? `≈ ${decimal(h.failures / h.subjects, 1)} par équipement` : undefined}
+        help="Nombre d'épisodes continus d'indisponibilité confirmée. Plusieurs alertes d'un même épisode comptent pour une seule panne."
+        footer={`${period} · journal historique`}
+      />
+    </div>
+  );
+}
 
 export default function SlaPage() {
   const navigate = useNavigate();
@@ -66,7 +130,10 @@ export default function SlaPage() {
   const [groupBy, setGroupBy] = useState(
     scope.site ? "node" : scope.province ? "site" : scope.region ? "province" : "region",
   );
-  const [days, setDays] = useState(30);
+  // Période globale de la barre unique (INC-20, INC-28) ; l'historique iTop
+  // se lit par jours entiers : « 6 h » ou « 24 h » donnent 1 jour.
+  const hours = useWindowStore((s) => s.hours);
+  const days = windowDays(hours);
 
   const sla = useSlaIncidents({ groupBy, days });
   const targets = useSlaTargets();
@@ -98,20 +165,28 @@ export default function SlaPage() {
     <div className="space-y-2">
       <PageHeader
         title="SLA des incidents"
-        subtitle={`Tickets iTop ouverts sur ${WINDOWS.find((w) => w.value === days)?.label ?? `${days} j`}${
+        subtitle={`Tickets iTop ouverts sur ${hours < 24 ? "1 j (minimum de l'historique iTop)" : windowLabel(hours)}${
           sla.data ? ` (du ${dateShort(sla.data.start_at)} au ${dateShort(sla.data.end_at)})` : ""
         } — ${scopeLabel(scope)}`}
         actions={
           <span className="flex items-center gap-2">
             {sla.isPlaceholderData && (
-              <span className="text-[11px]" style={{ color: "var(--ink-3)" }} role="status">
+              <span className="text-[12px]" style={{ color: "var(--ink-3)" }} role="status">
                 mise à jour…
               </span>
             )}
-            <Segmented ariaLabel="Période" options={WINDOWS} value={days} onChange={setDays} />
           </span>
         }
       />
+
+      {/* INC-19 : pas de squelette éternel — au-delà de 10 s, on dit pourquoi. */}
+      {sla.isLoading && (
+        <LoadingState
+          compact
+          label="Lecture de l'historique iTop…"
+          slowMessage="iTop indisponible ou très lent — données SLA non disponibles pour l'instant. Les incidents en cours restent visibles dans « Incidents iTop »."
+        />
+      )}
 
       {sla.isError && (
         <Notice tone="error">
@@ -122,13 +197,20 @@ export default function SlaPage() {
 
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
         <Stat
+          sources="sla"
           label="Respect des SLA"
           value={pct(totals?.compliance_pct, 1)}
           color={complianceColor(totals?.compliance_pct)}
           target="≥ 95 %"
-          hint={`sur ${num(totals?.evaluated)} incident(s) évalué(s)`}
+          hint={`sur ${num(totals?.evaluated)} incident(s) évalué(s)${
+            totals?.sla_basis?.itop
+              ? ` · ${num(totals.sla_basis.itop)} mesuré(s) par iTop${
+                  totals.sla_basis.noc ? `, ${num(totals.sla_basis.noc)} par le NOC` : ""
+                }`
+              : ""
+          }`}
           gauge={{ value: totals?.compliance_pct, target: 95, max: 100 }}
-          help="Part des incidents résolus dans leur délai, parmi les incidents évalués : résolus avec un objectif, ou encore ouverts mais déjà hors délai."
+          help="Part des incidents résolus dans leur délai, parmi les incidents évalués : résolus avec un objectif, ou encore ouverts mais déjà hors délai. Quand iTop mesure le délai (seuils du contrat, chronomètre arrêté pendant l'attente et hors heures de couverture), c'est son verdict qui compte ; sinon le NOC compare le temps écoulé à ses objectifs."
         />
         <Stat
           label="SLA dépassés"
@@ -162,6 +244,9 @@ export default function SlaPage() {
         />
       </div>
 
+      {/* AM-10 : fiabilité TECHNIQUE, à côté des délais iTop ci-dessus. */}
+      <TechnicalReliability days={days} period={hours < 24 ? "1 j" : windowLabel(hours)} />
+
       {/* Les taux ci-dessus racontent le passé ; ceci est encore rattrapable. */}
       <SlaAtRisk limit={10} />
 
@@ -179,7 +264,7 @@ export default function SlaPage() {
             ) : (
               <LineChart
                 height={190}
-                labels={sla.data.weekly.map((w) => new Date(w.week).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" }))}
+                labels={sla.data.weekly.map((w) => new Date(w.week).toLocaleDateString("fr-FR", { timeZone: "Africa/Ouagadougou", day: "2-digit", month: "2-digit" }))}
                 yMin={0}
                 yMax={100}
                 targetLine={95}
@@ -216,7 +301,7 @@ export default function SlaPage() {
                 },
               ]}
             />
-            <p className="text-[11px] mt-1" style={{ color: "var(--ink-3)" }}>
+            <p className="text-[12px] mt-1" style={{ color: "var(--ink-3)" }}>
               En vert : résolus dans le délai ; en rouge : hors délai, ou encore ouverts alors que le délai est dépassé.
             </p>
           </Panel>
@@ -235,7 +320,7 @@ export default function SlaPage() {
       </Panel>
 
       <Panel title="Par gravité" subtitle="objectifs de prise en charge (TTO) et de résolution (TTR)" flush>
-        <QueryBoundary query={sla} compact empty={(d) => !d?.by_severity?.length} emptyMessage="Aucun incident sur la période">
+        <QueryBoundary query={sla} compact slowMessage="iTop indisponible ou très lent — données SLA non disponibles." empty={(d) => !d?.by_severity?.length} emptyMessage="Aucun incident sur la période">
           {(data) => (
             <table className="tbl">
               <thead>

@@ -28,7 +28,7 @@ Droits réellement appliqués par le backend :
 | Consulter les maintenances (planifiées dans iTop / Zabbix) | ✅ | ✅ | ✅ | ✅ |
 | Modifier les cibles SLA | ✅ | ✅ | — | — |
 | Consulter les interventions (ordres de travail iTop) | ✅ | ✅ | ✅ | ✅ |
-| Télécharger le rapport mensuel | ✅ | ✅ | — | — |
+| Télécharger le rapport mensuel, consulter et **figer** un rapport | ✅ | ✅ | — | — |
 | **Créer un compte, attribuer un rôle, désactiver, réinitialiser un mot de passe ou un PIN** | — | ✅ | — | — |
 | Couper les sessions d'un utilisateur | — | ✅ | — | — |
 | Consulter le journal d'audit | ✅ | ✅ | — | — |
@@ -102,13 +102,15 @@ sequenceDiagram
 | Élément | Détail |
 |---|---|
 | Mots de passe | Empreinte **bcrypt**, **12 caractères minimum** (72 octets au plus). Les comptes créés avant gardent leur mot de passe jusqu'au prochain changement. |
-| Verrouillage | Après **10 échecs** sur un compte depuis une même adresse, **50** sur un compte toutes adresses confondues, ou **30** depuis une adresse tous comptes confondus, la connexion est bloquée **15 minutes** (réglable : `LOGIN_*`). Le changement de mot de passe compte dans les mêmes compteurs. nginx limite en plus `/api/auth/login` et `/api/auth/pin-login` à 30 requêtes par minute par adresse. |
+| Verrouillage | Après **5 échecs** sur un compte depuis une même adresse, **25** sur un compte toutes adresses confondues, ou **30** depuis une adresse tous comptes confondus, la connexion est bloquée **15 minutes** (réglable : `LOGIN_*`). Le changement de mot de passe compte dans les mêmes compteurs. nginx limite en plus `/api/auth/login` et `/api/auth/pin-login` à 30 requêtes par minute par adresse. |
 | Limitation applicative | `RATE_LIMIT_ENABLED` active les quotas Redis middleware sur `/api/*`: limites IP (`RATE_LIMIT_READ_PER_MIN`, `RATE_LIMIT_WRITE_PER_MIN`) et par utilisateur authentifié (`RATE_LIMIT_USER_READ_PER_MIN`, `RATE_LIMIT_USER_WRITE_PER_MIN`). Les erreurs Redis sont journalisées et restent en mode ouvert. `TRUSTED_PROXY_IPS` doit contenir nginx (`NGINX_API_PROXY_IP`, par défaut `172.31.250.4`) pour interpréter `X-Real-IP`. |
 | Routes internes | `INTERNAL_API_KEY` protège les tâches internes, notamment `POST /api/internal/reports/monthly`; l'en-tête attendu est `Authorization: Bearer <clé>`. Sans clé configurée, ces routes répondent 503. |
 | Jeton d'accès | JWT signé avec `SECRET_KEY`, 30 minutes (`ACCESS_TOKEN_EXPIRE_MINUTES`), gardé **en mémoire** par le navigateur, jamais dans le stockage local. **Révoqué immédiatement** quand les sessions du compte sont coupées (mot de passe changé ou réinitialisé, rôle modifié, compte désactivé). |
 | Jeton de rafraîchissement | JWT de 7 jours dans un cookie `httpOnly` limité à `/api/auth`. Chaque utilisation le remplace. Un doublon concurrent détecté dans la fenêtre de 5 secondes reçoit HTTP 409 sans effacer le nouveau cookie ; un rejeu hors de cette fenêtre coupe toutes les sessions du compte. |
 | Sessions | Enregistrées dans Redis : c'est ce qui permet de les révoquer. |
-| Connexion par PIN | Réservée aux **agents terrain** (confort sur téléphone). **6 chiffres** pour tout nouveau code (les codes plus courts déjà définis restent acceptés jusqu'à leur remplacement). Deux comptes actifs ne peuvent pas partager un code. Empreinte **HMAC-SHA256** dont la clé est `SECRET_KEY` : changer cette clé oblige à redéfinir les PIN. Après **5 échecs**, l'adresse IP est bloquée **15 minutes**. Le PIN est un facteur faible, jamais disponible pour les autres rôles. |
+| Mot de passe provisoire | Tout compte créé ou réinitialisé par un tiers doit changer son mot de passe avant d'accéder au NOC ; le backend refuse les autres routes. |
+| Adresse réelle des postes | Derrière un proxy frontal, déclarer son adresse dans `NOC_FRONT_PROXY_IPS` : sinon tous les postes ont la sienne, dans le journal d'audit comme dans les verrouillages. Ce proxy doit aussi relayer les WebSockets de `/ws/`. |
+| Connexion par PIN | **Identifiant + code** ; 5 échecs bloquent le PIN du compte 15 min, quelle que soit l'adresse. Réservée aux **agents terrain** (confort sur téléphone). **6 chiffres** pour tout nouveau code (les codes plus courts déjà définis restent acceptés jusqu'à leur remplacement). Deux comptes actifs ne peuvent pas partager un code. Empreinte **HMAC-SHA256** dont la clé est `SECRET_KEY` : changer cette clé oblige à redéfinir les PIN. Après **5 échecs**, l'adresse IP est bloquée **15 minutes**. Le PIN est un facteur faible, jamais disponible pour les autres rôles. |
 | WebSocket | Le jeton est envoyé dans la **première trame**, pas dans l'URL (qui finirait dans les journaux du proxy). Le compte est relu en base à la connexion, et le flux est **fermé à l'expiration du jeton** ; le navigateur se reconnecte avec le jeton rafraîchi. |
 | Liste des comptes | Tout compte connecté la lit (sélecteurs d'affectation), mais seul le **Chef NOC** reçoit téléphones, courriels, matricules et dates de connexion. |
 | Transport | HTTPS par nginx (TLS 1.2 et 1.3). `REFRESH_COOKIE_SECURE=true` dès qu'on est en HTTPS. |
@@ -120,7 +122,9 @@ sequenceDiagram
 | Secrets de configuration (`SECRET_KEY`, `REDIS_PASSWORD`, mots de passe des bases, des outils, du SMTP) | `.env` | Exclu de git. Ne jamais le copier d'un environnement à l'autre : chaque environnement a ses propres secrets. **Aucune valeur réelle dans `.env.example`**, qui est versionné. |
 | Dump NetXMS de production | `database/netxmsbd07082026.sql` | Exclu de git ; secrets purgés à la restauration ; base accessible sur `127.0.0.1` seulement. |
 | Certificat TLS et sa clé | `nginx/certs/` | Exclu de git. |
-| Comptes et travail d'exploitation | volume Docker `pgdata` | À sauvegarder régulièrement (chapitre 9). |
+| Comptes et travail d'exploitation | volume Docker `pgdata` | Sauvegardé chaque nuit par le service `backup` (chapitre 9). |
+| Sauvegardes (empreintes de mots de passe, journal d'audit) | `BACKUP_DIR`, `BACKUP_OFFSITE_DIR` | Exclues de git ; fichiers non chiffrés, en 600 sous Linux. Dossier à accès restreint, **hors de tout dossier synchronisé** (OneDrive…). |
+| Rapports figés | table `report_snapshot` | Modification, suppression et vidage refusés par la base ; empreinte SHA-256 vérifiée à chaque téléchargement. Un administrateur PostgreSQL peut lever cette protection : conserver les empreintes ailleurs. |
 
 ## Durcissement en place
 
@@ -148,4 +152,6 @@ sequenceDiagram
   fichier Compose). Ne pas lancer les profils de laboratoire.
 - **Comptes de service** : sur les outils de l'agence, des comptes en lecture
   seule dédiés au NOC, jamais un compte d'administration.
-- **Sauvegardes** : volume `pgdata` (chapitre 9).
+- **Sauvegardes** : `BACKUP_OFFSITE_DIR` sur une autre machine, et un essai de
+  restauration (chapitre 9).
+- **Conservation** : fixer les durées avec l'agence avant `RETENTION_ENABLED=true`.

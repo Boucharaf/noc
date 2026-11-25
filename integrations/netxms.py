@@ -61,6 +61,19 @@ _OBJECT_STATE = {
     7: "unknown",
     8: "maintenance",
 }
+# « Major » et « Critical » sont la PIRE ALARME de l'objet (température, disque,
+# interface…), pas la preuve qu'il ne répond plus.
+_SEVERE_STATUS = (3, 4)
+
+
+def node_state(status, outage: bool | None) -> str:
+    """État d'un équipement. `outage` : la source le dit-elle hors de portée ?
+    None = elle ne le publie pas : le statut sévère reste alors une panne."""
+    if status in _SEVERE_STATUS and outage is False:
+        return "degraded"
+    return _OBJECT_STATE.get(status, "unknown")
+
+
 _STATUS_NAMES = {
     "NORMAL": 0, "WARNING": 1, "MINOR": 2, "MAJOR": 3, "CRITICAL": 4,
     "UNKNOWN": 5, "UNMANAGED": 6, "DISABLED": 7, "TESTING": 8,
@@ -445,7 +458,9 @@ class NetXMSClient(SourceClient):
             name=name or primary_name or "(sans nom)",
             hostname=technical or "",
             ip=_valid_ip(obj.get("primaryIP") or obj.get("primaryIp") or obj.get("ipAddress")),
-            state=_OBJECT_STATE.get(status, "unknown"),
+            # L'API Web ne publie pas de façon fiable l'injoignabilité : le
+            # statut sévère y reste une panne.
+            state=node_state(status, None),
             enabled=status not in (6, 7),  # 6 non géré, 7 désactivé
             groups=groups,
             site=site,

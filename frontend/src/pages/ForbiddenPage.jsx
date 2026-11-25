@@ -24,7 +24,7 @@ export default function ForbiddenPage() {
         <strong>{ROLE_LABEL[user?.role] ?? user?.role}</strong>.{" "}
         {ROLE_DESCRIPTION[user?.role]}
       </p>
-      <p className="text-[11.5px] max-w-[52ch]" style={{ color: "var(--ink-3)" }}>
+      <p className="text-[12px] max-w-[52ch]" style={{ color: "var(--ink-3)" }}>
         Si vous avez besoin de cet écran, demandez au Chef NOC ou au Directeur de faire
         évoluer votre rôle depuis la gestion des comptes.
       </p>

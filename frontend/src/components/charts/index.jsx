@@ -10,6 +10,10 @@ import {
   Tooltip,
 } from "chart.js";
 import { Bar, Line } from "react-chartjs-2";
+import { useRef } from "react";
+
+const BOM = String.fromCharCode(0xfeff);
+const NEWLINE = String.fromCharCode(10);
 
 import { canvasColor, useChartTheme } from "./useChartTheme";
 
@@ -111,8 +115,11 @@ export function LineChart({
   valueFormatter,
   targetLine,
   stacked = false,
+  // AM-18 : nom de fichier des exports CSV / PNG ; sans lui, pas de bouton.
+  exportName,
 }) {
   const chrome = useChartTheme();
+  const chartRef = useRef(null);
 
   const data = {
     labels,
@@ -149,7 +156,7 @@ export function LineChart({
     options.plugins.tooltip.callbacks = {
       label: (context) => {
         const count = context.dataset.pointCounts?.[context.dataIndex];
-        const contributors = Number.isFinite(count) ? ` · ${count} équipements` : "";
+        const contributors = Number.isFinite(count) ? ` · ${count} équipement${count > 1 ? "s" : ""}` : "";
         return `${context.dataset.label} : ${valueFormatter(context.parsed.y)}${contributors}`;
       },
     };
@@ -170,9 +177,47 @@ export function LineChart({
     });
   }
 
+  const download = (href, filename) => {
+    const link = document.createElement("a");
+    link.href = href;
+    link.download = filename;
+    link.click();
+  };
+  const exportCsv = () => {
+    // Point-virgule et virgule décimale : ouvert tel quel par un tableur en
+    // français. BOM UTF-8 pour que les accents des libellés passent.
+    const cell = (value) =>
+      value === null || value === undefined ? "" : String(value).replace(".", ",");
+    const rows = [
+      ["Horodatage", ...series.map((item) => `"${String(item.label).replace(/"/g, "'")}"`)].join(";"),
+      ...labels.map((label, index) =>
+        [label, ...series.map((item) => cell(item.data[index]))].join(";"),
+      ),
+    ];
+    const url = URL.createObjectURL(new Blob([BOM + rows.join(NEWLINE)], { type: "text/csv" }));
+    download(url, `${exportName}.csv`);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  const exportPng = () => {
+    const image = chartRef.current?.toBase64Image?.("image/png", 1);
+    if (image) download(image, `${exportName}.png`);
+  };
+
   return (
-    <div style={{ height }}>
-      <Line data={data} options={options} />
+    <div style={{ position: "relative" }}>
+      {exportName && (
+        <div className="flex justify-end gap-1 mb-1">
+          <button type="button" className="btn btn-ghost btn-sm" onClick={exportCsv} title="Exporter les valeurs (CSV)">
+            CSV
+          </button>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={exportPng} title="Exporter l'image du graphique (PNG)">
+            PNG
+          </button>
+        </div>
+      )}
+      <div style={{ height }}>
+        <Line ref={chartRef} data={data} options={options} />
+      </div>
     </div>
   );
 }
@@ -239,7 +284,7 @@ export function Sparkline({ values, color = "var(--accent)", width = 80, height 
   const points = (values ?? []).filter((v) => v !== null && v !== undefined);
   if (points.length < 2) {
     return (
-      <span className="text-[10px]" style={{ color: "var(--ink-3)" }}>
+      <span className="text-[12px]" style={{ color: "var(--ink-3)" }}>
         —
       </span>
     );
@@ -298,7 +343,7 @@ export function HourHeatmap({ data, color = "var(--sev-high)", height = 34 }) {
           />
         ))}
       </div>
-      <div className="flex justify-between mt-1 text-[9.5px] num" style={{ color: "var(--ink-3)" }}>
+      <div className="flex justify-between mt-1 text-[12px] num" style={{ color: "var(--ink-3)" }}>
         <span>00 h</span>
         <span>06 h</span>
         <span>12 h</span>
@@ -357,11 +402,11 @@ export function Donut({ segments, size = 116, thickness = 13, centerValue, cente
           })}
       </svg>
       <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-        <span className="num font-semibold" style={{ fontSize: 19 }}>
+        <span className="stat-value" style={{ fontSize: Math.max(19, Math.round(size / 5.4)) }}>
           {centerValue}
         </span>
         {centerLabel && (
-          <span className="text-[9.5px] uppercase tracking-[0.06em]" style={{ color: "var(--ink-3)" }}>
+          <span className="text-[12px] uppercase tracking-[0.06em]" style={{ color: "var(--ink-3)" }}>
             {centerLabel}
           </span>
         )}

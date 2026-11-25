@@ -16,10 +16,17 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# Correctifs de sécurité Debian parus depuis la publication de l'image de base.
+RUN apt-get update \
+ && apt-get upgrade -y \
+ && rm -rf /var/lib/apt/lists/*
+
 # Les dépendances avant le code : une modification du collecteur ne réinstalle
 # alors pas httpx et psycopg à chaque construction.
 COPY collector/requirements.txt ./collector/requirements.txt
-RUN pip install --no-cache-dir -r collector/requirements.txt
+# pip d'abord : celui de l'image de base traîne des avis de sécurité.
+RUN pip install --no-cache-dir --upgrade "pip>=26.2" \
+ && pip install --no-cache-dir -r collector/requirements.txt
 
 COPY integrations ./integrations
 COPY collector ./collector

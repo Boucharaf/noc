@@ -1,5 +1,7 @@
 import { Link, useSearchParams } from "react-router-dom";
 
+import KpiRow from "../components/domain/KpiRow";
+import { DashboardSummary } from "../components/domain/FleetInsights";
 import Panel from "../components/ui/Panel";
 import Stat from "../components/ui/Stat";
 import DataTable from "../components/ui/Table";
@@ -10,6 +12,8 @@ import { QueryBoundary, SkeletonRows } from "../components/ui/States";
 import { dateTime, num } from "../lib/format";
 import { useInterventions } from "../hooks/queries";
 import { scopeLabel, useScopeStore } from "../store/scope";
+import { useAuthStore } from "../store/auth";
+import { homeRoute } from "../lib/permissions";
 
 /**
  * Interventions — ordres de travail iTop, en LECTURE SEULE.
@@ -28,6 +32,10 @@ const STATUSES = [
 export default function InterventionsPage() {
   const [params, setParams] = useSearchParams();
   const scope = useScopeStore();
+  // Accueil de l'agent terrain : la page porte alors la tête commune des
+  // tableaux de bord. Pour les autres profils, c'est un écran secondaire.
+  const role = useAuthStore((s) => s.user?.role);
+  const isHome = homeRoute(role) === "/interventions";
   const status = params.get("statut") || "open";
   const search = params.get("q") || "";
   const query = useInterventions(status);
@@ -74,7 +82,7 @@ export default function InterventionsPage() {
           <span className="text-[12px]">
             <span className="num">{o.ticket.ref ?? "—"}</span>
             {o.ticket.title && (
-              <span className="block text-[11px]" style={{ color: "var(--ink-3)" }}>
+              <span className="block text-[12px]" style={{ color: "var(--ink-3)" }}>
                 {o.ticket.title}
               </span>
             )}
@@ -99,12 +107,12 @@ export default function InterventionsPage() {
               </span>
             ))}
             {o.nodes_total > 2 && ` + ${num(o.nodes_total - 2)}`}
-            <span className="block text-[11px]" style={{ color: "var(--ink-3)" }}>
+            <span className="block text-[12px]" style={{ color: "var(--ink-3)" }}>
               {[o.nodes[0]?.site, o.nodes[0]?.province, o.nodes[0]?.region].filter(Boolean).join(" · ")}
             </span>
           </span>
         ) : (
-          <span className="text-[11.5px]" style={{ color: "var(--ink-3)" }}>
+          <span className="text-[12px]" style={{ color: "var(--ink-3)" }}>
             {o.cis?.length ? "CI non retrouvé dans la supervision" : "aucun CI sur le ticket"}
           </span>
         ),
@@ -125,7 +133,7 @@ export default function InterventionsPage() {
       header: "Début → fin",
       width: 220,
       render: (o) => (
-        <span className="num text-[11.5px]">
+        <span className="num text-[12px]">
           {dateTime(o.start)} → {o.end ? dateTime(o.end) : "—"}
         </span>
       ),
@@ -133,30 +141,38 @@ export default function InterventionsPage() {
   ];
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-3.5">
       <PageHeader
-        title="Interventions"
+        title={isHome ? "Tableau de bord terrain" : "Interventions"}
         subtitle={`Ordres de travail iTop — ${scopeLabel(scope)}`}
         actions={
           <Segmented ariaLabel="Statut" options={STATUSES} value={status} onChange={(v) => setParam("statut", v, "open")} />
         }
       />
 
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-        <Stat label="Ouvertes" value={num(data?.counts?.open)} />
+      {/* Accueil de l'agent terrain : même tête que les autres tableaux de
+          bord (AM-02) — bandeau de situation, 6 indicateurs clés — puis ses
+          ordres de travail. */}
+      {isHome && <DashboardSummary />}
+      {isHome && <KpiRow />}
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+        <Stat label="Interventions ouvertes" value={num(data?.counts?.open)} compact footer="instantané · iTop" />
         <Stat
-          label="Non affectées"
+          label="Interventions non affectées"
           value={num(data?.counts?.unassigned)}
           color={data?.counts?.unassigned ? "var(--sev-high)" : undefined}
+          compact
+          footer="instantané · iTop"
         />
-        <Stat label="Clôturées (30 j)" value={num(data?.counts?.closed)} />
+        <Stat label="Clôturées (30 j)" value={num(data?.counts?.closed)} compact footer="30 j · iTop" />
       </div>
 
       <Panel title="Ordres de travail" flush>
         <div className="p-2 border-b" style={{ borderColor: "var(--border)" }}>
           <Toolbar
             right={
-              <span className="text-[11.5px]" style={{ color: "var(--ink-3)" }}>
+              <span className="text-[12px]" style={{ color: "var(--ink-3)" }}>
                 <span className="num" style={{ color: "var(--ink-2)" }}>{num(rows.length)}</span> intervention(s)
               </span>
             }

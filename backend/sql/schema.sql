@@ -63,6 +63,9 @@ CREATE TABLE IF NOT EXISTS noc_user (
 -- EXISTS ne modifie pas une table existante : sans ces ALTER, une base créée
 -- avant leur ajout resterait sans elles.
 ALTER TABLE noc_user ADD COLUMN IF NOT EXISTS email TEXT;
+-- Mot de passe provisoire (compte créé ou réinitialisé par un tiers) : à changer
+-- avant toute autre action.
+ALTER TABLE noc_user ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE noc_user ADD COLUMN IF NOT EXISTS notify_email BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE INDEX IF NOT EXISTS idx_noc_user_role ON noc_user(role) WHERE is_active;
@@ -216,6 +219,12 @@ UPDATE kpi_daily SET site = NULL WHERE site = '';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_kpi_daily_day_site
     ON kpi_daily(day, (COALESCE(site, '')));
 
+-- Secondes-équipement où l'équipement répond (en service ou dégradé) et
+-- secondes supervisées : une moyenne sur plusieurs jours se pondère par le
+-- temps supervisé (INC-01), pas par le nombre de jours.
+ALTER TABLE kpi_daily ADD COLUMN IF NOT EXISTS responding_s DOUBLE PRECISION;
+ALTER TABLE kpi_daily ADD COLUMN IF NOT EXISTS supervised_s DOUBLE PRECISION;
+
 CREATE INDEX IF NOT EXISTS idx_kpi_daily_site
     ON kpi_daily(site, day DESC);
 
@@ -285,6 +294,184 @@ CREATE INDEX IF NOT EXISTS idx_hist_alert_node
     ON hist_alert(node_id, opened_at DESC);
 CREATE INDEX IF NOT EXISTS idx_hist_alert_window
     ON hist_alert(opened_at, closed_at);
+
+-- Acquittement de l'alerte. acknowledged : état actuel, NULL tant que le
+-- collecteur ne l'a pas lu (lignes antérieures à ces colonnes).
+-- acknowledged_at : PREMIER acquittement, jamais réécrit. ack_source dit ce
+-- que vaut cette date : tool (datée par l'outil), observed (vue au cycle, à
+-- COLLECT_INTERVAL_S près), undated (date inconnue, hors MTTA).
+ALTER TABLE hist_alert ADD COLUMN IF NOT EXISTS acknowledged BOOLEAN;
+ALTER TABLE hist_alert ADD COLUMN IF NOT EXISTS acknowledged_at TIMESTAMPTZ;
+ALTER TABLE hist_alert ADD COLUMN IF NOT EXISTS acknowledged_by TEXT;
+ALTER TABLE hist_alert ADD COLUMN IF NOT EXISTS ack_source TEXT;
+CREATE INDEX IF NOT EXISTS idx_hist_alert_ack
+    ON hist_alert(acknowledged_at) WHERE acknowledged_at IS NOT NULL;
+
+-- Vie de l'alerte : une ligne par changement (ouverture, acquittement,
+-- gravité, fermeture). Ajout seulement, rien n'y est réécrit.
+CREATE TABLE IF NOT EXISTS hist_alert_event (
+    id              BIGSERIAL PRIMARY KEY,
+    alert_id        BIGINT NOT NULL REFERENCES hist_alert(id) ON DELETE CASCADE,
+    event           TEXT NOT NULL CHECK (event IN
+                    ('opened', 'acknowledged', 'unacknowledged', 'severity', 'closed')),
+    at              TIMESTAMPTZ NOT NULL,
+    from_value      TEXT,
+    to_value        TEXT,
+    actor           TEXT,
+    source          TEXT NOT NULL,
+    recorded_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_hist_alert_event_alert
+    ON hist_alert_event(alert_id, at);
+CREATE INDEX IF NOT EXISTS idx_hist_alert_event_at
+    ON hist_alert_event(at);
+
+-- ---------------------------------------------------------------------
+-- Identité des équipements (collector/identity.py)
+-- ---------------------------------------------------------------------
+-- Registre d'identité : un identifiant par équipement, donné une fois. id est
+-- opaque (celui de la fusion au moment de la création). merged_into : réuni à
+-- un autre équipement, qui continue.
+CREATE TABLE IF NOT EXISTS noc_asset (
+    id              TEXT PRIMARY KEY,
+    name            TEXT,
+    created_at      TIMESTAMPTZ NOT NULL,
+    last_seen_at    TIMESTAMPTZ NOT NULL,
+    merged_into     TEXT REFERENCES noc_asset(id)
+);
+CREATE INDEX IF NOT EXISTS idx_noc_asset_seen ON noc_asset(last_seen_at);
+
+-- À quel équipement appartient chaque référence d'outil. valid_from : la
+-- référence a été réattribuée à cette date ; avant, elle désignait un autre.
+CREATE TABLE IF NOT EXISTS noc_asset_source (
+    tool            TEXT NOT NULL,
+    ref             TEXT NOT NULL,
+    asset_id        TEXT NOT NULL REFERENCES noc_asset(id),
+    name            TEXT,
+    ip              TEXT,
+    first_seen_at   TIMESTAMPTZ NOT NULL,
+    valid_from      TIMESTAMPTZ,
+    PRIMARY KEY (tool, ref)
+);
+CREATE INDEX IF NOT EXISTS idx_noc_asset_source_asset ON noc_asset_source(asset_id);
+
+-- Décisions d'identité, en ajout seulement.
+CREATE TABLE IF NOT EXISTS noc_asset_event (
+    id              BIGSERIAL PRIMARY KEY,
+    asset_id        TEXT NOT NULL REFERENCES noc_asset(id),
+    event           TEXT NOT NULL,
+    at              TIMESTAMPTZ NOT NULL,
+    source          TEXT,
+    from_value      TEXT,
+    to_value        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_noc_asset_event_asset ON noc_asset_event(asset_id, at);
+CREATE INDEX IF NOT EXISTS idx_noc_asset_event_at ON noc_asset_event(at);
+
+-- ---------------------------------------------------------------------
+-- Santé des outils, rapports figés
+-- ---------------------------------------------------------------------
+-- Santé des outils dans le temps (collector/tool_health.py).
+CREATE TABLE IF NOT EXISTS hist_tool_health (
+    id              BIGSERIAL PRIMARY KEY,
+    tool            TEXT NOT NULL,
+    state           TEXT NOT NULL CHECK (state IN ('up', 'partial', 'down')),
+    error           TEXT,
+    version         TEXT,
+    started_at      TIMESTAMPTZ NOT NULL,
+    ended_at        TIMESTAMPTZ,
+    last_seen_at    TIMESTAMPTZ NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hist_tool_health_open
+    ON hist_tool_health(tool) WHERE ended_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_hist_tool_health_window
+    ON hist_tool_health(started_at, ended_at);
+
+-- Rapports mensuels figés (backend, report_archive_service.py). data est du
+-- TEXTE : son empreinte porte sur les octets exacts.
+CREATE TABLE IF NOT EXISTS report_snapshot (
+    id              SERIAL PRIMARY KEY,
+    kind            TEXT NOT NULL,
+    year            INTEGER NOT NULL,
+    month           INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
+    revision        INTEGER NOT NULL,
+    complete        BOOLEAN NOT NULL,
+    reason          TEXT,
+    data            TEXT NOT NULL,
+    data_sha256     TEXT NOT NULL,
+    pdf             BYTEA NOT NULL,
+    pdf_sha256      TEXT NOT NULL,
+    generated_at    TIMESTAMPTZ NOT NULL,
+    generated_by    TEXT NOT NULL,
+    UNIQUE (kind, year, month, revision)
+);
+CREATE OR REPLACE FUNCTION refuse_report_change() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'un rapport figé ne se modifie ni ne se supprime';
+END $$;
+CREATE OR REPLACE TRIGGER report_snapshot_frozen
+    BEFORE UPDATE OR DELETE ON report_snapshot
+    FOR EACH ROW EXECUTE FUNCTION refuse_report_change();
+CREATE OR REPLACE TRIGGER report_snapshot_no_truncate
+    BEFORE TRUNCATE ON report_snapshot
+    FOR EACH STATEMENT EXECUTE FUNCTION refuse_report_change();
+
+-- ---------------------------------------------------------------------
+-- Pannes enregistrées par les outils (collector/downtime.py)
+-- ---------------------------------------------------------------------
+-- Copie, à la seconde, du journal de pannes de NetXMS (downtime_log) : la
+-- source maître de la disponibilité des équipements NetXMS. Une ligne par
+-- panne ; ended_at NULL = panne en cours. Relue et mise à jour à chaque
+-- synchronisation (une panne close voit sa fin enregistrée).
+CREATE TABLE IF NOT EXISTS hist_downtime (
+    id              BIGSERIAL PRIMARY KEY,
+    source          TEXT NOT NULL,
+    object_ref      TEXT NOT NULL,
+    node_id         TEXT NOT NULL,
+    name            TEXT,
+    tag             TEXT NOT NULL DEFAULT '',
+    started_at      TIMESTAMPTZ NOT NULL,
+    ended_at        TIMESTAMPTZ,
+    imported_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (source, object_ref, tag, started_at)
+);
+CREATE INDEX IF NOT EXISTS idx_hist_downtime_node
+    ON hist_downtime(node_id, started_at);
+
+-- Dernière synchronisation réussie, par source : au-delà de quelques heures
+-- sans succès, le NOC revient à ses propres observations.
+CREATE TABLE IF NOT EXISTS hist_source_sync (
+    source          TEXT PRIMARY KEY,
+    synced_at       TIMESTAMPTZ NOT NULL,
+    rows_read       INTEGER NOT NULL DEFAULT 0
+);
+
+-- Fenêtre de supervision de chaque équipement selon sa source maître
+-- (NetXMS : date de création de l'objet). Permet d'exploiter tout
+-- l'historique de hist_downtime, y compris avant que le NOC observe
+-- l'équipement. horizon_at (hist_source_sync) : jusqu'où la source sait.
+CREATE TABLE IF NOT EXISTS hist_source_object (
+    source          TEXT NOT NULL,
+    object_ref      TEXT NOT NULL,
+    node_id         TEXT NOT NULL,
+    name            TEXT,
+    site            TEXT,
+    province        TEXT,
+    region          TEXT,
+    tools           TEXT,
+    supervised_since TIMESTAMPTZ,
+    managed         BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (source, object_ref)
+);
+CREATE INDEX IF NOT EXISTS idx_hist_source_object_node
+    ON hist_source_object(source, node_id);
+ALTER TABLE hist_source_sync ADD COLUMN IF NOT EXISTS horizon_at TIMESTAMPTZ;
+-- Depuis quand le journal de pannes copié est complet (NetXMS efface les
+-- pannes terminées au-delà de sa rétention ; le NOC garde tout ce qu'il a
+-- copié, donc cette date ne fait que reculer — LEAST à chaque synchronisation).
+ALTER TABLE hist_source_sync ADD COLUMN IF NOT EXISTS complete_since TIMESTAMPTZ;
 
 -- ---------------------------------------------------------------------
 -- Tables retirées

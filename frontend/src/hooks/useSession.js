@@ -61,9 +61,17 @@ export function usePeriodAutoSync() {
   }, [syncToCurrent]);
 }
 
-/** Applique le thème choisi à <html> et à la barre d'adresse mobile. */
+/** Applique le thème choisi à <html> et à la barre d'adresse mobile, ainsi
+ * que la taille d'affichage (attribut data-scale, lu par index.css). */
 export function useThemeEffect() {
   const theme = useUiStore((s) => s.theme);
+  const uiScale = useUiStore((s) => s.uiScale);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (uiScale && uiScale !== "auto") root.dataset.scale = uiScale;
+    else delete root.dataset.scale;
+  }, [uiScale]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -71,7 +79,7 @@ export function useThemeEffect() {
     root.style.colorScheme = theme === "light" ? "light" : "dark";
     document
       .querySelector('meta[name="theme-color"]')
-      ?.setAttribute("content", theme === "light" ? "#eef1f6" : "#0a0d14");
+      ?.setAttribute("content", theme === "light" ? "#202060" : "#0f1530");
   }, [theme]);
 }
 

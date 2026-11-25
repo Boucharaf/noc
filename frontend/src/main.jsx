@@ -4,6 +4,16 @@ import ReactDOM from "react-dom/client";
 import { registerSW } from "virtual:pwa-register";
 
 import App from "./App.jsx";
+// Polices de la maquette ANPTIC (AM-06) : Poppins pour les titres et les
+// chiffres clés, IBM Plex Sans pour le texte. Servies par l'application
+// elle-même (sous-ensemble latin) : le CSP n'autorise que font-src 'self',
+// et un poste de la salle NOC peut n'avoir aucun accès à Internet.
+import "@fontsource/poppins/latin-500.css";
+import "@fontsource/poppins/latin-600.css";
+import "@fontsource/poppins/latin-700.css";
+import "@fontsource/ibm-plex-sans/latin-400.css";
+import "@fontsource/ibm-plex-sans/latin-500.css";
+import "@fontsource/ibm-plex-sans/latin-600.css";
 import "./index.css";
 import "leaflet/dist/leaflet.css";
 

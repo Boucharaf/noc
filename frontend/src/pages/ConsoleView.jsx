@@ -7,7 +7,7 @@ import NetworkVitals from "../components/domain/NetworkVitals";
 import SlaAtRisk from "../components/domain/SlaAtRisk";
 import { DashboardSummary } from "../components/domain/FleetInsights";
 import Panel from "../components/ui/Panel";
-import Stat from "../components/ui/Stat";
+import KpiRow from "../components/domain/KpiRow";
 import { QueryBoundary, SkeletonRows } from "../components/ui/States";
 import { PageHeader } from "../components/layout/TopBar";
 import { Segmented } from "../components/ui/Controls";
@@ -78,7 +78,7 @@ export default function ConsoleView() {
   }, [alerts]);
 
   return (
-    <div className="space-y-2.5">
+    <div className="space-y-3.5">
       <PageHeader
         title="Console d'exploitation"
         subtitle="Alertes en cours, file de traitement et état du réseau en direct"
@@ -86,55 +86,27 @@ export default function ConsoleView() {
 
       <DashboardSummary />
 
-      {/* --- Compteurs de tension --- */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-        <Stat
-          label="À traiter"
-          value={num(buckets.todo.length, "0")}
-          color={buckets.todo.length ? "var(--sev-high)" : "var(--state-up)"}
-          hint="non acquittées dans l'outil source"
-        />
-        <Stat
-          label="Sites touchés"
-          value={num(summary.data?.localities_affected)}
-          hint="au moins un équipement en panne"
-        />
-        <Stat
-          label="Critiques"
-          value={num(bySeverity.critical, "0")}
-          color={bySeverity.critical ? "var(--sev-critical)" : "var(--state-up)"}
-          status={bySeverity.critical ? "var(--sev-critical)" : undefined}
-        />
-        <Stat
-          label="Majeurs"
-          value={num(bySeverity.high, "0")}
-          color={bySeverity.high ? "var(--sev-high)" : "var(--ink-2)"}
-        />
-        <Stat
-          label="Plus ancien non acq."
-          value={
-            summary.data?.oldest_unacknowledged_at
-              ? ageFrom(summary.data.oldest_unacknowledged_at)
-              : "—"
-          }
-          color={summary.data?.oldest_unacknowledged_at ? "var(--sev-medium)" : "var(--state-up)"}
-          hint="tension réelle de la salle"
-        />
-        <Stat
-          label="Équipements HS"
-          value={num(nodeStates.data?.down)}
-          color={nodeStates.data?.down ? "var(--state-down)" : "var(--state-up)"}
-          to="/equipements?state=down"
-          hint={`${num(nodeStates.data?.degraded)} perturbés`}
-        />
-      </div>
+      {/* Z2 — les 6 indicateurs clés, communs aux quatre tableaux de bord
+          (AM-02). La tension propre à la file (non acquittées, plus ancienne)
+          est dans l'en-tête de la file de traitement. */}
+      <KpiRow />
 
-      <div className="grid grid-cols-1 xl:grid-cols-4 gap-2.5 items-stretch">
+      <div className="grid grid-cols-1 xl:grid-cols-4 gap-3.5 items-stretch">
         {/* --- File de traitement --- */}
         <div className="xl:col-span-3 min-w-0 flex">
           <Panel
             title="File de traitement"
             accent="var(--sev-critical)"
+            subtitle={[
+              summary.data?.oldest_unacknowledged_at
+                ? `plus ancienne non acquittée : ${ageFrom(summary.data.oldest_unacknowledged_at)}`
+                : "aucune alerte en attente d'acquittement",
+              summary.data?.localities_affected != null
+                ? `${num(summary.data.localities_affected)} site(s) touché(s)`
+                : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
             flush
             className="w-full h-full"
             actions={
@@ -152,8 +124,8 @@ export default function ConsoleView() {
           >
             <div
               style={{
-                minHeight: "calc(100vh - 360px)",
-                maxHeight: "calc(100vh - 260px)",
+                minHeight: "calc(var(--vh) - 360px)",
+                maxHeight: "calc(var(--vh) - 260px)",
                 overflow: "auto",
               }}
             >
@@ -185,7 +157,7 @@ export default function ConsoleView() {
         </div>
 
         {/* --- Contexte --- */}
-        <div className="space-y-2.5 min-w-0">
+        <div className="space-y-3.5 min-w-0">
           {/* En tête : les tickets à traiter avant qu'ils ne passent hors délai. */}
           <SlaAtRisk limit={5} />
 
@@ -215,11 +187,11 @@ export default function ConsoleView() {
                           <span className="block text-[12px] font-medium truncate">
                             {node.node_name}
                           </span>
-                          <span className="block text-[10.5px]" style={{ color: "var(--ink-3)" }}>
+                          <span className="block text-[12px]" style={{ color: "var(--ink-3)" }}>
                             {node.locality}
                           </span>
                         </span>
-                        <span className="num text-[11px]" style={{ color: "var(--sev-critical)" }}>
+                        <span className="num text-[12px]" style={{ color: "var(--sev-critical)" }}>
                           {node.since ? ageFrom(node.since) : "—"}
                         </span>
                       </Link>

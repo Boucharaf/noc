@@ -19,7 +19,8 @@
 # sonde, l'outil, son API et le connecteur du NOC.
 #
 # ~15 Mo de mémoire par équipement.
-FROM alpine:3.20
+# Alpine 3.22 : branche maintenue (3.20 n'a plus de correctifs depuis avril 2026).
+FROM alpine:3.22
 
 RUN apk add --no-cache net-snmp socat tini python3 iptables
 

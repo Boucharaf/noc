@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { useWindowStore } from "../store/ui";
 import { ArrowLeft } from "lucide-react";
 
 import AlertDrawer from "../components/domain/AlertDrawer";
@@ -17,7 +18,6 @@ import {
 } from "../components/ui/Badge";
 import { PageHeader } from "../components/layout/TopBar";
 import { QueryBoundary } from "../components/ui/States";
-import { Segmented } from "../components/ui/Controls";
 import {
   ageFrom,
   bandwidth,
@@ -29,6 +29,8 @@ import {
   METRIC_TYPES,
   metricMeta,
   nodeStateMeta,
+  nodeTypeInfo,
+  nodeTypeLabel,
   thresholdColor,
   toolLabel,
 } from "../lib/vocabulary";
@@ -55,13 +57,6 @@ import {
  * publie pas la mémoire pour ce type de sonde ».
  */
 
-const WINDOWS = [
-  { value: 6, label: "6 h" },
-  { value: 24, label: "24 h" },
-  { value: 72, label: "3 j" },
-  { value: 168, label: "7 j" },
-  { value: 720, label: "30 j" },
-];
 
 // Échelle des jauges pour les mesures sans borne naturelle.
 const GAUGE_MAX = { latency_ms: 400, packet_loss_pct: 10, temp_cpu: 100, if_errors: 10 };
@@ -72,7 +67,8 @@ export default function NodeDetailPage() {
   // Les identifiants de fusion sont textuels (par ex. `netxms:123`).
   const id = nodeId;
 
-  const [hours, setHours] = useState(24);
+  // Période globale de la barre unique (INC-20) : la même fenêtre partout.
+  const hours = useWindowStore((s) => s.hours);
   const [metric, setMetric] = useState(null);
   const [selectedIncident, setSelectedIncident] = useState(null);
 
@@ -129,7 +125,7 @@ export default function NodeDetailPage() {
             <NodeStateBadge state={node.state} />
             {node.maintenance_until && (
               <span
-                className="text-[11px]"
+                className="text-[12px]"
                 style={{ color: "var(--state-maintenance)" }}
               >
                 maintenance jusqu'à {smartTime(node.maintenance_until)}
@@ -138,7 +134,7 @@ export default function NodeDetailPage() {
             {node.state === "maintenance" &&
               node.measured_state &&
               node.measured_state !== "maintenance" && (
-                <span className="text-[11px]" style={{ color: "var(--ink-3)" }}>
+                <span className="text-[12px]" style={{ color: "var(--ink-3)" }}>
                   état mesuré :{" "}
                   <span style={{ color: nodeStateMeta(node.measured_state).color }}>
                     {nodeStateMeta(node.measured_state).label}
@@ -190,7 +186,7 @@ export default function NodeDetailPage() {
               })}
             </div>
             {missing.length > 0 && (
-              <p className="text-[11px] -mt-1 px-0.5" style={{ color: "var(--ink-3)" }}>
+              <p className="text-[12px] -mt-1 px-0.5" style={{ color: "var(--ink-3)" }}>
                 Non publiées par {data.source_tools?.map(toolLabel).join(", ") || "l'outil"} pour cet équipement :{" "}
                 {missing.map((type) => metricMeta(type).label.toLowerCase()).join(", ")}.
               </p>
@@ -208,14 +204,7 @@ export default function NodeDetailPage() {
                       ? `${meta.label}${meta.unit ? ` (${meta.unit})` : ""}`
                       : undefined
                   }
-                  actions={
-                    <Segmented
-                      ariaLabel="Fenêtre"
-                      value={hours}
-                      onChange={setHours}
-                      options={WINDOWS}
-                    />
-                  }
+                  scope={{ period: "window" }}
                 >
                   <>
                     <div className="flex flex-wrap gap-1 mb-2">
@@ -245,8 +234,7 @@ export default function NodeDetailPage() {
                       query={series}
                       compact
                       emptyMessage="Aucune mesure sur cette période"
-                      emptyHint={`Vérifier si ${data.source_tools.map(toolLabel).join(", ") || "une source"} publie cette métrique.`}
-                    >
+                      emptyHint={`Vérifier si ${data.source_tools.map(toolLabel).join(", ") || "une source"} publie cette métrique.`} minHeight={230}>
                       {(points) => (
                         <>
                           <LineChart
@@ -270,7 +258,7 @@ export default function NodeDetailPage() {
                             ]}
                           />
                           <div
-                            className="flex gap-5 mt-2 pt-2 border-t text-[11.5px]"
+                            className="flex gap-5 mt-2 pt-2 border-t text-[12px]"
                             style={{ borderColor: "var(--border)" }}
                           >
                             <SeriesStat
@@ -320,14 +308,22 @@ export default function NodeDetailPage() {
                     {data.ip_address || "—"}
                   </DefRow>
                   <DefRow label="Type">
-                    {data.node_type || "non renseigné"}
+                    {nodeTypeLabel(data.node_type) || "non renseigné"}
                   </DefRow>
+                  {(nodeTypeInfo(data.node_type).model ||
+                    Object.values(data.details ?? {}).find((facts) => facts?.inventory?.model)) && (
+                    <DefRow label="Modèle">
+                      {nodeTypeInfo(data.node_type).model ??
+                        Object.values(data.details ?? {}).find((facts) => facts?.inventory?.model)
+                          ?.inventory.model}
+                    </DefRow>
+                  )}
                   <DefRow label="État">
                     <span style={{ color: stateMeta?.color }}>
                       {stateMeta?.label ?? "inconnu"}
                     </span>
                     <span
-                      className="block text-[10.5px]"
+                      className="block text-[12px]"
                       style={{ color: "var(--ink-3)" }}
                     >
                       {stateMeta?.hint ?? ""}
@@ -356,7 +352,7 @@ export default function NodeDetailPage() {
                   {data.boot_time && (
                     <DefRow label="Démarré le" mono>
                       {dateTime(data.boot_time)}
-                      <span className="ml-1.5 text-[11px]" style={{ color: "var(--ink-3)" }}>
+                      <span className="ml-1.5 text-[12px]" style={{ color: "var(--ink-3)" }}>
                         en service depuis {ageFrom(data.boot_time)}
                       </span>
                     </DefRow>
@@ -389,7 +385,7 @@ export default function NodeDetailPage() {
                     </ul>
                   ) : (
                     <p
-                      className="text-[11.5px]"
+                      className="text-[12px]"
                       style={{ color: "var(--sev-medium)" }}
                     >
                       Aucun outil ne déclare cet équipement. Il est présent dans
@@ -409,7 +405,7 @@ export default function NodeDetailPage() {
                             {window.kind === "change" ? `Changement ${window.ref ?? ""}` : "Maintenance Zabbix"}
                           </span>{" "}
                           — {window.title}
-                          <span className="block text-[11px] num" style={{ color: "var(--ink-3)" }}>
+                          <span className="block text-[12px] num" style={{ color: "var(--ink-3)" }}>
                             {dateTime(window.start)} → {window.end ? dateTime(window.end) : "non bornée"}
                           </span>
                         </li>
@@ -417,7 +413,7 @@ export default function NodeDetailPage() {
                       {(data.work_orders ?? []).map((order) => (
                         <li key={order.key}>
                           <span className="font-medium">Ordre de travail</span> — {order.title}
-                          <span className="block text-[11px]" style={{ color: "var(--ink-3)" }}>
+                          <span className="block text-[12px]" style={{ color: "var(--ink-3)" }}>
                             {order.status === "closed" ? "clôturé" : "ouvert"}
                             {order.ticket?.ref ? ` · ${order.ticket.ref}` : ""}
                             {order.agent || order.team ? ` · ${[order.team, order.agent].filter(Boolean).join(" · ")}` : ""}
@@ -511,7 +507,7 @@ function SourceState({ node, tool }) {
   const state = conflict ?? lastKnown;
   return (
     <span
-      className="ml-auto shrink-0 text-[11px]"
+      className="ml-auto shrink-0 text-[12px]"
       style={{ color: stale ? "var(--sev-medium)" : "var(--ink-3)" }}
       title={
         stale

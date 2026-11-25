@@ -319,11 +319,60 @@ def locality_key(name: str | None) -> str:
     return "".join(c for c in decomposed if not unicodedata.combining(c)).strip().upper()
 
 
+# Orthographe officielle des provinces du Burkina Faso (INC-21) : les
+# référentiels des outils les écrivent souvent en majuscules sans accents
+# (« BALE »), que la seule mise en casse ne sait pas corriger (« Bale »).
+_OFFICIAL_PROVINCES = (
+    "Balé", "Bam", "Banwa", "Bazèga", "Bougouriba", "Boulgou", "Boulkiemdé", "Comoé",
+    "Ganzourgou", "Gnagna", "Gourma", "Houet", "Ioba", "Kadiogo", "Kénédougou",
+    "Komondjari", "Kompienga", "Kossi", "Koulpélogo", "Kouritenga", "Kourwéogo",
+    "Léraba", "Loroum", "Mouhoun", "Nahouri", "Namentenga", "Nayala", "Noumbiel",
+    "Oubritenga", "Oudalan", "Passoré", "Poni", "Sanguié", "Sanmatenga", "Séno",
+    "Sissili", "Soum", "Sourou", "Tapoa", "Tuy", "Yagha", "Yatenga", "Ziro",
+    "Zondoma", "Zoundwéogo",
+)
+_OFFICIAL_BY_KEY = {locality_key(name): name for name in _OFFICIAL_PROVINCES}
+
+
 def display_locality(name: str | None) -> str | None:
-    """Nom de région ou de province pour l'affichage : « KUILSÉ » -> « Kuilsé »."""
+    """Nom de région ou de province pour l'affichage : « KUILSÉ » -> « Kuilsé »,
+    « BALE » -> « Balé » (orthographe officielle quand elle est connue)."""
     if not name or not str(name).strip():
         return None
+    official = _OFFICIAL_BY_KEY.get(locality_key(name))
+    if official:
+        return official
     return " ".join(
         "-".join(part.capitalize() for part in word.split("-"))
         for word in str(name).strip().split()
     )
+
+
+def outages_from_events(ref: str, events, tag: str = "DOWN") -> list[dict]:
+    """Pannes d'un objet à partir de ses changements d'état CONFIRMÉS.
+
+    `events` : [(date, en_panne)] triés. Une panne s'ouvre au premier
+    passage « en panne » et se ferme au premier événement qui ne l'est pas.
+    Rend [{object_id, start, end, tag}] : `end` None = panne en cours ;
+    `start` None = fin d'une panne commencée avant les événements lus (la
+    synchronisation clôt alors la panne restée ouverte). Commune à Centreon,
+    Zabbix et Nagios (collector/downtime.py).
+    """
+    records: list[dict] = []
+    opened = None
+    first = True
+    for at, down in events:
+        if at is None:
+            continue
+        if down:
+            if opened is None:
+                opened = at
+        elif opened is not None:
+            records.append({"object_id": ref, "start": opened, "end": at, "tag": tag})
+            opened = None
+        elif first:
+            records.append({"object_id": ref, "start": None, "end": at, "tag": tag})
+        first = False
+    if opened is not None:
+        records.append({"object_id": ref, "start": opened, "end": None, "tag": tag})
+    return records

@@ -24,19 +24,74 @@ from app.models import User
 _DUMMY_PASSWORD_HASH = bcrypt.hashpw(uuid.uuid4().hex.encode(), bcrypt.gensalt()).decode()
 
 
+def _bcrypt_input(password: str) -> bytes:
+    """Les 72 premiers octets du mot de passe : la limite de bcrypt.
+
+    bcrypt 4 les tronquait sans le dire ; bcrypt 5 lève une erreur au-delà.
+    Tronquer ici garde le comportement d'avant : les empreintes déjà en base
+    restent valables, et un mot de passe long (jusqu'à 256 caractères
+    acceptés) ne produit pas d'erreur 500.
+    """
+    return password.encode()[:72]
+
+
 def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    return bcrypt.hashpw(_bcrypt_input(password), bcrypt.gensalt()).decode()
 
 
 def verify_password(password: str, password_hash: str | None) -> bool:
     if not password_hash:
         return False
     try:
-        return bcrypt.checkpw(password.encode(), password_hash.encode())
+        return bcrypt.checkpw(_bcrypt_input(password), password_hash.encode())
     except ValueError:
         # Empreinte stockée dans un format non bcrypt (compte importé,
         # colonne remplie à la main) : refus, jamais d'exception 500.
         return False
+
+
+DEVICE_COOKIE_NAME = "noc_device"
+
+
+def _device_signature(device_id: str, issued: int) -> str:
+    # Même garde que hash_pin : sans secret, la signature ne protège rien.
+    if len(JWT_SECRET) < 32:
+        raise RuntimeError("SECRET_KEY absente ou trop courte : poste reconnu impossible.")
+    return hmac.new(
+        JWT_SECRET.encode(), f"device:{device_id}:{issued}".encode(), hashlib.sha256
+    ).hexdigest()
+
+
+def create_device_token(now: int | None = None) -> str:
+    """Jeton de poste reconnu : « identifiant.émission.signature ».
+
+    Signé avec SECRET_KEY : il ne peut être ni fabriqué ni prolongé côté
+    navigateur. Il ne désigne aucun compte — il atteste seulement qu'un mot
+    de passe valide a été saisi sur ce navigateur.
+    """
+    import secrets
+    import time
+
+    device_id = secrets.token_urlsafe(16)
+    issued = int(now if now is not None else time.time())
+    return f"{device_id}.{issued}.{_device_signature(device_id, issued)}"
+
+
+def is_known_device(token: str | None, max_age_days: int, now: int | None = None) -> bool:
+    """Vrai si le jeton est intact (signature) et pas trop ancien."""
+    import time
+
+    if not token or token.count(".") != 2 or len(JWT_SECRET) < 32:
+        return False
+    device_id, issued_text, signature = token.split(".")
+    try:
+        issued = int(issued_text)
+    except ValueError:
+        return False
+    if not hmac.compare_digest(signature, _device_signature(device_id, issued)):
+        return False
+    current = int(now if now is not None else time.time())
+    return 0 <= current - issued <= max_age_days * 86400
 
 
 def hash_pin(pin: str) -> str:
@@ -166,24 +221,23 @@ def authenticate_with_password(db: Session, username: str, password: str) -> Use
     return user
 
 
-def authenticate_with_pin(db: Session, pin: str) -> User:
+def authenticate_with_pin(db: Session, username: str, pin: str) -> User:
+    """Le PIN est vérifié pour le compte DÉSIGNÉ (A02). Même erreur que le
+    compte soit inconnu, sans PIN ou que le code soit faux."""
     user = (
         db.query(User)
-        .filter(User.pin_hash == hash_pin(pin), User.is_active.is_(True))
+        .filter(User.username == username.strip(), User.is_active.is_(True))
         .first()
     )
-    if user is None:
-        user = (
-            db.query(User)
-            .filter(User.pin_hash == _legacy_pin_hash(pin), User.is_active.is_(True))
-            .first()
-        )
-        if user is not None:
-            # Migration au fil de l'eau : l'empreinte non salée disparaît à la
-            # première connexion réussie, enregistrée par _touch_last_login.
-            user.pin_hash = hash_pin(pin)
-    if user is None:
-        raise HTTPException(status_code=401, detail="Code PIN invalide.")
+    stored = (user.pin_hash if user is not None else None) or ""
+    valid = hmac.compare_digest(stored, hash_pin(pin))
+    legacy = hmac.compare_digest(stored, _legacy_pin_hash(pin))
+    if user is None or not (valid or legacy):
+        raise HTTPException(status_code=401, detail="Identifiant ou code PIN invalide.")
+    if legacy:
+        # Migration au fil de l'eau : l'empreinte non salée disparaît à la
+        # première connexion réussie, enregistrée par _touch_last_login.
+        user.pin_hash = hash_pin(pin)
     _touch_last_login(db, user)
     return user
 
@@ -193,11 +247,38 @@ def _touch_last_login(db: Session, user: User) -> None:
     db.commit()
 
 
-def set_password(db: Session, user_id: int, new_password: str) -> User:
+def find_for_password_reset(db: Session, identifier: str) -> User | None:
+    """Compte ACTIF désigné par son identifiant ou son adresse électronique
+    (sans tenir compte de la casse), ou None. Une adresse partagée par
+    plusieurs comptes ne désigne personne : on ne choisit pas au hasard."""
+    from sqlalchemy import func
+
+    needle = identifier.strip().lower()
+    if not needle:
+        return None
+    by_name = (
+        db.query(User)
+        .filter(func.lower(User.username) == needle, User.is_active.is_(True))
+        .first()
+    )
+    if by_name is not None:
+        return by_name
+    matches = (
+        db.query(User)
+        .filter(func.lower(User.email) == needle, User.is_active.is_(True))
+        .limit(2)
+        .all()
+    )
+    return matches[0] if len(matches) == 1 else None
+
+
+def set_password(db: Session, user_id: int, new_password: str,
+                 provisional: bool = False) -> User:
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
     user.password_hash = hash_password(new_password)
+    user.must_change_password = provisional
     db.commit()
     db.refresh(user)
     return user

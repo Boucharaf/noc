@@ -22,7 +22,7 @@ export default function SlaBreakdown({ query, groupBy, onSelect, maxHeight = 360
         <span>
           <span className="font-medium">{row.name}</span>
           {groupBy === "node" && row.site && (
-            <span className="block text-[11px]" style={{ color: "var(--ink-3)" }}>
+            <span className="block text-[12px]" style={{ color: "var(--ink-3)" }}>
               {[row.site, row.province, row.region].filter(Boolean).join(" · ")}
             </span>
           )}
@@ -49,7 +49,7 @@ export default function SlaBreakdown({ query, groupBy, onSelect, maxHeight = 360
           <div className="flex-1">
             <Meter value={r.compliance_pct} color={complianceColor(r.compliance_pct)} />
           </div>
-          <span className="num text-[11.5px]" style={{ color: complianceColor(r.compliance_pct), minWidth: 46 }}>
+          <span className="num text-[12px]" style={{ color: complianceColor(r.compliance_pct), minWidth: 46 }}>
             {pct(r.compliance_pct, 1)}
           </span>
         </div>

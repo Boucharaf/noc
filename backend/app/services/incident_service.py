@@ -10,7 +10,15 @@ techniques qui l'expliquent.
 
 LES SLA SE MESURENT SUR LES INCIDENTS. Délai de prise en charge (TTO :
 assignation - ouverture) et de résolution (TTR : résolution - ouverture),
-comparés aux objectifs par gravité (`ops_sla_target`). Les tickets résolus
+comparés aux objectifs par gravité (`ops_sla_target`).
+
+ITOP FAIT FOI QUAND IL MESURE. Si l'instance rend ses compteurs SLA
+(sla_ttr_passed, chronomètres tto/ttr, échéances — integrations/itop.py),
+l'état d'un ticket est CELUI D'ITOP : ses chronomètres s'arrêtent pendant
+l'attente du demandeur et hors des heures de couverture, contre les seuils
+(SLT) du contrat qui s'applique. Le calcul du NOC en temps continu ne sert
+plus que pour les tickets qu'aucun seuil iTop ne couvre. Chaque état dit sur
+quoi il repose (`sla_source` : « itop » ou « noc »). Les tickets résolus
 restent chez iTop et y sont lus à la demande (`fetch_incident_history`),
 mis en cache quelques minutes, jamais recopiés.
 """
@@ -90,14 +98,59 @@ def _minutes(start, end) -> float | None:
     return round((end - start).total_seconds() / 60.0, 1)
 
 
-def _sla_state(severity: str, opened, assigned, resolved, goals: dict, now: datetime) -> dict:
+class Goals(dict):
+    """Objectifs du NOC par gravité (ops_sla_target), avec les seuils du
+    contrat iTop (`contract` : {gravité: {"tto": min, "ttr": min}})."""
+
+    contract: dict = {}
+
+
+async def _goals(db: Session) -> Goals:
+    goals = Goals(sla_service.targets(db))
+    try:
+        goals.contract = (await contract_targets()).get("by_severity") or {}
+    except Exception as exc:  # noqa: BLE001 — sans SLT, les objectifs du NOC suffisent
+        logger.info("Seuils SLA iTop non lus : %s", exc)
+        goals.contract = {}
+    return goals
+
+
+def _itop_status(facts: dict, metric: str, done: bool, now: datetime,
+                 covered: bool) -> tuple[str, float | None] | None:
+    """État d'un délai (tto ou ttr) selon les compteurs d'iTop, ou None si
+    iTop ne le mesure pas pour ce ticket (aucun seuil ne s'applique)."""
+    passed = facts.get(f"{metric}_passed")
+    deadline = _parse(facts.get(f"{metric}_deadline"))
+    if passed is None and deadline is None:
+        return None
+    if not (covered or deadline is not None or passed):
+        return None
+    if passed:
+        return "breached", None
+    if done:
+        return "met", None
+    if deadline is not None and now > deadline:
+        # iTop lève le drapeau à son passage de tâche planifiée : l'échéance
+        # dépassée suffit.
+        return "breached", round((deadline - now).total_seconds() / 60, 1)
+    remaining = round((deadline - now).total_seconds() / 60, 1) if deadline else None
+    return "running", remaining
+
+
+def _sla_state(severity: str, opened, assigned, resolved, goals: dict, now: datetime,
+               itop: dict | None = None) -> dict:
     """État d'engagement d'un incident.
 
     Un incident encore ouvert dont l'objectif est DÉJÀ dépassé compte comme
     non tenu : attendre sa clôture pour le compter masquerait précisément
     les dépassements en cours.
+
+    `itop` : compteurs SLA du ticket lus dans iTop. Quand iTop mesure le
+    délai, son verdict et son temps compté (hors attente, hors heures de
+    couverture) remplacent le calcul du NOC.
     """
     goal = goals.get(severity)
+    contract = (getattr(goals, "contract", None) or {}).get(severity) or {}
     tto = _minutes(opened, assigned)
     ttr = _minutes(opened, resolved)
     elapsed = _minutes(opened, resolved or now)
@@ -108,7 +161,36 @@ def _sla_state(severity: str, opened, assigned, resolved, goals: dict, now: date
         "tto_target_minutes": goal.tta_target_minutes if goal else None,
         "ttr_target_minutes": goal.ttr_target_minutes if goal else None,
         "ttr_status": "no_target",
+        "sla_source": "noc",
     }
+    facts = itop or {}
+    verdict = _itop_status(facts, "ttr", resolved is not None, now, "ttr" in contract)
+    if verdict is not None:
+        status, remaining = verdict
+        result["sla_source"] = "itop"
+        result["ttr_status"] = status
+        if contract.get("ttr") is not None:
+            result["ttr_target_minutes"] = contract["ttr"]
+        if remaining is not None:
+            result["ttr_remaining_minutes"] = remaining
+        # Temps COMPTÉ par iTop une fois le ticket résolu ; le temps écoulé
+        # reste publié à côté (wall).
+        spent = facts.get("ttr_spent_s")
+        if resolved is not None and spent is not None:
+            result["ttr_wall_minutes"] = ttr
+            result["ttr_minutes"] = round(spent / 60, 1)
+        if facts.get("ttr_over_s"):
+            result["ttr_overrun_minutes"] = round(facts["ttr_over_s"] / 60, 1)
+        tto_verdict = _itop_status(facts, "tto", assigned is not None, now, "tto" in contract)
+        if tto_verdict is not None:
+            result["tto_status"] = tto_verdict[0]
+            if contract.get("tto") is not None:
+                result["tto_target_minutes"] = contract["tto"]
+            spent = facts.get("tto_spent_s")
+            if assigned is not None and spent is not None:
+                result["tto_wall_minutes"] = tto
+                result["tto_minutes"] = round(spent / 60, 1)
+        return result
     if goal is None or goal.ttr_target_minutes is None or elapsed is None:
         return result
     if resolved is not None:
@@ -173,6 +255,7 @@ def _incident_row(record: dict, node: dict | None, alerts: list[dict], index,
             _parse(details.get("resolution_date")),
             goals,
             now,
+            details.get("itop_sla"),
         ),
     }
 
@@ -187,6 +270,8 @@ async def list_incidents(
     status: str | None = None,
     limit: int = 500,
     offset: int = 0,
+    organisation: str | None = None,
+    node_type: str | None = None,
 ) -> dict:
     """Incidents iTop ouverts, dans le périmètre.
 
@@ -194,12 +279,8 @@ async def list_incidents(
     est découpée en page (`offset`, `limit`).
     """
     nodes, alerts, incidents, index = await geo_service.snapshot(db)
-    scoped_ids = (
-        {n["id"] for n in geo_service.scope_nodes(nodes, region, province, site)}
-        if (region or province or site)
-        else None
-    )
-    goals = sla_service.targets(db)
+    scoped_ids = geo_service.scope_ids(nodes, region, province, site, organisation, node_type)
+    goals = await _goals(db)
     now = datetime.now(timezone.utc)
     needle = (search or "").strip().casefold()
 
@@ -240,6 +321,13 @@ async def list_incidents(
     rank = {sev: i for i, sev in enumerate(SEVERITIES)}
     rows.sort(key=lambda r: r["opened_at"] or "", reverse=True)
     rows.sort(key=lambda r: rank.get(r["severity"], 99))
+    itop = await live_service.source_stream("itop", "alerts")
+    # INC-38 : un dépassement de délai n'est affirmé que sur des données
+    # iTop À JOUR et pour des tickets qui ont un objectif. Sinon l'écran dit
+    # « non évaluable » au lieu d'annoncer « 228 hors délai ».
+    sla_evaluated = sum(1 for r in rows if r["sla"]["ttr_status"] != "no_target")
+    itop_fresh = bool(itop.get("collected_at")) and not itop.get("stale")
+    located = len(incidents) - network_unlocated
     return {
         "incidents": rows[offset:offset + limit],
         "total": len(rows),
@@ -256,6 +344,10 @@ async def list_incidents(
             1 for r in rows if r["severity"] == "critical" and not r["agent"]
         ),
         "sla_breached": sum(1 for r in rows if r["sla"]["ttr_status"] == "breached"),
+        "sla_evaluated": sla_evaluated,
+        "sla_evaluable": itop_fresh and sla_evaluated > 0,
+        "itop_collected_at": itop.get("collected_at"),
+        "itop_stale": bool(itop.get("stale")) or not itop.get("collected_at"),
         "unlocated": sum(1 for r in rows if not r["node_key"]),
         # Formes de la file, sur TOUS les tickets filtrés (pas la seule page).
         "age_buckets": [
@@ -284,6 +376,12 @@ async def list_incidents(
         "scoped": scoped_ids is not None,
         "network_total": len(incidents),
         "network_unlocated": network_unlocated,
+        # INC-11 / AM-19 : qualité de rattachement ticket → équipement (CI).
+        # Les répartitions par région se lisent sur les tickets LOCALISABLES.
+        "network_located": located,
+        "attachment_rate_pct": (
+            round(100.0 * located / len(incidents), 1) if incidents else None
+        ),
         "network_by_region": sorted(
             ({"region": name, "count": count} for name, count in network_by_region.items()),
             key=lambda item: (item["region"] == geo_service.UNKNOWN["region"], -item["count"]),
@@ -306,7 +404,7 @@ async def get_incident(db: Session, key: str) -> dict | None:
     if record is None:
         return None
     node = index.by_id.get(record.get("node_key") or "")
-    row = _incident_row(record, node, alerts, index, sla_service.targets(db),
+    row = _incident_row(record, node, alerts, index, await _goals(db),
                         datetime.now(timezone.utc))
     supervised = [node, *index.namesakes(node)] if node else []
     # Événement Zabbix à l'origine du ticket (champ ITOP_ZBX_EVENT_FIELD) :
@@ -363,6 +461,8 @@ async def at_risk(
     region: str | None = None,
     province: str | None = None,
     site: str | None = None,
+    organisation: str | None = None,
+    node_type: str | None = None,
 ) -> list[dict]:
     """Incidents iTop OUVERTS qui vont manquer leur objectif de résolution,
     ou l'ont déjà manqué — le seul indicateur SLA qui laisse encore agir.
@@ -370,14 +470,21 @@ async def at_risk(
     Seuil à 25 % du budget restant : assez tôt pour agir, assez tard pour ne
     pas noyer l'écran sous les tickets qui viennent d'être ouverts.
     """
-    listing = await list_incidents(db, region, province, site, limit=5000)
+    listing = await list_incidents(
+        db, region, province, site, limit=5000,
+        organisation=organisation, node_type=node_type,
+    )
     rows = []
     for row in listing["incidents"]:
         sla = row["sla"]
         target = sla.get("ttr_target_minutes")
         if not target or sla["ttr_status"] not in ("running", "breached"):
             continue
-        remaining = round(target - (sla["elapsed_minutes"] or 0), 1)
+        remaining = sla.get("ttr_remaining_minutes")
+        if remaining is None:
+            if sla.get("sla_source") == "itop" and sla["ttr_status"] == "running":
+                continue   # iTop mesure, mais sans échéance lisible
+            remaining = round(target - (sla["elapsed_minutes"] or 0), 1)
         if remaining > target * 0.25:
             continue
         rows.append(
@@ -513,6 +620,8 @@ async def incident_history(
     status: str | None = None,
     offset: int = 0,
     limit: int = 50,
+    organisation: str | None = None,
+    node_type: str | None = None,
 ) -> dict:
     """Historique des tickets iTop ouverts sur la période, clos ou non,
     du plus récent au plus ancien, découpé en pages.
@@ -524,12 +633,8 @@ async def incident_history(
     tickets = await _history(start, end)
 
     nodes, _alerts, _incidents, index = await geo_service.snapshot(db)
-    scoped_ids = (
-        {n["id"] for n in geo_service.scope_nodes(nodes, region, province, site)}
-        if (region or province or site)
-        else None
-    )
-    goals = sla_service.targets(db)
+    scoped_ids = geo_service.scope_ids(nodes, region, province, site, organisation, node_type)
+    goals = await _goals(db)
     needle = (search or "").strip().casefold()
 
     rows = []
@@ -563,7 +668,8 @@ async def incident_history(
             "province": (node or {}).get("province"),
             "region": (node or {}).get("region"),
             "sla": _sla_state(
-                sev, opened, _parse(ticket.get("assignment_date")), resolved, goals, end
+                sev, opened, _parse(ticket.get("assignment_date")), resolved, goals, end,
+                ticket.get("itop_sla"),
             ),
         }
         if needle:
@@ -617,6 +723,7 @@ def _empty_group() -> dict:
         "running": 0,
         "tto": [],
         "ttr": [],
+        "sources": Counter(),
     }
 
 
@@ -629,6 +736,8 @@ async def sla_by_group(
     region: str | None = None,
     province: str | None = None,
     site: str | None = None,
+    organisation: str | None = None,
+    node_type: str | None = None,
 ) -> dict:
     """Respect des engagements sur les incidents iTop, ventilé par région,
     province, site ou équipement.
@@ -645,12 +754,8 @@ async def sla_by_group(
     tickets = await _history(start, end)
 
     nodes, _alerts, _incidents, index = await geo_service.snapshot(db)
-    scoped_ids = (
-        {n["id"] for n in geo_service.scope_nodes(nodes, region, province, site)}
-        if (region or province or site)
-        else None
-    )
-    goals = sla_service.targets(db)
+    scoped_ids = geo_service.scope_ids(nodes, region, province, site, organisation, node_type)
+    goals = await _goals(db)
     now = datetime.now(timezone.utc)
 
     groups: dict[str, dict] = defaultdict(_empty_group)
@@ -676,6 +781,7 @@ async def sla_by_group(
             _parse(ticket.get("resolution_date")),
             goals,
             now,
+            ticket.get("itop_sla"),
         )
         if group_by == "node":
             key = node["id"] if node else "__none__"
@@ -714,6 +820,8 @@ async def sla_by_group(
                 bucket["breached"] += 1
             if state["ttr_status"] == "running":
                 bucket["running"] += 1
+            if state["ttr_status"] != "no_target":
+                bucket["sources"][state.get("sla_source", "noc")] += 1
             if state["tto_minutes"] is not None:
                 bucket["tto"].append(state["tto_minutes"])
             if state["ttr_minutes"] is not None:
@@ -744,6 +852,9 @@ async def sla_by_group(
             "ttr_count": len(bucket["ttr"]),
             "median_tto_minutes": _median(bucket["tto"]),
             "median_ttr_minutes": _median(bucket["ttr"]),
+            # Sur quoi repose le respect : compteurs iTop (contrat) ou calcul
+            # du NOC en temps continu (tickets sans seuil iTop).
+            "sla_basis": {"itop": bucket["sources"]["itop"], "noc": bucket["sources"]["noc"]},
         }
 
     rows = [
@@ -803,6 +914,8 @@ async def incident_kpis(
     site: str | None = None,
     start_at: datetime | None = None,
     end_at: datetime | None = None,
+    organisation: str | None = None,
+    node_type: str | None = None,
 ) -> dict:
     """Volumes, résolution, récurrence, causes et organisations des tickets
     iTop ouverts sur la période — les indicateurs « incidents » de la grille
@@ -818,12 +931,8 @@ async def incident_kpis(
     tickets = await _history(start, end)
 
     nodes, _alerts, _incidents, index = await geo_service.snapshot(db)
-    scoped_ids = (
-        {n["id"] for n in geo_service.scope_nodes(nodes, region, province, site)}
-        if (region or province or site)
-        else None
-    )
-    goals = sla_service.targets(db)
+    scoped_ids = geo_service.scope_ids(nodes, region, province, site, organisation, node_type)
+    goals = await _goals(db)
 
     breaches: list[dict] = []
     total = resolved = reopened = 0
@@ -854,9 +963,11 @@ async def incident_kpis(
             # État à l'instant, comme sla_by_group : un ticket du mois dernier
             # encore ouvert aujourd'hui a continué de dépasser.
             now,
+            ticket.get("itop_sla"),
         )
         if state["ttr_status"] == "breached":
             elapsed = state["ttr_minutes"] or state["elapsed_minutes"]
+            target_minutes = state["ttr_target_minutes"]
             breaches.append(
                 {
                     "ref": ticket.get("ref"),
@@ -867,8 +978,12 @@ async def incident_kpis(
                     # Encore ouvert : le dépassement continue de courir.
                     "open": not ticket.get("resolution_date"),
                     "ttr_minutes": elapsed,
-                    "target_minutes": state["ttr_target_minutes"],
-                    "overrun_minutes": round(elapsed - state["ttr_target_minutes"], 1),
+                    "target_minutes": target_minutes,
+                    "overrun_minutes": state.get("ttr_overrun_minutes") or (
+                        round(elapsed - target_minutes, 1)
+                        if elapsed is not None and target_minutes is not None else None
+                    ),
+                    "sla_source": state["sla_source"],
                 }
             )
 
@@ -927,7 +1042,7 @@ async def incident_kpis(
         key=lambda item: (-item["incidents"], -item["critical"], item["name"].lower()),
     )
     causes_total = sum(causes.values())
-    breaches.sort(key=lambda row: -row["overrun_minutes"])
+    breaches.sort(key=lambda row: -(row["overrun_minutes"] or 0))
     return {
         "days": max(1, (end - start).days),
         "start_at": start.isoformat(),

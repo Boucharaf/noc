@@ -58,6 +58,7 @@ def _session_still_valid(payload: dict) -> bool:
         )
         return (
             user is not None
+            and not user.must_change_password
             and user.role == payload.get("role")
             and not session_store.is_access_token_revoked(user.id, payload.get("iat"))
         )
@@ -90,6 +91,8 @@ async def alerts_stream(websocket: WebSocket):
 
     await hub.add(websocket)
     try:
+        # Le client n'affiche « temps réel » qu'une fois authentifié.
+        await websocket.send_text('{"type":"ready"}')
         while True:
             # Vérifié à chaque tour et non au seul battement : un client qui
             # enverrait des trames sans arrêt repousserait sinon indéfiniment

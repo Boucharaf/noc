@@ -35,6 +35,9 @@ ACTIONS = {
     "auth.pin_login": "Connexion par PIN",
     "auth.pin_login_failed": "Connexion par PIN refusée",
     "auth.password_changed": "Mot de passe changé",
+    "auth.password_reset_requested": "Réinitialisation du mot de passe demandée",
+    "auth.password_reset_completed": "Mot de passe réinitialisé par courriel",
+    "auth.password_reset_failed": "Lien de réinitialisation refusé",
     "auth.profile_updated": "Profil modifié",
     "auth.sessions_revoked": "Sessions coupées",
     "user.created": "Compte créé",
@@ -43,6 +46,8 @@ ACTIONS = {
     "user.password_reset": "Mot de passe réinitialisé",
     "user.pin_reset": "PIN réinitialisé",
     "sla.target_updated": "Objectif SLA modifié",
+    "report.frozen": "Rapport mensuel figé",
+    "retention.purged": "Purge selon la durée de conservation",
 }
 
 

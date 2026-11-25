@@ -25,13 +25,17 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# libpq pour psycopg2 ; curl pour le HEALTHCHECK.
+# libpq pour psycopg2 ; curl pour le HEALTHCHECK ; Liberation pour les PDF. `upgrade` : les correctifs
+# de sécurité Debian parus depuis la publication de l'image de base.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libpq5 curl \
+ && apt-get upgrade -y \
+ && apt-get install -y --no-install-recommends libpq5 curl fonts-liberation \
  && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# pip d'abord : celui de l'image de base traîne des avis de sécurité.
+RUN pip install --no-cache-dir --upgrade "pip>=26.2" \
+ && pip install --no-cache-dir -r requirements.txt
 
 COPY backend/app ./app
 COPY backend/sql ./sql

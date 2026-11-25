@@ -12,9 +12,18 @@ import { QueryBoundary, SkeletonRows } from "../components/ui/States";
 import { SEVERITIES, TOOL_LABEL, severityMeta, toolLabel } from "../lib/vocabulary";
 import { incidents as incidentsApi } from "../api/noc";
 import { errorMessage } from "../api/client";
-import { num } from "../lib/format";
+import { dateTime, num } from "../lib/format";
 import { saveBlob } from "../lib/download";
-import { useAlertAges, useAlertsByTool, useIncidents } from "../hooks/queries";
+import {
+  useAlertAges,
+  useAlertsByTool,
+  useFlapping,
+  useHourDistribution,
+  useIncidents,
+  useOverview,
+} from "../hooks/queries";
+import { HourHeatmap } from "../components/charts";
+import { useWindowStore, windowLabel } from "../store/ui";
 
 /**
  * Alertes des OUTILS de supervision — Zabbix, Centreon, NetXMS, Nagios, NSP.
@@ -35,6 +44,23 @@ import { useAlertAges, useAlertsByTool, useIncidents } from "../hooks/queries";
 
 const PAGE_SIZE = 50;
 
+/** Une ligne par équipement : l'alerte la plus grave (la liste est déjà
+ * triée par gravité), avec le nombre d'alertes du même équipement. */
+function groupByNode(rows) {
+  const byNode = new Map();
+  for (const row of rows ?? []) {
+    const key = row.node_id ?? `__${row.id}`;
+    const current = byNode.get(key);
+    if (current) current.grouped_count += 1;
+    else byNode.set(key, { ...row, grouped_count: 1 });
+  }
+  return [...byNode.values()].map((row) =>
+    row.grouped_count > 1
+      ? { ...row, description: `${row.description ?? row.message ?? ""} (+${row.grouped_count - 1} autre(s) alerte(s) de cet équipement)` }
+      : row,
+  );
+}
+
 export default function AlertsPage() {
   const [params, setParams] = useSearchParams();
   const [exportError, setExportError] = useState(null);
@@ -42,6 +68,19 @@ export default function AlertsPage() {
 
   const ages = useAlertAges();
   const byTool = useAlertsByTool();
+  const overview = useOverview();
+  const obsolete = overview.data?.alerts_obsolete ?? 0;
+  // INC-25 : heure d'apparition, sur la seule période choisie.
+  const hours = useWindowStore((s) => s.hours);
+  const hourly = useHourDistribution(hours);
+  const flapping = useFlapping();
+  const unstable = flapping.data?.available ? flapping.data.rows : [];
+  // AM-08 : regroupement des alertes par équipement (une ligne par équipement,
+  // la plus grave, avec le nombre d'alertes regroupées).
+  const grouped = params.get("regrouper") === "1";
+  const hourRows = hourly.data ?? [];
+  const hourTotal = hourRows.reduce((sum, row) => sum + row.count, 0);
+  const offHours = hourRows.filter((row) => row.off_hours).reduce((sum, row) => sum + row.count, 0);
 
   const selectedId = params.get("id") || null;
   const page = Number(params.get("page") ?? 1);
@@ -71,6 +110,7 @@ export default function AlertsPage() {
       node_code: params.get("q") || undefined,
       source_tool: params.get("source_tool") || undefined,
       exclude_itsm: true,
+      confirmed: params.get("confirmed") || undefined,
       date_from: params.get("from") || undefined,
       date_to: params.get("to") || undefined,
     };
@@ -78,8 +118,11 @@ export default function AlertsPage() {
   }, [params, page]);
 
   const query = useIncidents(filters);
+  const datesInverted = Boolean(
+    filters.date_from && filters.date_to && filters.date_from > filters.date_to,
+  );
 
-  const activeFilterCount = ["severity", "acknowledged", "q", "source_tool", "from", "to"].filter(
+  const activeFilterCount = ["severity", "acknowledged", "q", "source_tool", "confirmed", "from", "to"].filter(
     (key) => params.get(key),
   ).length;
 
@@ -91,7 +134,7 @@ export default function AlertsPage() {
       const blob = await incidentsApi.exportCsv({ ...exportFilters, limit: 5000 });
       await saveBlob(blob, `alertes-${new Date().toISOString().slice(0, 10)}.csv`);
     } catch (error) {
-      setExportError(error.message || errorMessage(error));
+      setExportError(errorMessage(error));
     } finally {
       setExporting(false);
     }
@@ -126,6 +169,46 @@ export default function AlertsPage() {
         </Notice>
       )}
 
+      {/* AM-08 : équipements qui oscillent — une seule ligne au lieu d'une
+          alerte à chaque bascule. */}
+      {unstable.length > 0 && (
+        <Notice tone="warning">
+          <strong>{num(unstable.length)}</strong> équipement(s) instable(s) (≥{" "}
+          {flapping.data.threshold} changements d'état en {flapping.data.hours} h) :{" "}
+          {unstable
+            .slice(0, 5)
+            .map((row) => `${row.name} (${row.changes})`)
+            .join(", ")}
+          {unstable.length > 5 ? "…" : ""}. Leurs alertes répétées sont du bruit : traitez la cause
+          (lien, alimentation) plutôt que chaque alerte.
+        </Notice>
+      )}
+
+      {/* Source arrêtée (dump, export) : ses alertes non corrigées restent
+          listées, mais aucun compteur ne les prend pour actuelles. */}
+      {(overview.data?.alerts_unconfirmed ?? 0) > 0 && (
+        <Notice tone="info">
+          <strong>{num(overview.data.alerts_unconfirmed)}</strong> alerte(s) non corrigée(s) d'une
+          source arrêtée (
+          {Object.entries(overview.data.frozen_sources ?? {})
+            .map(([tool, until]) => `${toolLabel(tool)}, dernière donnée le ${dateTime(until)}`)
+            .join(" ; ")}
+          ) : listées après les autres, hors des compteurs d'alertes actives.
+        </Notice>
+      )}
+
+      {/* INC-13 : les alertes oubliées faussent HS, disponibilité et criticité. */}
+      {obsolete > 0 && (
+        <Notice tone="warning">
+          <strong>{num(obsolete)}</strong> alerte(s) active(s) depuis plus de 30 jours sans
+          acquittement{overview.data?.alerts_obsolete_critical
+            ? `, dont ${num(overview.data.alerts_obsolete_critical)} critique(s)`
+            : ""}{" "}
+          — marquées « À revoir ». Équipement retiré ou jamais remis en service ? Acquittez-les
+          avec un motif ou clôturez-les dans l'outil source.
+        </Notice>
+      )}
+
       <div className="grid grid-cols-12 gap-2 items-start">
         <Panel
           title="Depuis combien de temps durent les alertes en cours ?"
@@ -149,7 +232,7 @@ export default function AlertsPage() {
                       <div className="flex items-baseline gap-2 text-[12.5px]">
                         <span className="flex-1">{bucket.label}</span>
                         {bucket.critical > 0 && (
-                          <span className="text-[11px]" style={{ color: "var(--sev-critical)" }}>
+                          <span className="text-[12px]" style={{ color: "var(--sev-critical)" }}>
                             {num(bucket.critical)} critique(s)
                           </span>
                         )}
@@ -172,6 +255,27 @@ export default function AlertsPage() {
                 </ul>
               );
             }}
+          </QueryBoundary>
+        </Panel>
+        <Panel
+          title="Heure d'apparition des alertes"
+          scope={{ period: "window" }}
+          subtitle={
+            hourTotal
+              ? `${num(hourTotal)} alerte(s) apparue(s) sur ${windowLabel(hours)} · ${Math.round(
+                  (100 * offHours) / hourTotal,
+                )} % hors heures ouvrées · survol : nombre par heure (GMT)`
+              : `aucune alerte active apparue sur ${windowLabel(hours)}`
+          }
+          className="col-span-12"
+        >
+          <QueryBoundary
+            query={hourly}
+            compact
+            empty={() => hourTotal === 0}
+            emptyMessage="Aucune alerte apparue sur la période"
+          >
+            {() => <HourHeatmap data={hourRows} />}
           </QueryBoundary>
         </Panel>
         <Panel title="Par outil" subtitle="alertes actives · clic pour filtrer" className="col-span-12 xl:col-span-4">
@@ -220,11 +324,13 @@ export default function AlertsPage() {
         <div className="p-2 border-b" style={{ borderColor: "var(--border)" }}>
           <Toolbar
             right={
-              <span className="text-[11.5px]" style={{ color: "var(--ink-3)" }}>
+              <span className="text-[12px]" style={{ color: "var(--ink-3)" }}>
                 <span className="num" style={{ color: "var(--ink-2)" }}>
-                  {num(query.data?.total, "0")}
+                  {query.isPending ? "Chargement…" : query.isError ? "—" : num(query.data?.total, "0")}
                 </span>{" "}
-                résultat{(query.data?.total ?? 0) > 1 ? "s" : ""}
+                {query.isPending || query.isError
+                  ? ""
+                  : `résultat${(query.data?.total ?? 0) > 1 ? "s" : ""}`}
               </span>
             }
           >
@@ -258,6 +364,17 @@ export default function AlertsPage() {
               ]}
             />
             <FilterSelect
+              label="Suivi"
+              value={params.get("confirmed")}
+              onChange={(value) => setParam("confirmed", value)}
+              allLabel="Actives et non corrigées"
+              width={190}
+              options={[
+                { value: "true", label: "Actives (confirmées)" },
+                { value: "false", label: "Non corrigées, source arrêtée" },
+              ]}
+            />
+            <FilterSelect
               label="Outil source"
               value={params.get("source_tool")}
               onChange={(value) => setParam("source_tool", value)}
@@ -273,6 +390,7 @@ export default function AlertsPage() {
               type="date"
               style={{ width: 138 }}
               value={params.get("from")?.slice(0, 10) ?? ""}
+              max={params.get("to")?.slice(0, 10) || undefined}
               onChange={(event) =>
                 setParam("from", event.target.value ? `${event.target.value}T00:00:00` : "")
               }
@@ -283,15 +401,33 @@ export default function AlertsPage() {
               type="date"
               style={{ width: 138 }}
               value={params.get("to")?.slice(0, 10) ?? ""}
+              min={params.get("from")?.slice(0, 10) || undefined}
               onChange={(event) =>
                 setParam("to", event.target.value ? `${event.target.value}T23:59:59` : "")
               }
               title="Détecté jusqu'au"
             />
+            <button
+              type="button"
+              className={`btn btn-sm ${grouped ? "btn-primary" : ""}`}
+              aria-pressed={grouped}
+              onClick={() => setParam("regrouper", grouped ? "" : "1")}
+              title="Une ligne par équipement : la plus grave de ses alertes, avec le nombre d'alertes regroupées"
+            >
+              Regrouper par équipement
+            </button>
           </Toolbar>
         </div>
 
-        <div style={{ maxHeight: "calc(100vh - 260px)", overflow: "auto" }}>
+        {datesInverted && (
+          <div className="p-2">
+            <Notice tone="warning">
+              La date de début est après la date de fin : aucun résultat possible. Corrigez l'une
+              des deux dates.
+            </Notice>
+          </div>
+        )}
+        <div style={{ maxHeight: "calc(var(--vh) - 260px)", overflow: "auto" }}>
           <QueryBoundary
             query={query}
             skeleton={<SkeletonRows rows={10} columns={7} />}
@@ -305,7 +441,7 @@ export default function AlertsPage() {
           >
             {(data) => (
               <IncidentTable
-                incidents={data.items}
+                incidents={grouped ? groupByNode(data.items) : data.items}
                 selectedId={selectedId}
                 onSelect={(row) => setParam("id", row.id)}
               />

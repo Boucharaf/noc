@@ -26,6 +26,7 @@ Pour **installer et lancer** la plateforme, voir le
 | 10 | [État du projet](10-etat-du-projet.md) | Qu'est-ce qui marche, qu'est-ce qui reste à faire, quelles limites connaître ? |
 | 11 | [Données et indicateurs](11-donnees-et-indicateurs.md) | D'où vient chaque chiffre affiché, quand change-t-il, comment est-il calculé ? |
 | 12 | [Reprendre le projet](12-reprise-du-projet.md) | Une nouvelle équipe arrive : quoi récupérer, comment démarrer, quels pièges éviter ? |
+| 13 | [Mise en service des données](13-mise-en-service-des-donnees.md) | Le dump NetXMS arrive : toutes les commandes, dans l'ordre, et ce qu'on doit voir à chaque étape. |
 
 Deux documents historiques restent à la racine et sont cités par les
 chapitres : [ARCHITECTURE.md](../ARCHITECTURE.md) (le raisonnement complet

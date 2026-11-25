@@ -80,8 +80,10 @@ def test_network_snapshot_scopes_live_metrics_and_alerts_to_site(monkeypatch):
     assert result["nodes_up"] == 1
     assert result["nodes_down"] == 0
     assert result["nodes_silent"] == 1
-    # Un équipement muet n'est pas disponible.
-    assert result["fleet_availability_pct"] == 50.0
+    # Un équipement muet n'est pas supervisé : ni disponible ni en panne,
+    # il sort du dénominateur et est compté à part (AM-29).
+    assert result["fleet_availability_pct"] == 100.0
+    assert result["nodes_unsupervised"] == 1
     assert result["alerts_total"] == 2
     assert result["alerts_critical"] == 1
     assert result["tools_covering"] == 2
@@ -93,3 +95,12 @@ def test_three_day_history_window_is_exactly_three_days():
     start, end = history_service.resolve_window("3d", None, None)
 
     assert (end - start).total_seconds() == 3 * 24 * 60 * 60
+
+
+def test_percentile_p95_ignores_isolated_peak():
+    from app.services.metrics_service import percentile
+
+    values = [10.0] * 99 + [1000.0]
+    assert percentile(values, 95) == 10.0
+    assert percentile([1.0, 2.0, 3.0, 4.0, 5.0], 50) == 3.0
+    assert round(percentile([1.0, 2.0], 95), 2) == 1.95

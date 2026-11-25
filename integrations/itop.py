@@ -72,6 +72,23 @@ _TICKET_FIELDS = (
 # la cause retenue à la clôture. Demandé à part pour qu'une classe qui ne le
 # porte pas garde quand même ses champs de prise en charge.
 _TICKET_FULL_FIELDS = _TICKET_FIELDS + ",resolution_code"
+# COMPTEURS SLA D'ITOP (Incident et UserRequest du modèle ITIL). iTop mesure
+# lui-même la prise en charge (tto) et la résolution (ttr) avec des
+# chronomètres qui s'ARRÊTENT pendant l'attente (statut « pending ») et hors
+# des heures de couverture du contrat, contre les seuils (SLT) qui
+# s'appliquent au ticket. C'est la mesure contractuelle : la recalculer en
+# temps continu (résolution - ouverture) compte comme du retard le temps
+# passé à attendre le demandeur.
+#   sla_tto_passed / sla_ttr_passed  seuil dépassé (oui / non)
+#   sla_tto_over / sla_ttr_over      dépassement, en secondes
+#   tto / ttr                        chronomètre (temps compté, en secondes)
+#   tto_escalation_deadline / ttr_escalation_deadline  échéance en cours
+# Un champ que l'instance ne connaît pas est retiré, les autres restent.
+_TICKET_SLA_FIELDS = (
+    "sla_tto_passed", "sla_tto_over", "sla_ttr_passed", "sla_ttr_over", "tto", "ttr",
+    "tto_escalation_deadline", "ttr_escalation_deadline",
+)
+_REFUSED_FIELD = re.compile(r"'([A-Za-z0-9_]+)'")
 _PAGE_SIZE = 500
 _MAX_PAGES = 200
 
@@ -124,6 +141,8 @@ class ITopClient(SourceClient):
         self.endpoint = f"{root}/webservices/rest.php"
         self.ticket_classes = ticket_classes
         self.zbx_event_field = zbx_event_field.strip()
+        # Compteurs SLA acceptés par l'instance, par classe (appris au refus).
+        self._sla_fields: dict[str, tuple[str, ...]] = {}
         try:
             self.tz = ZoneInfo(timezone_name or "UTC")
         except ZoneInfoNotFoundError:
@@ -319,7 +338,15 @@ class ITopClient(SourceClient):
         (« invalid attribute »). Le socle suffit à compter et rattacher les
         tickets ; la perte de détail est signalée, pas la classe entière.
         """
-        for fields in (_TICKET_FULL_FIELDS, _TICKET_FIELDS, _TICKET_MINIMAL_FIELDS):
+        sla_fields = list(self._sla_fields.get(cls, _TICKET_SLA_FIELDS))
+        # Niveau 0 : champs complets + compteurs SLA ; puis comme avant.
+        tiers = (_TICKET_FULL_FIELDS, _TICKET_FULL_FIELDS, _TICKET_FIELDS, _TICKET_MINIMAL_FIELDS)
+        index = 0 if sla_fields else 1
+        while index < len(tiers):
+            with_sla = index == 0
+            fields = tiers[index]
+            if with_sla:
+                fields = f"{fields},{','.join(sla_fields)}"
             if self.zbx_event_field:
                 fields = f"{fields},{self.zbx_event_field}"
             try:
@@ -338,13 +365,27 @@ class ITopClient(SourceClient):
                     logger.warning("iTop : %s (%s)", warning, exc)
                     return None
                 refused = "invalid attribute" in str(exc).lower()
+                if refused and with_sla:
+                    named = {m for m in _REFUSED_FIELD.findall(str(exc)) if m in sla_fields}
+                    if named:
+                        # Compteur inconnu de cette instance : retiré seul.
+                        sla_fields = [f for f in sla_fields if f not in named]
+                    else:
+                        logger.info("iTop : tickets %s sans compteurs SLA (%s)", cls, exc)
+                        sla_fields = []
+                    self._sla_fields[cls] = tuple(sla_fields)
+                    if not sla_fields:
+                        index += 1
+                    continue
                 if refused and fields.startswith(_TICKET_FULL_FIELDS):
                     logger.info("iTop : tickets %s sans code de résolution (%s)", cls, exc)
+                    index = 2
                     continue
                 if refused and fields.startswith(_TICKET_FIELDS):
                     warning = f"tickets {cls} : détails de prise en charge indisponibles"
                     self.collection_warnings.append(warning)
                     logger.info("iTop : %s (%s)", warning, exc)
+                    index = 3
                     continue
                 raise
         return None
@@ -395,6 +436,7 @@ class ITopClient(SourceClient):
             ),
             "cis": cis,
             "zbx_event": f.get(self.zbx_event_field) if self.zbx_event_field else None,
+            "itop_sla": itop_sla(f, self.tz),
         }
 
     # -- Maintenances et interventions -------------------------------------
@@ -574,7 +616,7 @@ class ITopClient(SourceClient):
                                 "class", "status", "priority", "urgency", "impact",
                                 "organisation", "caller", "agent", "team",
                                 "assignment_date", "resolution_date", "last_update",
-                                "cis", "zbx_event",
+                                "cis", "zbx_event", "itop_sla",
                             )
                         },
                     )
@@ -627,3 +669,46 @@ class ITopClient(SourceClient):
             {"ref": str(obj.get("key")), **(obj.get("fields") or {})}
             for obj in self._objects(result, "core/get").values()
         ]
+
+
+def _flag(value) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("1", "yes", "true", "oui", "y"):
+        return True
+    if text in ("0", "no", "false", "non", "n", ""):
+        return False
+    return None
+
+
+def _seconds(value) -> int | None:
+    """Durée iTop en secondes ; un chronomètre peut arriver en objet."""
+    if isinstance(value, dict):
+        value = value.get("timespent", value.get("time_spent"))
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def itop_sla(fields: dict, tz=None) -> dict | None:
+    """Compteurs SLA d'un ticket tels qu'iTop les calcule, ou None si
+    l'instance n'en rend aucun. Échéances en ISO 8601 (UTC)."""
+    if not any(name in fields for name in _TICKET_SLA_FIELDS):
+        return None
+    result: dict = {}
+    for metric in ("tto", "ttr"):
+        if f"sla_{metric}_passed" in fields:
+            result[f"{metric}_passed"] = _flag(fields.get(f"sla_{metric}_passed"))
+        if f"sla_{metric}_over" in fields:
+            result[f"{metric}_over_s"] = _seconds(fields.get(f"sla_{metric}_over"))
+        if metric in fields:
+            result[f"{metric}_spent_s"] = _seconds(fields.get(metric))
+        if f"{metric}_escalation_deadline" in fields:
+            deadline = sql_to_dt(fields.get(f"{metric}_escalation_deadline"), tz)
+            result[f"{metric}_deadline"] = deadline.isoformat() if deadline else None
+    return result

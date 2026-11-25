@@ -2,8 +2,11 @@ import { Suspense, lazy } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import AppShell from "./components/layout/AppShell";
+import ForcePasswordPage from "./pages/ForcePasswordPage";
 import ForbiddenPage from "./pages/ForbiddenPage";
+import ForgotPasswordPage from "./pages/ForgotPasswordPage";
 import LoginPage from "./pages/LoginPage";
+import ResetPasswordPage from "./pages/ResetPasswordPage";
 import { LoadingState } from "./components/ui/States";
 import { PERMISSIONS, hasPermission, homeRoute } from "./lib/permissions";
 import { useAuthStore } from "./store/auth";
@@ -69,6 +72,7 @@ function Guard({ permission, children }) {
 function Protected({ children }) {
   const token = useAuthStore((s) => s.token);
   const bootstrapped = useAuthStore((s) => s.bootstrapped);
+  const mustChangePassword = useAuthStore((s) => s.user?.must_change_password);
 
   // Tant que la restauration de session n'a pas abouti, on ne peut pas
   // savoir si l'utilisateur est connecté : rediriger tout de suite vers
@@ -81,6 +85,7 @@ function Protected({ children }) {
     );
   }
   if (!token) return <Navigate to="/connexion" replace />;
+  if (mustChangePassword) return <ForcePasswordPage />;
   return children;
 }
 
@@ -106,13 +111,17 @@ export default function App() {
       >
         <Routes>
           <Route path="/connexion" element={<LoginPage />} />
+          <Route path="/mot-de-passe-oublie" element={<ForgotPasswordPage />} />
+          <Route path="/reinitialiser" element={<ResetPasswordPage />} />
 
           {/* Mur d'écrans : hors de la coque, il occupe tout l'écran. */}
           <Route
             path="/mur"
             element={
               <Protected>
-                <WallboardPage />
+                <Guard permission={PERMISSIONS.VIEW_INCIDENTS}>
+                  <WallboardPage />
+                </Guard>
               </Protected>
             }
           />

@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.core.config import REPORT_ORGANISATION, REPORT_OUTPUT_DIR
-from app.services import incident_service, kpi_service, live_service
+from app.services import incident_service, kpi_service, live_service, pdf_font
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +117,7 @@ def _duration(minutes) -> str:
 
 
 def _pct(value) -> str:
-    return "—" if value is None else f"{value:.1f} %"
+    return "—" if value is None else f"{value:.1f} %".replace(".", ",")
 
 
 def incident_rows(data: dict) -> list[list[str]]:
@@ -191,7 +191,8 @@ def _no_cause_note(data: dict) -> str:
 
 METHOD_NOTE = (
     "Méthode : disponibilité et sites viennent des relevés de collecte du NOC "
-    "(moyennes journalières, maintenances planifiées exclues) ; incidents, "
+    "(temps où les équipements répondent ÷ temps supervisé, pondéré par ce temps ; "
+    "maintenances planifiées et non supervisés exclus) ; incidents, "
     "délais, causes et dépassements viennent des tickets iTop ouverts dans le "
     "mois. Le détail événement par événement reste consultable dans les outils "
     "de supervision et dans iTop, qui en sont les sources de référence."
@@ -219,14 +220,14 @@ def _fmt(value, suffix: str = "", default: str = "—") -> str:
     if value is None:
         return default
     if isinstance(value, float):
-        return f"{value:.2f}{suffix}"
+        return f"{value:.2f}".replace(".", ",") + suffix
     return f"{value}{suffix}"
 
 
 # ---------------------------------------------------------------------------
 # PDF
 # ---------------------------------------------------------------------------
-def render_pdf(data: dict) -> str:
+def render_pdf(data: dict, path: str | None = None) -> str:
     from fpdf import FPDF
 
     month, year = data["month"], data["year"]
@@ -235,11 +236,7 @@ def render_pdf(data: dict) -> str:
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
 
-    # Les polices cœur de fpdf2 sont en latin-1 : le texte est transcodé
-    # explicitement, sinon chaque accent français lève une UnicodeEncodeError
-    # au moment de l'écriture.
-    def _txt(value) -> str:
-        return str(value).encode("latin-1", "replace").decode("latin-1")
+    font, _txt = pdf_font.setup(pdf)
 
     # fpdf2 >= 2.7 déprécie l'argument `ln=` de cell() : selon la version il
     # est ignoré, le curseur reste alors collé à la marge droite et l'appel
@@ -261,13 +258,13 @@ def render_pdf(data: dict) -> str:
 
     def _section(title: str) -> None:
         pdf.ln(3)
-        pdf.set_font("Helvetica", "B", 12)
+        pdf.set_font(font, "B", 12)
         _line(title, 8)
-        pdf.set_font("Helvetica", "", 10)
+        pdf.set_font(font, "", 10)
 
-    pdf.set_font("Helvetica", "B", 16)
+    pdf.set_font(font, "B", 16)
     _line(f"Rapport d'exploitation NOC — {data['period']}", 10)
-    pdf.set_font("Helvetica", "", 10)
+    pdf.set_font(font, "", 10)
     pdf.set_text_color(110, 110, 110)
     _line(
         f"{data['organisation']} — généré le "
@@ -283,7 +280,7 @@ def render_pdf(data: dict) -> str:
 
     _row([(90, "Indicateur", "L"), (35, "Mois", "R"), (35, "Précédent", "R"), (30, "Écart", "R")], border=1)
     for key, label, suffix in (
-        ("availability_pct", "Disponibilité du parc", " %"),
+        ("availability_pct", "Disponibilité", " %"),
         ("avg_alerts", "Alertes actives (moyenne)", ""),
         ("avg_critical", "Alertes critiques (moyenne)", ""),
         ("avg_down", "Équipements en panne (moyenne)", ""),
@@ -298,14 +295,14 @@ def render_pdf(data: dict) -> str:
         )
 
     if not data["monthly"]["reliable"]:
-        pdf.set_font("Helvetica", "I", 9)
+        pdf.set_font(font, "I", 9)
         _line(
             f"Attention : seulement {current['days_with_data']} jour(s) de "
             "données sur ce mois. Les moyennes ci-dessus ne sont pas "
             "comparables à celles d'un mois complet.",
             5,
         )
-        pdf.set_font("Helvetica", "", 10)
+        pdf.set_font(font, "", 10)
 
     # -- 2. Incidents -----------------------------------------------------
     _section("2. Incidents iTop du mois")
@@ -365,12 +362,12 @@ def render_pdf(data: dict) -> str:
 
     # -- Note de méthode --------------------------------------------------
     pdf.ln(4)
-    pdf.set_font("Helvetica", "I", 8)
+    pdf.set_font(font, "I", 8)
     pdf.set_text_color(110, 110, 110)
     _line(METHOD_NOTE, 4)
     pdf.set_text_color(0, 0, 0)
 
-    path = _filename(month, year, "pdf")
+    path = path or _filename(month, year, "pdf")
     pdf.output(path)
     logger.info("Rapport PDF généré : %s", path)
     return path
@@ -414,7 +411,7 @@ def render_docx(data: dict) -> str:
         [
             [label, _fmt(current.get(key), suffix), _fmt(previous.get(key), suffix), _fmt(delta.get(key))]
             for key, label, suffix in (
-                ("availability_pct", "Disponibilité du parc", " %"),
+                ("availability_pct", "Disponibilité", " %"),
                 ("avg_alerts", "Alertes actives (moyenne)", ""),
                 ("avg_critical", "Alertes critiques (moyenne)", ""),
                 ("avg_down", "Équipements en panne (moyenne)", ""),

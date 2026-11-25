@@ -23,11 +23,12 @@ export function useChartTheme() {
     const dark = theme !== "light";
     return {
       dark,
-      ink: dark ? "#e6edf6" : "#0f1a2b",
-      inkMuted: dark ? "#5d6b80" : "#8494a8",
-      grid: dark ? "rgba(255,255,255,.06)" : "rgba(15,23,42,.08)",
-      surface: dark ? "#161f2e" : "#ffffff",
-      border: dark ? "rgba(255,255,255,.14)" : "rgba(15,23,42,.16)",
+      // Jetons ANPTIC (AM-01) : encre marine en clair, fond marine en sombre.
+      ink: dark ? "#e9ecf6" : "#202060",
+      inkMuted: dark ? "#8189a6" : "#5c6488",
+      grid: dark ? "rgba(255,255,255,.07)" : "rgba(32,32,96,.08)",
+      surface: dark ? "#151c3b" : "#ffffff",
+      border: dark ? "rgba(255,255,255,.16)" : "rgba(32,32,96,.16)",
     };
   }, [theme]);
 }

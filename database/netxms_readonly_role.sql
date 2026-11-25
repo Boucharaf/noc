@@ -47,8 +47,10 @@ GRANT SELECT (var_name, var_value) ON public.metadata TO noc_reader;
 GRANT SELECT (id, primary_name, primary_ip, platform_name, snmp_sys_name, snmp_sys_location)
     ON public.nodes TO noc_reader;
 
+-- creation_time : depuis quand NetXMS supervise l'équipement — sert à
+-- exploiter tout l'historique de downtime_log (collector/downtime.py).
 GRANT SELECT (object_id, name, alias, status, is_deleted, is_system,
-              latitude, longitude, country, region, city, district)
+              latitude, longitude, country, region, city, district, creation_time)
     ON public.object_properties TO noc_reader;
 
 -- Alarmes actives et leur équipement source. Une alarme d'interface a pour
@@ -80,6 +82,18 @@ WHERE attr_name IN ('perAvailability', 'mttr', 'mtbf', 'NumFailures',
 GRANT SELECT ON public.noc_availability_attributes TO noc_reader;
 GRANT SELECT (admin_state, oper_state, speed) ON public.interfaces TO noc_reader;
 GRANT SELECT (flags) ON public.object_properties TO noc_reader;
+
+-- Journal des pannes (collector/downtime.py, NETXMS_DOWNTIME_ENABLED) :
+-- source maître de la disponibilité des équipements. Accordé seulement si la
+-- table existe (versions récentes de NetXMS).
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.tables
+               WHERE table_schema = 'public' AND table_name = 'downtime_log') THEN
+        GRANT SELECT ON public.downtime_log TO noc_reader;
+    END IF;
+END
+$$;
 
 -- Référentiel de sites PROPRE À L'AGENCE (colonne siteadmin_id ajoutée à
 -- object_properties, schéma donnebase). Accordé seulement s'il existe : ce

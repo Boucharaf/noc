@@ -14,11 +14,13 @@ import {
   UserCog,
   Users,
 } from "lucide-react";
+import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 
 import { PERMISSIONS, hasPermission, homeRoute } from "../../lib/permissions";
 import { useOverview } from "../../hooks/queries";
 import { useUiStore } from "../../store/ui";
+import { scopeLabel, useScopeStore } from "../../store/scope";
 
 /**
  * Navigation latérale.
@@ -119,48 +121,135 @@ const SECTIONS = [
   },
 ];
 
-function NavBadge({ value, color }) {
-  if (!value) return null;
+const NAMED_ROUTES = new Set(SECTIONS.flatMap((section) => section.items.map((item) => item.to)));
+
+/**
+ * Badge de navigation. Hors « Tout le réseau », il affiche « périmètre /
+ * réseau » (INC-09) : un badge 228 à côté d'une page qui montre 0 incident
+ * se lisait comme une contradiction. `hot` (rouge plein) est réservé à ce
+ * qui exige une action (INC-10).
+ */
+function NavBadge({ value, scoped, scopeName, label, hot }) {
+  if (!value && !scoped) return null;
+  const isScoped = scoped !== undefined && scoped !== null;
   return (
     <span
-      className="num ml-auto text-[10.5px] px-1 rounded-[3px] font-semibold"
-      style={{
-        color,
-        background: `color-mix(in srgb, ${color} 16%, transparent)`,
-      }}
+      className="nav-badge num"
+      style={hot ? { background: "var(--state-down)" } : undefined}
+      title={
+        isScoped
+          ? `${label} — ${scopeName} : ${scoped} · Tout le réseau : ${value ?? 0}`
+          : `${label} — tout le réseau : ${value}`
+      }
     >
-      {value}
+      {isScoped ? `${scoped} / ${value ?? 0}` : value}
     </span>
   );
 }
 
-export default function SideNav({ role, toolsDown = 0, onNavigate }) {
-  const collapsed = useUiStore((s) => s.railCollapsed);
-  // Compteurs de TOUT le réseau, indépendants du périmètre consulté : la
-  // navigation signale ce qui attend, où que ce soit.
+// Sous 1 024 px (tablette), le rail se replie de lui-même sur ses icônes :
+// 208 px de menu sur 800 px d'écran laissaient trop peu aux tableaux.
+const NARROW = "(max-width: 1023px)";
+
+function useNarrow() {
+  const [narrow, setNarrow] = useState(
+    () => typeof window !== "undefined" && window.matchMedia(NARROW).matches,
+  );
+  useEffect(() => {
+    const query = window.matchMedia(NARROW);
+    const update = () => setNarrow(query.matches);
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+  return narrow;
+}
+
+/** Carte du logo en tête de la barre latérale (maquette ANPTIC). */
+function Brand({ collapsed, to, onNavigate }) {
+  return (
+    <NavLink
+      to={to}
+      onClick={onNavigate}
+      className={`brand-card ${collapsed ? "collapsed" : ""}`}
+      title="ANPTIC · NOC Supervision — accueil"
+    >
+      <img src="/images.png" alt="ANPTIC" />
+      {!collapsed && (
+        <span className="min-w-0">
+          <b>NOC · Supervision</b>
+          <small>Le label du numérique</small>
+        </span>
+      )}
+    </NavLink>
+  );
+}
+
+export default function SideNav({
+  role,
+  toolsDown = 0,
+  toolsTotal = 0,
+  onNavigate,
+  expanded = false,
+}) {
+  const railCollapsed = useUiStore((s) => s.railCollapsed);
+  const narrow = useNarrow();
+  // `expanded` : dans le tiroir du téléphone, toujours déplié.
+  const collapsed = !expanded && (railCollapsed || narrow);
+  // Compteurs de TOUT le réseau : la navigation signale ce qui attend, où
+  // que ce soit. Quand un périmètre est choisi, le compteur du périmètre est
+  // affiché devant (« 0 / 228 ») pour que le badge et la page concordent.
+  const scope = useScopeStore();
+  const scopedView = Boolean(scope.region || scope.province || scope.site);
   const { data: overview } = useOverview({ global: true });
+  const { data: local } = useOverview();
+  const inScope = (pick) => (scopedView && local ? pick(local) ?? 0 : undefined);
 
   const badges = {
-    openIncidents: { value: overview?.incidents_total, color: "var(--sev-high)" },
-    openAlerts: { value: overview?.alerts_unacknowledged, color: "var(--sev-medium)" },
-    nodesDown: { value: overview?.nodes_by_state?.down, color: "var(--state-down)" },
-    toolsDown: { value: toolsDown, color: "var(--sev-medium)" },
+    openIncidents: {
+      value: overview?.incidents_total,
+      scoped: inScope((o) => o.incidents_total),
+      label: "Incidents iTop ouverts",
+    },
+    // INC-10 : le badge ne montre que ce qui exige une action — les alertes
+    // CRITIQUES non acquittées, pas toute la file.
+    openAlerts: {
+      value: overview?.alerts_critical_unacknowledged,
+      scoped: inScope((o) => o.alerts_critical_unacknowledged),
+      label: "Alertes critiques non acquittées",
+      hot: true,
+    },
+    nodesDown: {
+      value: overview?.nodes_by_state?.down,
+      scoped: inScope((o) => o.nodes_by_state?.down),
+      label: "Équipements en panne",
+      hot: true,
+    },
+    toolsDown: { value: toolsDown, label: "Outils en erreur", hot: true },
   };
+
+  const home = homeRoute(role);
+  const toolsHealthy = Math.max(0, toolsTotal - toolsDown);
 
   return (
     <nav
-      className="shrink-0 overflow-y-auto overflow-x-hidden border-r py-1"
+      className={`side-nav flex flex-col overflow-y-auto overflow-x-hidden px-2.5 pt-3.5 pb-2 ${
+        expanded ? "flex-1" : "shrink-0 h-full"
+      }`}
       style={{
-        width: collapsed ? "var(--rail-w-collapsed)" : "var(--rail-w)",
-        borderColor: "var(--border)",
-        background: "var(--rail-bg, var(--surface))",
+        width: expanded ? 272 : collapsed ? "var(--rail-w-collapsed)" : "var(--rail-w)",
         transition: "width .14s ease",
       }}
       aria-label="Navigation principale"
     >
+      <Brand collapsed={collapsed} to={home} onNavigate={onNavigate} />
+
       {SECTIONS.map((section) => {
+        // Accueil déjà présent sous son propre nom (Agent-Terrain :
+        // Interventions) : une seule entrée, sinon deux sont actives (A19).
         const items = section.items.filter(
-          (item) => !item.permission || hasPermission(role, item.permission),
+          (item) =>
+            (!item.permission || hasPermission(role, item.permission)) &&
+            !(item.to === "__home__" && NAMED_ROUTES.has(home)),
         );
         if (items.length === 0) return null;
 
@@ -168,11 +257,11 @@ export default function SideNav({ role, toolsDown = 0, onNavigate }) {
           <div key={section.title}>
             {!collapsed && <div className="nav-section">{section.title}</div>}
             {collapsed && (
-              <div className="mx-2 my-1.5 border-t" style={{ borderColor: "var(--border)" }} />
+              <div className="mx-2 my-2.5 border-t" style={{ borderColor: "var(--rail-border)" }} />
             )}
-            <div className="px-1.5 space-y-px">
+            <div className="space-y-1">
               {items.map((item) => {
-                const to = item.to === "__home__" ? homeRoute(role) : item.to;
+                const to = item.to === "__home__" ? home : item.to;
                 const badge = item.badge ? badges[item.badge] : null;
                 const Icon = item.icon;
                 return (
@@ -181,13 +270,15 @@ export default function SideNav({ role, toolsDown = 0, onNavigate }) {
                     to={to}
                     end={item.to === "__home__"}
                     onClick={onNavigate}
-                    className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}
+                    className={({ isActive }) =>
+                      `nav-item ${isActive ? "active" : ""} ${collapsed ? "icon-only" : ""}`
+                    }
                     title={collapsed ? item.label : undefined}
                   >
-                    <Icon size={14} strokeWidth={1.8} className="shrink-0" />
+                    <Icon size={19} strokeWidth={1.8} className="shrink-0" />
                     {!collapsed && <span className="truncate">{item.label}</span>}
                     {!collapsed && badge && (
-                      <NavBadge value={badge.value} color={badge.color} />
+                      <NavBadge {...badge} scopeName={scopeLabel(scope)} />
                     )}
                   </NavLink>
                 );
@@ -196,6 +287,38 @@ export default function SideNav({ role, toolsDown = 0, onNavigate }) {
           </div>
         );
       })}
+
+      {/* Pied de barre : occupe le bas du rail (plus de vide sous le menu)
+          et rappelle en permanence ce qui conditionne la fiabilité des
+          chiffres — la collecte (INC-32) et le périmètre affiché. */}
+      {!collapsed && (
+        <div className="rail-foot mt-4">
+          {toolsTotal > 0 && (
+            <div className="flex items-center gap-2 mb-1">
+              <span
+                className="dot"
+                style={{
+                  background:
+                    toolsHealthy === 0
+                      ? "var(--state-down)"
+                      : toolsDown
+                        ? "var(--state-degraded)"
+                        : "var(--state-up)",
+                }}
+              />
+              <span>
+                Collecte <b className="num">{toolsHealthy}/{toolsTotal}</b> sources actives
+              </span>
+            </div>
+          )}
+          <div>
+            Périmètre : <b>{scopeLabel(scope)}</b>
+          </div>
+          <div className="mt-1.5" style={{ opacity: 0.8 }}>
+            ANPTIC · Centre des opérations réseau
+          </div>
+        </div>
+      )}
     </nav>
   );
 }

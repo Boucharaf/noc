@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import os
 import time
 from datetime import UTC
 
@@ -33,6 +34,11 @@ LOCK_KEY = "auth_locked:{scope}:{subject}"
 
 PIN_MAX_ATTEMPTS = 5
 PIN_LOCK_WINDOW_SECONDS = 15 * 60
+# Verrou GLOBAL du PIN (INC-43) : le verrou par IP n'arrête pas une
+# énumération répartie sur plusieurs adresses. Au-delà de ce nombre d'échecs
+# toutes IP confondues dans la fenêtre, la connexion par PIN est suspendue
+# pour tout le monde ; la connexion par mot de passe reste ouverte.
+PIN_GLOBAL_MAX_FAILURES = int(os.getenv("PIN_GLOBAL_MAX_FAILURES", "30"))
 
 _STORE_REFRESH_SCRIPT = """
 redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
@@ -221,22 +227,89 @@ def clear_failures(scope: str, value: str) -> None:
     redis_client.delete(FAILURES_KEY.format(scope=scope, subject=_subject(value)))
 
 
-# --- Rate-limiting du PIN, par IP -------------------------------------------
-# Par IP et non par user_id : authenticate_with_pin() retrouve l'utilisateur
-# PAR l'empreinte du PIN (voir auth_service.hash_pin), donc en cas d'échec on
-# ne sait pas quel compte visait la tentative. C'est aussi la limite correcte
-# à poser : elle protège contre le brute-force en ligne depuis une même
-# source, ce qui est le risque réel pour un PIN court sur une console
-# partagée.
+def clear_lock(scope: str, value: str) -> None:
+    """Lève un verrou en cours et son compteur. Réservé à une preuve forte :
+    réinitialisation du mot de passe par courriel."""
+    subject = _subject(value)
+    redis_client.delete(LOCK_KEY.format(scope=scope, subject=subject))
+    clear_failures(scope, value)
 
-def is_pin_locked(ip: str) -> int | None:
+
+# --- Verrouillage du PIN ------------------------------------------------------
+# Trois compteurs : le compte désigné (un code court ne doit pas s'essayer
+# depuis plusieurs adresses), l'adresse, et tous confondus.
+
+def is_pin_locked(ip: str, username: str) -> int | None:
     """Retourne le TTL restant en secondes si verrouillé, sinon None."""
-    return lock_ttl("pin_ip", ip)
+    remaining = [
+        ttl for ttl in (
+            lock_ttl("pin_user", username.strip().lower()),
+            lock_ttl("pin_ip", ip), lock_ttl("pin_all", "*"),
+        ) if ttl
+    ]
+    return max(remaining) if remaining else None
 
 
-def register_pin_failure(ip: str) -> None:
+def register_pin_failure(ip: str, username: str) -> None:
+    register_failure(
+        "pin_user", username.strip().lower(), PIN_MAX_ATTEMPTS, PIN_LOCK_WINDOW_SECONDS
+    )
     register_failure("pin_ip", ip, PIN_MAX_ATTEMPTS, PIN_LOCK_WINDOW_SECONDS)
+    register_failure("pin_all", "*", PIN_GLOBAL_MAX_FAILURES, PIN_LOCK_WINDOW_SECONDS)
 
 
-def clear_pin_failures(ip: str) -> None:
-    clear_failures("pin_ip", ip)
+def clear_pin_failures(ip: str, username: str) -> None:
+    clear_failures("pin_user", username.strip().lower())
+    # Le compteur de l'adresse reste : un compte valide n'efface pas les
+    # essais faits sur les autres.
+
+
+# --- Réinitialisation du mot de passe par courriel --------------------------
+# Le jeton envoyé par courriel n'est JAMAIS stocké en clair : seule son
+# empreinte SHA-256 sert de clé. Une copie de Redis ne permet donc pas de
+# réinitialiser un compte. Usage unique (GETDEL atomique), durée de vie
+# courte, et une nouvelle demande annule la précédente.
+PASSWORD_RESET_TTL_SECONDS = int(os.getenv("PASSWORD_RESET_TTL_MINUTES", "30")) * 60
+PASSWORD_RESET_KEY = "pwreset:{digest}"
+PASSWORD_RESET_USER_KEY = "pwreset_user:{user_id}"
+
+
+def _token_digest(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def store_password_reset(user_id: int) -> str:
+    """Crée le jeton de réinitialisation d'un compte et le rend (en clair,
+    pour le courriel). L'éventuel jeton précédent du compte est annulé."""
+    import secrets
+
+    token = secrets.token_urlsafe(32)
+    digest = _token_digest(token)
+    user_key = PASSWORD_RESET_USER_KEY.format(user_id=user_id)
+    previous = redis_client.get(user_key)
+    if previous:
+        if isinstance(previous, bytes):
+            previous = previous.decode()
+        redis_client.delete(PASSWORD_RESET_KEY.format(digest=previous))
+    redis_client.set(PASSWORD_RESET_KEY.format(digest=digest), str(user_id),
+                     ex=PASSWORD_RESET_TTL_SECONDS)
+    redis_client.set(user_key, digest, ex=PASSWORD_RESET_TTL_SECONDS)
+    return token
+
+
+def consume_password_reset(token: str) -> int | None:
+    """Identifiant du compte si le jeton est valide, None sinon. Le jeton est
+    consommé dans la même opération : il ne sert qu'une fois."""
+    if not token:
+        return None
+    value = redis_client.getdel(PASSWORD_RESET_KEY.format(digest=_token_digest(token)))
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        value = value.decode()
+    try:
+        user_id = int(value)
+    except (TypeError, ValueError):
+        return None
+    redis_client.delete(PASSWORD_RESET_USER_KEY.format(user_id=user_id))
+    return user_id

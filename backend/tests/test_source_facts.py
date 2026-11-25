@@ -62,12 +62,12 @@ def test_merge_keeps_facts_per_source_and_names_single_source_nodes():
 
 def test_link_summary_and_agency_availability():
     nodes = [
-        {"details": {"netxms": {
+        {"state": "down", "details": {"netxms": {
             "interfaces": {"total": 4, "enabled": 3, "enabled_up": 1, "enabled_down": 2,
                            "watched": 2, "watched_down": 1, "capacity_bps": 10**9},
             "availability": {"pct": 90.0, "mttr_h": 1.0, "mtbf_h": 10.0, "failures": 3},
         }}},
-        {"details": {"netxms": {
+        {"state": "up", "details": {"netxms": {
             "interfaces": {"total": 2, "enabled": 2, "enabled_up": 2, "enabled_down": 0,
                            "watched": 2, "watched_down": 0, "capacity_bps": 10**8},
             "availability": {"pct": 100.0, "mttr_h": None, "mtbf_h": 20.0, "failures": 0},
@@ -86,6 +86,17 @@ def test_link_summary_and_agency_availability():
         "failures": 3, "computed_at": None,
     }
     assert metrics_service.link_summary([{"details": {}}]) is None
+
+    # INC-07 : inventaire d'interfaces d'un équipement non supervisé, ou d'un
+    # NetXMS qui ne répond plus → non mesuré, hors des taux.
+    unseen = {"state": "unknown", "details": {"netxms": {"interfaces": {
+        "total": 9, "enabled": 9, "enabled_up": 9, "enabled_down": 0,
+        "watched": 9, "watched_down": 0, "capacity_bps": 10**10}}}}
+    stale = {**nodes[1], "stale_sources": ["netxms"]}
+    links = metrics_service.link_summary([nodes[0], unseen, stale])
+    assert links["nodes"] == 1
+    assert links["unmeasured_nodes"] == 2
+    assert links["capacity_bps"] == 10**9
     assert metrics_service.agency_availability([]) is None
 
 

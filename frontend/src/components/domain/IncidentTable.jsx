@@ -57,6 +57,19 @@ export default function IncidentTable({
           {row.age_minutes !== null && row.age_minutes !== undefined
             ? duration(row.age_minutes)
             : ageFrom(row.detected_at)}
+          {/* INC-13 : active depuis plus de 30 j sans acquittement. */}
+          {row.obsolete && (
+            <span
+              className="ml-1 text-[12px] px-1 rounded-[3px] font-semibold"
+              style={{
+                color: "var(--sev-medium)",
+                background: "color-mix(in srgb, var(--sev-medium) 14%, transparent)",
+              }}
+              title="Alerte active depuis plus de 30 jours sans acquittement : équipement retiré, jamais remis en service, ou alerte oubliée. À vérifier, acquitter avec un motif ou clore dans l'outil source."
+            >
+              À revoir
+            </span>
+          )}
         </span>
       ),
     },
@@ -149,10 +162,12 @@ export default function IncidentTable({
         <div className="flex flex-col items-start gap-0.5">
           <ToolTag tool={row.source_tool} />
           <span
-            className="text-[10px]"
+            className="text-[12px]"
             style={{ color: row.stale ? "var(--sev-medium)" : "var(--ink-3)" }}
           >
-            {row.stale
+            {row.frozen
+              ? `Non corrigée au ${dateTime(row.last_observed_at)}`
+              : row.stale
               ? `Périmé · ${row.kind === "itsm_ticket" ? "ITSM" : "supervision"}`
               : row.kind === "itsm_ticket"
                 ? "Ticket ITSM"

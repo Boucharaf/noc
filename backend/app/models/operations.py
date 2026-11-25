@@ -16,9 +16,11 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    LargeBinary,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -38,6 +40,10 @@ class User(Base):
     # pylône, n'est pas réaliste.
     pin_hash = Column(Text)
     is_active = Column(Boolean, nullable=False, default=True)
+    # Mot de passe choisi par un tiers : à changer avant toute autre action.
+    must_change_password = Column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     last_login_at = Column(DateTime(timezone=True))
     # Rattachement en TEXTE : la géographie appartient aux outils sources
     # (groupes Zabbix/Centreon, Location iTop). Le NOC n'en tient plus de
@@ -180,6 +186,156 @@ class HistAlert(Base):
     first_seen_at = Column(DateTime(timezone=True), nullable=False)
     last_seen_at = Column(DateTime(timezone=True), nullable=False)
     closed_at = Column(DateTime(timezone=True))
+    acknowledged = Column(Boolean)
+    # Premier acquittement ; ack_source : tool, observed ou undated.
+    acknowledged_at = Column(DateTime(timezone=True))
+    acknowledged_by = Column(Text)
+    ack_source = Column(Text)
+
+
+class HistAlertEvent(Base):
+    """Un changement dans la vie d'une alerte (collector/history.py)."""
+
+    __tablename__ = "hist_alert_event"
+
+    id = Column(BigInteger, primary_key=True)
+    alert_id = Column(
+        BigInteger, ForeignKey("hist_alert.id", ondelete="CASCADE"), nullable=False
+    )
+    event = Column(Text, nullable=False)
+    at = Column(DateTime(timezone=True), nullable=False)
+    from_value = Column(Text)
+    to_value = Column(Text)
+    actor = Column(Text)
+    source = Column(Text, nullable=False)
+    recorded_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class NocAsset(Base):
+    """Un équipement et son identifiant stable (collector/identity.py)."""
+
+    __tablename__ = "noc_asset"
+
+    id = Column(Text, primary_key=True)
+    name = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    last_seen_at = Column(DateTime(timezone=True), nullable=False)
+    merged_into = Column(Text, ForeignKey("noc_asset.id"))
+
+
+class NocAssetSource(Base):
+    """À quel équipement appartient une référence d'outil."""
+
+    __tablename__ = "noc_asset_source"
+
+    tool = Column(Text, primary_key=True)
+    ref = Column(Text, primary_key=True)
+    asset_id = Column(Text, ForeignKey("noc_asset.id"), nullable=False)
+    name = Column(Text)
+    ip = Column(Text)
+    first_seen_at = Column(DateTime(timezone=True), nullable=False)
+    valid_from = Column(DateTime(timezone=True))
+
+
+class NocAssetEvent(Base):
+    """Une décision d'identité : création, réunion, reprise, renommage…"""
+
+    __tablename__ = "noc_asset_event"
+
+    id = Column(BigInteger, primary_key=True)
+    asset_id = Column(Text, ForeignKey("noc_asset.id"), nullable=False)
+    event = Column(Text, nullable=False)
+    at = Column(DateTime(timezone=True), nullable=False)
+    source = Column(Text)
+    from_value = Column(Text)
+    to_value = Column(Text)
+
+
+class HistToolHealth(Base):
+    """Période d'état d'un outil (collector/tool_health.py)."""
+
+    __tablename__ = "hist_tool_health"
+
+    id = Column(BigInteger, primary_key=True)
+    tool = Column(Text, nullable=False)
+    state = Column(Text, nullable=False)
+    error = Column(Text)
+    version = Column(Text)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    ended_at = Column(DateTime(timezone=True))
+    last_seen_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class ReportSnapshot(Base):
+    """Rapport mensuel figé : la base refuse toute modification."""
+
+    __tablename__ = "report_snapshot"
+    __table_args__ = (UniqueConstraint("kind", "year", "month", "revision"),)
+
+    id = Column(Integer, primary_key=True)
+    kind = Column(Text, nullable=False)
+    year = Column(Integer, nullable=False)
+    month = Column(Integer, nullable=False)
+    revision = Column(Integer, nullable=False)
+    complete = Column(Boolean, nullable=False)
+    reason = Column(Text)
+    data = Column(Text, nullable=False)
+    data_sha256 = Column(Text, nullable=False)
+    pdf = Column(LargeBinary, nullable=False)
+    pdf_sha256 = Column(Text, nullable=False)
+    generated_at = Column(DateTime(timezone=True), nullable=False)
+    generated_by = Column(Text, nullable=False)
+
+
+class HistDowntime(Base):
+    """Panne enregistrée par un outil source (NetXMS downtime_log), copiée
+    par collector/downtime.py. ended_at NULL = panne en cours."""
+
+    __tablename__ = "hist_downtime"
+
+    id = Column(BigInteger, primary_key=True)
+    source = Column(Text, nullable=False)
+    object_ref = Column(Text, nullable=False)
+    node_id = Column(Text, nullable=False)
+    name = Column(Text)
+    tag = Column(Text, nullable=False, default="")
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    ended_at = Column(DateTime(timezone=True))
+    imported_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class HistSourceSync(Base):
+    """Dernière synchronisation réussie d'un journal source."""
+
+    __tablename__ = "hist_source_sync"
+
+    source = Column(Text, primary_key=True)
+    synced_at = Column(DateTime(timezone=True), nullable=False)
+    rows_read = Column(Integer, nullable=False, default=0)
+    # Jusqu'où la source sait quelque chose (dernière activité de sa base).
+    horizon_at = Column(DateTime(timezone=True))
+    # Depuis quand le journal de pannes copié est complet (rétention NetXMS).
+    complete_since = Column(DateTime(timezone=True))
+
+
+class HistSourceObject(Base):
+    """Fenêtre de supervision d'un équipement selon sa source maître."""
+
+    __tablename__ = "hist_source_object"
+
+    source = Column(Text, primary_key=True)
+    object_ref = Column(Text, primary_key=True)
+    node_id = Column(Text, nullable=False)
+    name = Column(Text)
+    site = Column(Text)
+    province = Column(Text)
+    region = Column(Text)
+    tools = Column(Text)
+    supervised_since = Column(DateTime(timezone=True))
+    managed = Column(Boolean, nullable=False, default=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class AuditLog(Base):
@@ -217,6 +373,10 @@ class KpiDaily(Base):
     avg_degraded = Column(Float)
     avg_alerts = Column(Float)
     avg_critical = Column(Float)
+    # Secondes-équipement : où l'équipement répond, et supervisées. Pondèrent
+    # les moyennes sur plusieurs jours. NULL sur les bilans antérieurs.
+    responding_s = Column(Float)
+    supervised_s = Column(Float)
     fleet_availability_pct = Column(Float)
 
     # PostgreSQL enforces uniqueness through an expression index so NULL can

@@ -25,7 +25,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from app.core.config import COLLECT_INTERVAL_S, NODE_STATES, SUPERVISION_TOOLS
+from app.core.config import COLLECT_INTERVAL_S, CORE_GROUPS, NODE_STATES, SUPERVISION_TOOLS
 from app.db.redis_client import get_store
 from collector.state import (
     KEY_ALERTS,
@@ -146,11 +146,29 @@ async def get_trend() -> list[dict]:
     return points
 
 
-async def get_alerts() -> list[dict]:
+async def get_all_alerts() -> list[dict]:
+    """Toutes les alertes non corrigées, y compris celles d'une source arrêtée."""
     alerts = await _read_cached(KEY_ALERTS)
     if alerts is None:
         raise SnapshotUnavailable()
     return alerts
+
+
+_confirmed: tuple | None = None
+
+
+async def get_alerts() -> list[dict]:
+    """Alertes actives CONFIRMÉES : celles que comptent tous les indicateurs.
+
+    Une alerte d'une source arrêtée (dump, export) n'en fait pas partie :
+    personne ne sait si elle est toujours en cours. Même liste rendue tant que
+    l'instantané ne change pas : geo_service compare les objets par identité.
+    """
+    global _confirmed
+    alerts = await get_all_alerts()
+    if _confirmed is None or _confirmed[0] is not alerts:
+        _confirmed = (alerts, [a for a in alerts if not a.get("frozen")])
+    return _confirmed[1]
 
 
 async def get_node(node_id: str) -> dict | None:
@@ -208,6 +226,83 @@ async def get_tools_health() -> list[dict]:
     return rows
 
 
+async def _meta_or_empty() -> dict:
+    """Métadonnées du cycle, ou {} : une information de fraîcheur manquante
+    ne doit jamais empêcher d'afficher l'inventaire ou les incidents."""
+    try:
+        return await get_store().read_meta() or {}
+    except Exception:  # noqa: BLE001 — Redis injoignable : dégradé, pas d'erreur
+        logger.warning("Métadonnées de collecte illisibles", exc_info=True)
+        return {}
+
+
+async def source_collected_at() -> dict[str, str]:
+    """Heure de la dernière collecte RÉUSSIE de l'inventaire, par outil.
+
+    Lue dans les métadonnées du cycle (`source_data.<outil>.nodes`). Un outil
+    tombé garde l'heure de sa dernière collecte complète : c'est exactement
+    l'âge de ce que l'écran affiche pour ses équipements.
+    """
+    meta = await _meta_or_empty()
+    rows = {}
+    for tool, streams in (meta.get("source_data") or {}).items():
+        stream = (streams or {}).get("nodes") or {}
+        # Source arrêtée : sa dernière donnée, pas l'heure de la relecture.
+        stamp = stream.get("data_until") or stream.get("collected_at")
+        if stamp:
+            rows[tool] = stamp
+    return rows
+
+
+async def frozen_sources() -> dict[str, str]:
+    """{outil: date de la dernière donnée} des sources arrêtées."""
+    meta = await _meta_or_empty()
+    return {
+        tool: until
+        for tool, streams in (meta.get("source_data") or {}).items()
+        if (until := ((streams or {}).get("nodes") or {}).get("data_until"))
+    }
+
+
+async def source_stream(tool: str, stream: str = "alerts") -> dict:
+    """État d'un flux d'un outil au dernier cycle : {stale, collected_at, …}.
+
+    Vide si l'outil n'a jamais été collecté. `stale` vrai : l'outil n'a pas
+    répondu, l'écran montre sa dernière collecte réussie.
+    """
+    meta = await _meta_or_empty()
+    return dict(((meta.get("source_data") or {}).get(tool) or {}).get(stream) or {})
+
+
+def last_seen_at(node: dict, collected: dict[str, str]) -> str | None:
+    """Dernière OBSERVATION d'un équipement par un outil de supervision.
+
+    INC-03 / INC-04 : la colonne « Vu » lisait un champ que rien ne publiait
+    et affichait « jamais » pour tout le parc, y compris les équipements
+    NORMAL. L'heure retenue est la dernière collecte réussie des outils qui
+    le supervisent (iTop, la CMDB, n'observe rien). None : aucun outil de
+    supervision ne le voit — il est alors « non supervisé ».
+    """
+    stamps = [
+        collected[tool] for tool in (node.get("sources") or {})
+        if tool != "itop" and tool in collected
+    ]
+    return max(stamps) if stamps else None
+
+
+def is_fresh(stamp: str | None) -> bool:
+    """Observation récente : moins de deux intervalles de collecte (INC-03)."""
+    if not stamp:
+        return False
+    try:
+        when = datetime.fromisoformat(stamp)
+    except (TypeError, ValueError):
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - when).total_seconds() <= 2 * COLLECT_INTERVAL_S
+
+
 async def snapshot_age_s() -> float | None:
     """Âge de l'instantané, en secondes. None si aucun instantané.
 
@@ -263,7 +358,8 @@ async def fleet_summary(
 
     total = len(nodes)
     up = by_state.get("up", 0)
-    measured_nodes = total - by_state.get("maintenance", 0)
+    supervised = supervised_count(by_state)
+    unsupervised = by_state.get("unknown", 0) + by_state.get("silent", 0)
     return {
         "nodes_total": total,
         "nodes_by_state": by_state,
@@ -278,10 +374,49 @@ async def fleet_summary(
         # du parc à l'instant présent, et il est nommé pour qu'on ne les
         # confonde pas.
         "fleet_health_pct": round(100.0 * up / total, 2) if total else None,
+        # « Parc en service (instantané) » : en service ÷ équipements
+        # SUPERVISÉS. Un équipement sans observation (inconnu, muet) n'est
+        # ni en service ni en panne : il est compté à part (non supervisé) et
+        # n'entre pas dans le dénominateur — sinon un site sans supervision
+        # s'affiche à 0 % sans aucune panne (amendement CTC, AM-29).
+        # None = aucun équipement supervisé : l'écran affiche « Non supervisé ».
         "fleet_availability_pct": (
-            round(100.0 * up / measured_nodes, 2) if measured_nodes else None
+            round(100.0 * up / supervised, 2) if supervised else None
         ),
+        "nodes_supervised": supervised,
+        "nodes_unsupervised": unsupervised,
+        # Base du calcul, affichée sous l'indicateur (AM-34) : « 956 / 1 381 ».
+        "availability_basis": {
+            "up": up,
+            "supervised": supervised,
+            "unsupervised": unsupervised,
+            "maintenance": by_state.get("maintenance", 0),
+            "total": total,
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+        },
     }
+
+
+def is_core(node: dict) -> bool:
+    """Équipement de cœur : membre d'un groupe de NOC_CORE_GROUPS."""
+    return any(str(group).strip().lower() in CORE_GROUPS for group in node.get("groups") or ())
+
+
+async def core_node_ids() -> set[str] | None:
+    """None si l'instantané est indisponible : la classe est alors inconnue."""
+    try:
+        return {node["id"] for node in await get_nodes() if is_core(node)}
+    except SnapshotUnavailable:
+        return None
+
+
+def supervised_count(by_state: dict[str, int]) -> int:
+    """Équipements dont l'état est OBSERVÉ : en service, dégradés ou en panne.
+
+    Règle unique du NOC (AM-29) : la maintenance planifiée et l'absence
+    d'observation (inconnu, muet) sortent du dénominateur de tous les taux.
+    """
+    return sum(by_state.get(state, 0) for state in ("up", "degraded", "down"))
 
 
 async def sites_summary(
@@ -351,14 +486,15 @@ async def sites_summary(
         bucket["alerts"] += node.get("alerts", 0)
 
     for bucket in sites.values():
-        # Une observation inconnue, muette ou dégradée ne prouve pas que
-        # l'équipement est disponible. Les maintenances sont exclues du
-        # dénominateur; tous les autres états non-up comptent comme indisponibles.
-        measured_nodes = bucket["nodes"] - bucket["maintenance"]
+        # Dénominateur = équipements supervisés (en service, dégradés, en
+        # panne). Inconnus et muets sont comptés à part (`unsupervised`) :
+        # ils ne prouvent ni la disponibilité ni la panne (AM-29). Un site
+        # sans aucun équipement supervisé rend None → « Non supervisé ».
+        supervised = supervised_count(bucket)
+        bucket["supervised"] = supervised
+        bucket["unsupervised"] = bucket["unknown"] + bucket["silent"]
         bucket["availability_pct"] = (
-            round(100 * bucket["up"] / measured_nodes, 2)
-            if measured_nodes
-            else None
+            round(100 * bucket["up"] / supervised, 2) if supervised else None
         )
 
     rows = list(sites.values())
@@ -402,9 +538,11 @@ async def summarise_organisations(
         bucket["alerts"] += node.get("alerts", 0)
 
     for bucket in organisations.values():
-        measured = bucket["nodes"] - bucket["maintenance"]
+        supervised = supervised_count(bucket)
+        bucket["supervised"] = supervised
+        bucket["unsupervised"] = bucket["unknown"] + bucket["silent"]
         bucket["availability_pct"] = (
-            round(100 * bucket["up"] / measured, 2) if measured else None
+            round(100 * bucket["up"] / supervised, 2) if supervised else None
         )
     return sorted(
         organisations.values(),

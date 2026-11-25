@@ -10,7 +10,7 @@ import { Badge } from "../components/ui/Badge";
 import { DefRow } from "../components/ui/Stat";
 import { ROLE_DESCRIPTION, ROLE_LABEL } from "../lib/permissions";
 import { auth, notifications } from "../api/noc";
-import { dateTime } from "../lib/format";
+import { dateTime, phoneValid } from "../lib/format";
 import { errorMessage } from "../api/client";
 import { useAuthStore } from "../store/auth";
 import { useCurrentUser } from "../hooks/useSession";
@@ -46,6 +46,8 @@ export default function AccountPage() {
   const setTheme = useUiStore((s) => s.setTheme);
   const autoRefresh = useUiStore((s) => s.autoRefresh);
   const setAutoRefresh = useUiStore((s) => s.setAutoRefresh);
+  const uiScale = useUiStore((s) => s.uiScale);
+  const setUiScale = useUiStore((s) => s.setUiScale);
 
   const [feedback, setFeedback] = useState(null);
   const [logoutOpen, setLogoutOpen] = useState(false);
@@ -164,7 +166,25 @@ export default function AccountPage() {
               />
             </Field>
 
-            <div className="flex items-center gap-2 text-[11.5px]" style={{ color: "var(--ink-3)" }}>
+            <Field
+              label="Taille d'affichage"
+              hint="« Auto » agrandit l'interface sur les très grands écrans (mur de supervision, écran 4K) pour qu'elle reste lisible à distance. Un facteur fixe l'impose sur ce poste."
+            >
+              <Segmented
+                ariaLabel="Taille d'affichage"
+                value={uiScale ?? "auto"}
+                onChange={setUiScale}
+                options={[
+                  { value: "auto", label: "Auto" },
+                  { value: "1", label: "100 %" },
+                  { value: "1.25", label: "125 %" },
+                  { value: "1.5", label: "150 %" },
+                  { value: "2", label: "200 %" },
+                ]}
+              />
+            </Field>
+
+            <div className="flex items-center gap-2 text-[12px]" style={{ color: "var(--ink-3)" }}>
               {theme === "dark" ? <Moon size={13} /> : <Sun size={13} />}
               <Monitor size={13} />
               Ces préférences sont mémorisées sur ce poste uniquement.
@@ -190,7 +210,7 @@ export default function AccountPage() {
               </button>
             )}
             {pushState === "denied" && (
-              <span className="text-[11px]" style={{ color: "var(--sev-medium)" }}>
+              <span className="text-[12px]" style={{ color: "var(--sev-medium)" }}>
                 Refusées dans les réglages du navigateur — à réautoriser depuis la barre
                 d'adresse.
               </span>
@@ -249,6 +269,7 @@ function IdentityPanel({ user, onSaved, onLogout }) {
     form.full_name.trim() &&
     !usernameInvalid &&
     !emailInvalid &&
+    phoneValid(form.phone_number) &&
     !notifyWithoutEmail &&
     (!usernameChanged || currentPassword);
 
@@ -287,7 +308,7 @@ function IdentityPanel({ user, onSaved, onLogout }) {
       <form onSubmit={submit} className="space-y-2.5">
         {error && <Notice tone="error">{error}</Notice>}
 
-        <div className="grid grid-cols-2 gap-2.5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
           <Field
             label="Identifiant"
             required
@@ -310,7 +331,7 @@ function IdentityPanel({ user, onSaved, onLogout }) {
           </Field>
         </div>
 
-        <div className="grid grid-cols-2 gap-2.5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
           <Field
             label="Courriel"
             error={
@@ -329,11 +350,16 @@ function IdentityPanel({ user, onSaved, onLogout }) {
               autoComplete="email"
             />
           </Field>
-          <Field label="Téléphone">
+          <Field
+            label="Téléphone"
+            error={phoneValid(form.phone_number) ? null : "8 à 15 chiffres, « + » possible au début."}
+          >
             <input
               className="input"
               value={form.phone_number}
               onChange={set("phone_number")}
+              type="tel"
+              maxLength={30}
               autoComplete="tel"
             />
           </Field>
@@ -373,7 +399,7 @@ function IdentityPanel({ user, onSaved, onLogout }) {
       <div className="mt-3 pt-2.5 border-t" style={{ borderColor: "var(--border)" }}>
         <DefRow label="Rôle">
           <Badge color="var(--accent-ink)">{ROLE_LABEL[user.role] ?? user.role}</Badge>
-          <span className="block text-[11px] mt-1" style={{ color: "var(--ink-3)" }}>
+          <span className="block text-[12px] mt-1" style={{ color: "var(--ink-3)" }}>
             {ROLE_DESCRIPTION[user.role]} Seul un Chef NOC peut modifier un rôle.
           </span>
         </DefRow>
@@ -395,7 +421,7 @@ function IdentityPanel({ user, onSaved, onLogout }) {
   );
 }
 
-function PasswordPanel({ onChanged }) {
+export function PasswordPanel({ onChanged }) {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
@@ -456,7 +482,7 @@ function PasswordPanel({ onChanged }) {
             autoComplete="new-password"
           />
         </Field>
-        <p className="text-[10.5px]" style={{ color: "var(--ink-3)" }}>
+        <p className="text-[12px]" style={{ color: "var(--ink-3)" }}>
           Toutes vos sessions seront fermées, y compris celle-ci : reconnectez-vous avec le
           nouveau mot de passe.
         </p>

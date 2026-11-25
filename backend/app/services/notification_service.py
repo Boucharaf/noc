@@ -263,6 +263,34 @@ def _deliver(subject: str, html_body: str, text_body: str, recipients: list[str]
         server.send_message(message)
 
 
+def deliver_with_attachment(
+    subject: str, text_body: str, recipients: list[str], path: str, filename: str
+) -> None:
+    """Courriel avec une pièce jointe PDF (rapport hebdomadaire, AM-27).
+    LÈVE en cas d'échec, comme _deliver."""
+    if not SMTP_HOST:
+        raise RuntimeError("Courriel non configuré (SMTP_HOST vide)")
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = SMTP_FROM
+    message["To"] = ", ".join(recipients)
+    message.set_content(text_body)
+    with open(path, "rb") as handle:
+        message.add_attachment(
+            handle.read(), maintype="application", subtype="pdf", filename=filename
+        )
+    if SMTP_USE_SSL:
+        server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30, context=_tls_context())
+    else:
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
+    with server:
+        if SMTP_USE_TLS and not SMTP_USE_SSL:
+            server.starttls(context=_tls_context())
+        if SMTP_USER:
+            server.login(SMTP_USER, SMTP_PASSWORD)
+        server.send_message(message)
+
+
 def send_email(
     alert_key: str,
     subject: str,
@@ -294,6 +322,40 @@ def send_email(
             alert_key, "email", subject=subject, text_body=text_body,
             html_body=html_body, site=site, error=str(exc),
         )
+
+
+def send_password_reset_email(address: str, name: str, link: str, minutes: int) -> bool:
+    """Courriel de réinitialisation du mot de passe. Rend False (et
+    journalise) si l'envoi échoue : la route répond la même chose dans tous
+    les cas, pour ne pas révéler l'existence du compte."""
+    if not SMTP_HOST:
+        logger.warning("Réinitialisation demandée mais courriel non configuré (SMTP_HOST vide)")
+        return False
+    subject = "NOC ANPTIC — réinitialisation de votre mot de passe"
+    text = (
+        f"Bonjour {name},\n\n"
+        "Une réinitialisation du mot de passe de votre compte NOC a été demandée.\n"
+        f"Pour choisir un nouveau mot de passe, ouvrez ce lien (valable {minutes} minutes, "
+        f"une seule fois) :\n\n{link}\n\n"
+        "Si vous n'êtes pas à l'origine de cette demande, ignorez ce message : votre mot de "
+        "passe actuel reste valable. Prévenez le Chef NOC si cela se reproduit.\n"
+    )
+    safe_name = html.escape(name)
+    safe_link = html.escape(link, quote=True)
+    body = (
+        f"<p>Bonjour {safe_name},</p>"
+        "<p>Une réinitialisation du mot de passe de votre compte NOC a été demandée.</p>"
+        f'<p><a href="{safe_link}">Choisir un nouveau mot de passe</a> '
+        f"(lien valable {minutes} minutes, une seule fois).</p>"
+        "<p>Si vous n'êtes pas à l'origine de cette demande, ignorez ce message : votre mot "
+        "de passe actuel reste valable. Prévenez le Chef NOC si cela se reproduit.</p>"
+    )
+    try:
+        _deliver(subject, body, text, [address])
+        return True
+    except Exception as exc:  # noqa: BLE001 — la réponse HTTP ne doit pas en dépendre
+        logger.error("Courriel de réinitialisation non envoyé : %s", exc)
+        return False
 
 
 def send_test_email(recipients: list[str], requested_by: str) -> None:

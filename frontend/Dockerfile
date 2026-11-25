@@ -1,4 +1,5 @@
-FROM node:22-alpine AS builder
+# Node 24 : version LTS active (support de sécurité jusqu'en 2028).
+FROM node:24-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
 # `npm ci` et non `npm install` : installe EXACTEMENT les versions du
@@ -8,7 +9,9 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
-FROM nginx:alpine
+# Branche STABLE de nginx (correctifs de sécurité, sans les nouveautés de
+# la branche principale) ; reconstruire régulièrement pour les recevoir.
+FROM nginx:stable-alpine
 COPY --from=builder /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80

@@ -78,14 +78,32 @@ apiClient.interceptors.response.use(
 );
 
 /** Message lisible pour l'utilisateur à partir d'une erreur axios. */
+const STATUS_MESSAGE = {
+  429: "Trop de requêtes. Patientez une minute.",
+  500: "Le serveur a rencontré une erreur. Réessayez ; si cela dure, prévenez le Chef NOC.",
+  502: "Le service est momentanément indisponible.",
+  503: "Le service est momentanément indisponible.",
+  504: "Le serveur met trop de temps à répondre.",
+};
+
 export function errorMessage(error, fallback = "Une erreur est survenue.") {
   if (!error) return fallback;
+  if (error.code === "ECONNABORTED") return STATUS_MESSAGE[504];
   if (error.isNetworkError) return "Backend injoignable. Vérifiez la connexion.";
   const detail = error.response?.data?.detail;
   if (typeof detail === "string") return detail;
+  // Détail structuré du backend : { error, message, … }.
+  if (detail && typeof detail === "object" && typeof detail.message === "string") {
+    return detail.message;
+  }
   // Erreur de validation FastAPI : liste d'objets {loc, msg}.
   if (Array.isArray(detail) && detail.length) {
     return detail.map((d) => d.msg).join(" · ");
+  }
+  // Jamais le texte brut de la bibliothèque (« Request failed with status
+  // code 503 ») : il ne dit rien à l'exploitant.
+  if (error.response) {
+    return STATUS_MESSAGE[error.response.status] ?? `${fallback} (code ${error.response.status})`;
   }
   return error.message || fallback;
 }

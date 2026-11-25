@@ -354,8 +354,8 @@ préfixer par `sudo`. Remplacer `noc` / `noc` si `POSTGRES_USER` /
 git pull
 
 # 2. Sauvegarder la base du NOC
-docker compose exec -T postgres pg_dump -U noc -d noc --clean --if-exists \
-  > sauvegarde_noc_$(date +%F).sql
+docker compose up -d backup
+docker compose exec backup sh /usr/local/bin/noc-backup.sh now   # « Sauvegarde réussie » attendu
 
 # 3. Arrêter ce qui écrit dans la base
 docker compose stop collector backend
@@ -364,9 +364,10 @@ docker compose stop collector backend
 docker compose exec -T postgres psql -U noc -d noc -v ON_ERROR_STOP=1 \
   < backend/sql/schema.sql
 
-# 5. Aligner la révision Alembic (révision courante : 0006)
+# 5. Aligner la révision Alembic (révision courante : 0013),
+#    seulement si la table alembic_version existe
 docker compose exec -T postgres psql -U noc -d noc \
-  -c "UPDATE alembic_version SET version_num = '0006_history_journal'"
+  -c "UPDATE alembic_version SET version_num = '0013_availability_weights'"
 
 # 6. Reconstruire et relancer
 docker compose up -d --build
@@ -383,9 +384,16 @@ docker compose exec -T postgres psql -U noc -d noc -c "\dt hist_*"
 > `ops_field_intervention`) **avec leur contenu**, et crée le journal
 > historique (`hist_state`, `hist_alert`) et la file des notifications à
 > retenter (`ops_notification_retry`). D'où la sauvegarde de l'étape 2.
+>
+> Depuis le 24 novembre 2026, il ajoute les acquittements
+> (`hist_alert_event`), le registre d'identité (`noc_asset*`), la santé des
+> outils (`hist_tool_health`) et les rapports figés (`report_snapshot`), sans
+> rien supprimer. **Toujours rejouer `schema.sql` avant de relancer le
+> collecteur et le backend.** La colonne `must_change_password` (même date) est
+> lue à chaque connexion : sans elle, **personne ne peut se connecter**.
 
 Sur une VM, mettre la sauvegarde à l'abri depuis son poste :
-`scp utilisateur@vm:/chemin/noc/sauvegarde_noc_*.sql .`
+`scp utilisateur@vm:/chemin/noc/sauvegardes/noc_*.dump .` (dossier `BACKUP_DIR`)
 
 En PowerShell, l'étape 4 s'écrit :
 `Get-Content backend/sql/schema.sql -Raw | docker compose exec -T postgres psql -U noc -d noc -v ON_ERROR_STOP=1`.
@@ -443,8 +451,11 @@ refaire le test.
 | Réinitialiser un mot de passe | `docker compose exec backend python scripts/create_user.py -u <identifiant> --reset-password -p "<nouveau>"` |
 | Lister les comptes | `docker compose exec backend python scripts/create_user.py --list` |
 | Mettre à jour le schéma de la base | `docker compose exec -T postgres psql -U noc -d noc -v ON_ERROR_STOP=1 < backend/sql/schema.sql` |
-| Sauvegarder la base du NOC | `docker compose exec -T postgres pg_dump -U noc -d noc --clean --if-exists > sauvegarde_noc.sql` |
-| Restaurer une sauvegarde | `docker compose exec -T postgres psql -U noc -d noc < sauvegarde_noc.sql` |
+| Sauvegarder la base du NOC tout de suite (sinon : chaque nuit) | `docker compose exec backup sh /usr/local/bin/noc-backup.sh now` |
+| Vérifier que la dernière sauvegarde se restaure | `docker compose exec backup sh /usr/local/bin/noc-backup.sh verify` |
+| Restaurer une sauvegarde | [docs/09](docs/09-exploitation.md#sauvegarder-et-restaurer) |
+| Décisions d'identité des équipements | `docker compose exec collector python -m collector.identity events --days 7` |
+| Ce que la conservation supprimerait | `docker compose exec collector python -m collector.retention preview` |
 | Vérifier ce qu'un outil renvoie, sans rien publier | `docker compose run --rm collector python -m collector.probe <outil>` |
 | Compléter les bilans journaliers manquants depuis le journal | `docker compose exec collector python -m collector.history backfill --days 30` |
 | Recalculer les bilans d'une période | `docker compose exec collector python -m collector.history rebuild-daily --from 2026-10-01 --to 2026-10-31 --overwrite` |
@@ -479,13 +490,18 @@ cd ../frontend && npm install && npm run lint && npm run build
 | `SECRET_KEY` | Signature des jetons de connexion (≥ 32 caractères) | — (obligatoire) |
 | `POSTGRES_PASSWORD` | Mot de passe de la base du NOC | — (obligatoire) |
 | `REDIS_PASSWORD` | Mot de passe de Redis | — (obligatoire) |
-| `COLLECT_INTERVAL_S` | Cadence de lecture des outils, en secondes. **C'est la charge imposée à la production** : une série de requêtes par outil par intervalle. | `300` |
+| `COLLECT_INTERVAL_S` | Cadence de lecture des outils, en secondes. **C'est la charge imposée à la production** : une série de requêtes par outil par intervalle. | `60` |
 | `<OUTIL>_API_URL`, `_USER`, `_PASSWORD`, `_TOKEN` | Accès à chaque outil. URL vide = outil désactivé. En production, toujours l'URL de l'API ; `postgresql://…` (NetXMS) et `file://…` (Centreon) ne servent qu'aux exports locaux. | laboratoire local |
 | `NETXMS_SITE_ATTRIBUTE` | NetXMS par API : attribut personnalisé portant le site administratif (sinon, la ville) | vide |
 | `NETXMS_COLLECT_INTERFACES` | NetXMS par API : lire les interfaces (liens, capacité) — la lecture la plus lourde | `true` |
 | `NAGIOS_MODE`, `NSP_FM_MODE` | Mode d'accès Nagios (`statusjson`, `livestatus`) et NSP (`yang`, `classic`) | `unknown` |
 | `HISTORY_ENABLED` | Journal historique (disponibilité sur la durée, liens, rattrapage des bilans) | `true` |
 | `HISTORY_RETENTION_DAYS` | Conservation du journal, en jours (0 = indéfiniment) | `0` |
+| `BACKUP_DIR`, `BACKUP_OFFSITE_DIR` | Dossier des sauvegardes ; partage d'une autre machine. Hors de tout dossier synchronisé (OneDrive…) | `./sauvegardes`, vide |
+| `BACKUP_HOUR`, `BACKUP_KEEP_DAYS` | Heure de la sauvegarde ; jours de conservation | `2`, `30` |
+| `RETENTION_ENABLED`, `RETENTION_*_DAYS` | Purge des données anciennes : les deux sont nécessaires | `false`, `0` |
+| `REPORT_FREEZE_ENABLED` | Rapport du mois précédent figé automatiquement. `false` tant que les données viennent d'un dump | `true` |
+| `IDENTITY_TIMEOUT_S` | Délai de lecture du registre d'identité, avant publication | `10` |
 | `ROLLUP_HOUR`, `ROLLUP_RETRY_S` | Heure du bilan journalier ; délai entre deux essais s'il échoue | `1`, `900` |
 | `NOTIFICATIONS_ENABLED` | Envoi automatique des courriels et SMS | `false` |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_USE_TLS` | Serveur de messagerie | vide |
@@ -548,8 +564,10 @@ confiance au backend.
 | Le backend redémarre en boucle | `SECRET_KEY` absente ou trop courte | La renseigner (≥ 32 caractères) |
 | nginx ne démarre pas | Certificat absent | `bash nginx/generate_cert.sh` |
 | Tableau de bord vide | Aucune source branchée, ou collecteur arrêté | Écran *Collecte ETL* ; `docker compose logs collector` |
-| « Collecte interrompue » | Le collecteur ne publie plus depuis 15 min | `docker compose restart collector`, puis lire ses journaux |
+| « Collecte interrompue » | Le collecteur ne publie plus depuis 3 min | `docker compose restart collector`, puis lire ses journaux |
 | *Collecte ETL* : Nagios « En erreur » | URL renseignée mais conteneur de laboratoire non démarré | `docker compose --profile nagios up -d nagios` |
+| *Collecte ETL* : Zabbix « No address associated with hostname » | Zabbix de laboratoire arrêté (à la main, ou jamais lancé) | `docker compose --profile zabbix up -d` |
+| *Collecte ETL* : iTop « tlsv1 unrecognized name » | Le serveur iTop ne sert pas (ou plus) ce nom | [docs/09](docs/09-exploitation.md#dépannage-par-symptôme) |
 | *Collecte ETL* : NSP « Non configuré » | `NSP_API_URL` vide ou `NSP_FM_MODE=unknown` | En local : simulateur (§ 3.3) ; en production : l'instance de l'agence |
 | Journaux du collecteur : « Journal historique non mis à jour » ; fiche équipement : « Historique indisponible » | Schéma pas mis à jour (tables `hist_*` absentes) | [§ 4](#4-mettre-à-jour-une-installation-existante), étapes 2 à 6 |
 | NetXMS (dump) : fiche technique vide (inventaire, liens) | Droits du compte `noc_reader` d'avant la fiche technique | Rejouer `netxms_readonly_role.sql` (§ 3.1) |

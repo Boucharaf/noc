@@ -21,13 +21,13 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from app.core.config import COLLECT_INTERVAL_S
+from app.core.config import COLLECT_INTERVAL_S, COLLECT_SLOW_INTERVAL_S, COLLECT_SLOW_TOOLS
 from app.services import live_service, node_service
 
 logger = logging.getLogger(__name__)
 
 
-def _freshness(checked_at: str | None) -> tuple[float | None, bool]:
+def _freshness(checked_at: str | None, tool: str | None = None) -> tuple[float | None, bool]:
     """Âge d'un contrôle et sa péremption.
 
     Le seuil est de deux cycles : un cycle raté est un incident de parcours,
@@ -43,16 +43,22 @@ def _freshness(checked_at: str | None) -> tuple[float | None, bool]:
     if at.tzinfo is None:
         at = at.replace(tzinfo=timezone.utc)
     age = (datetime.now(timezone.utc) - at).total_seconds()
-    return age, age > COLLECT_INTERVAL_S * 2
+    interval = COLLECT_SLOW_INTERVAL_S if tool in COLLECT_SLOW_TOOLS else COLLECT_INTERVAL_S
+    return age, age > interval * 2
 
 
 async def status() -> dict:
     """État complet de la chaîne de collecte."""
     tools = await live_service.get_tools_health()
+    # Heure de la dernière collecte RÉUSSIE de l'inventaire, par outil : ce
+    # que les tuiles affichent comme « dernière donnée » quand l'outil est en
+    # erreur (INC-24). `checked_at` n'est que l'heure du dernier essai.
+    collected = await live_service.source_collected_at()
+    frozen = await live_service.frozen_sources()
 
     rows = []
     for tool in tools:
-        age, stale = _freshness(tool.get("checked_at"))
+        age, stale = _freshness(tool.get("checked_at"), tool["tool"])
         rows.append(
             {
                 "tool": tool["tool"],
@@ -65,6 +71,9 @@ async def status() -> dict:
                 # Message brut de l'outil. Volontairement non reformulé.
                 "error": tool.get("error"),
                 "checked_at": tool.get("checked_at"),
+                # Source arrêtée : joignable, mais sans donnée depuis cette date.
+                "data_until": frozen.get(tool["tool"]),
+                "last_success_at": collected.get(tool["tool"]),
                 "age_s": age,
                 "stale": stale,
             }

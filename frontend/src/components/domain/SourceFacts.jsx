@@ -31,7 +31,7 @@ function Inventory({ facts }) {
 function Availability({ facts }) {
   return (
     <>
-      <div className="flex justify-between text-[11px] mb-1">
+      <div className="flex justify-between text-[12px] mb-1">
         <span style={{ color: "var(--ink-3)" }}>Disponibilité (calcul de l'agence)</span>
         <span className="num">{pct(facts.pct, 2)}</span>
       </div>
@@ -53,7 +53,7 @@ function Interfaces({ facts }) {
       <DefRow label="Interfaces">{num(facts.total)}</DefRow>
       <DefRow label="Activées">
         {num(facts.enabled)}
-        <span className="ml-1.5 text-[11px]" style={{ color: "var(--ink-3)" }}>
+        <span className="ml-1.5 text-[12px]" style={{ color: "var(--ink-3)" }}>
           {num(facts.enabled_up, "0")} actives · {num(facts.enabled_down, "0")} inactives
         </span>
       </DefRow>
@@ -83,7 +83,7 @@ export default function SourceFacts({ details }) {
           <section key={tool}>
             {sources.length > 1 && (
               <h3
-                className="text-[10.5px] font-semibold uppercase tracking-[0.07em] mb-1"
+                className="text-[12px] font-semibold uppercase tracking-[0.07em] mb-1"
                 style={{ color: "var(--ink-3)" }}
               >
                 {toolLabel(tool)}

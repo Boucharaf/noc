@@ -78,7 +78,7 @@ def test_nagios_statusjson_uses_cgi_bitmask_states(monkeypatch):
     assert nodes["web-01"].ip == "10.0.0.1"
     assert nodes["web-01"].site == "Ouaga"
     assert nodes["rt-02"].state == "down"
-    assert nodes["sw-03"].state == "degraded"
+    assert nodes["sw-03"].state == "unknown"   # UNREACHABLE
     assert nodes["new-04"].state == "silent"
     assert nodes["maint-05"].state == "maintenance"
 

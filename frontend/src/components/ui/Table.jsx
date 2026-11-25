@@ -109,7 +109,7 @@ export function Pagination({ page, pages, total, pageSize, onChange, label = "é
       className="flex items-center justify-between gap-3 px-2.5 py-1.5 border-t"
       style={{ borderColor: "var(--border)" }}
     >
-      <span className="text-[11.5px]" style={{ color: "var(--ink-3)" }}>
+      <span className="text-[12px]" style={{ color: "var(--ink-3)" }}>
         <span className="num">{first}</span>–<span className="num">{last}</span> sur{" "}
         <span className="num" style={{ color: "var(--ink-2)" }}>
           {total}
@@ -125,7 +125,7 @@ export function Pagination({ page, pages, total, pageSize, onChange, label = "é
         >
           Précédent
         </button>
-        <span className="num text-[11.5px] px-1.5" style={{ color: "var(--ink-2)" }}>
+        <span className="num text-[12px] px-1.5" style={{ color: "var(--ink-2)" }}>
           {page} / {pages}
         </span>
         <button

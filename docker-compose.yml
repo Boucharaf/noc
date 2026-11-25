@@ -40,6 +40,49 @@ x-tool-sources: &tool-sources
   NSP_API_PASSWORD: ${NSP_API_PASSWORD:-}
   NSP_VERIFY_SSL: ${NSP_VERIFY_SSL:-true}
   NSP_FM_MODE: ${NSP_FM_MODE:-unknown}
+  # Adresses WEB des outils (navigateur de l'exploitant), facultatives :
+  # liens « Acquitter dans l'outil » et « Créer un ticket iTop » (AM-07).
+  ZABBIX_WEB_URL: ${ZABBIX_WEB_URL:-}
+  CENTREON_WEB_URL: ${CENTREON_WEB_URL:-}
+  ITOP_WEB_URL: ${ITOP_WEB_URL:-}
+  NETXMS_WEB_URL: ${NETXMS_WEB_URL:-}
+  NAGIOS_WEB_URL: ${NAGIOS_WEB_URL:-}
+  NSP_WEB_URL: ${NSP_WEB_URL:-}
+  ALERT_OBSOLETE_DAYS: ${ALERT_OBSOLETE_DAYS:-30}
+  # Pannes enregistrées par NetXMS (downtime_log) : source maître de la
+  # disponibilité des équipements NetXMS (collector/downtime.py). Lu par le
+  # collecteur, et par le backend pour savoir s'il doit s'en servir.
+  NETXMS_DOWNTIME_ENABLED: ${NETXMS_DOWNTIME_ENABLED:-false}
+  NETXMS_DOWNTIME_DSN: ${NETXMS_DOWNTIME_DSN:-}
+  NETXMS_DOWNTIME_USER: ${NETXMS_DOWNTIME_USER:-}
+  NETXMS_DOWNTIME_PASSWORD: ${NETXMS_DOWNTIME_PASSWORD:-}
+  NETXMS_DOWNTIME_TAGS: ${NETXMS_DOWNTIME_TAGS:-}
+  # Cadence : outils lus moins souvent que le cycle (iTop).
+  COLLECT_SLOW_TOOLS: ${COLLECT_SLOW_TOOLS:-itop}
+  COLLECT_SLOW_INTERVAL_S: ${COLLECT_SLOW_INTERVAL_S:-300}
+  NETXMS_DOWNTIME_BACKFILL_DAYS: ${NETXMS_DOWNTIME_BACKFILL_DAYS:-400}
+  NETXMS_DOWNTIME_SYNC_S: ${NETXMS_DOWNTIME_SYNC_S:-900}
+  # Pannes des hôtes Centreon (chronologie de l'API REST, connecteur existant).
+  CENTREON_DOWNTIME_ENABLED: ${CENTREON_DOWNTIME_ENABLED:-false}
+  CENTREON_DOWNTIME_BACKFILL_DAYS: ${CENTREON_DOWNTIME_BACKFILL_DAYS:-90}
+  CENTREON_DOWNTIME_SYNC_S: ${CENTREON_DOWNTIME_SYNC_S:-3600}
+  # Pannes Zabbix (déclencheurs de disponibilité) et Nagios (états HARD).
+  ZABBIX_DOWNTIME_ENABLED: ${ZABBIX_DOWNTIME_ENABLED:-false}
+  ZABBIX_DOWNTIME_BACKFILL_DAYS: ${ZABBIX_DOWNTIME_BACKFILL_DAYS:-90}
+  ZABBIX_DOWNTIME_SYNC_S: ${ZABBIX_DOWNTIME_SYNC_S:-900}
+  NAGIOS_DOWNTIME_ENABLED: ${NAGIOS_DOWNTIME_ENABLED:-false}
+  PIN_GLOBAL_MAX_FAILURES: ${PIN_GLOBAL_MAX_FAILURES:-30}
+  PIN_REQUIRE_KNOWN_DEVICE: ${PIN_REQUIRE_KNOWN_DEVICE:-true}
+  PIN_DEVICE_DAYS: ${PIN_DEVICE_DAYS:-180}
+  # Contact du support, affiché sur l'écran de connexion (INC-45).
+  SUPPORT_EMAIL: ${SUPPORT_EMAIL:-}
+  SUPPORT_PHONE: ${SUPPORT_PHONE:-}
+  SUPPORT_HOURS: ${SUPPORT_HOURS:-}
+  NOC_PUBLIC_URL: ${NOC_PUBLIC_URL:-}
+  NODE_NAME_PATTERN: ${NODE_NAME_PATTERN:-}
+  WEEKLY_REPORT_ENABLED: ${WEEKLY_REPORT_ENABLED:-false}
+  WEEKLY_REPORT_RECIPIENTS: ${WEEKLY_REPORT_RECIPIENTS:-}
+  PASSWORD_RESET_TTL_MINUTES: ${PASSWORD_RESET_TTL_MINUTES:-30}
 
 # Équipement réseau de laboratoire (voir « Réseau de laboratoire » plus bas).
 # `environment` n'est pas fusionné par la clé de fusion YAML : chaque
@@ -91,13 +134,19 @@ services:
       <<: *tool-sources
       REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD manquant dans .env}@redis:6379/0
       NOC_DATABASE_URL: postgresql://${POSTGRES_USER:-noc}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD manquant dans .env}@postgres:5432/${POSTGRES_DB:-noc}
-      COLLECT_INTERVAL_S: ${COLLECT_INTERVAL_S:-300}
+      COLLECT_INTERVAL_S: ${COLLECT_INTERVAL_S:-60}
       ROLLUP_ENABLED: ${ROLLUP_ENABLED:-true}
       ROLLUP_HOUR: ${ROLLUP_HOUR:-1}
       ROLLUP_RETRY_S: ${ROLLUP_RETRY_S:-900}
       HISTORY_ENABLED: ${HISTORY_ENABLED:-true}
+      SOURCE_FROZEN_HOURS: ${SOURCE_FROZEN_HOURS:-24}
       HISTORY_RETENTION_DAYS: ${HISTORY_RETENTION_DAYS:-0}
       HISTORY_TIMEOUT_S: ${HISTORY_TIMEOUT_S:-60}
+      RETENTION_ENABLED: ${RETENTION_ENABLED:-false}
+      RETENTION_AUDIT_DAYS: ${RETENTION_AUDIT_DAYS:-0}
+      RETENTION_NOTIFICATION_DAYS: ${RETENTION_NOTIFICATION_DAYS:-0}
+      RETENTION_TOOL_HEALTH_DAYS: ${RETENTION_TOOL_HEALTH_DAYS:-0}
+      RETENTION_KPI_DAYS: ${RETENTION_KPI_DAYS:-0}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       TZ: ${TZ:-Africa/Ouagadougou}
     depends_on:
@@ -107,6 +156,8 @@ services:
         condition: service_healthy
     security_opt:
       - no-new-privileges:true
+    # Aucun privilège noyau : ni changement d'utilisateur, ni réseau brut.
+    cap_drop: [ALL]
     restart: unless-stopped
     healthcheck:
       # Aligné sur l'état dégradé du backend : un instantané vieux de plus de
@@ -139,11 +190,19 @@ services:
       # DOIT valoir la même chose que pour le collecteur : cette valeur fixe
       # la durée de vie des clés d'instantané. Si le backend la croit plus
       # courte, il déclarera la collecte interrompue alors qu'elle tourne.
-      COLLECT_INTERVAL_S: ${COLLECT_INTERVAL_S:-300}
+      COLLECT_INTERVAL_S: ${COLLECT_INTERVAL_S:-60}
+      # Disponibilité : seuils « vert,orange » de l'agence (KPI-01, KPI-02).
+      NOC_CORE_GROUPS: ${NOC_CORE_GROUPS:-core}
+      AVAILABILITY_THRESHOLDS_CORE: ${AVAILABILITY_THRESHOLDS_CORE:-99.9,99}
+      AVAILABILITY_THRESHOLDS_ACCESS: ${AVAILABILITY_THRESHOLDS_ACCESS:-99,97}
+      FLEET_THRESHOLDS: ${FLEET_THRESHOLDS:-98,90}
+      HEALTH_AVAILABILITY_DAYS: ${HEALTH_AVAILABILITY_DAYS:-1}
+      FAILURE_MERGE_S: ${FAILURE_MERGE_S:-900}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY manquant dans .env}
-      # Seule route concernée : POST /api/internal/reports/monthly, pour une
-      # tâche planifiée externe. Vide, la route répond 503.
+      # Clé de service : POST /api/internal/reports/monthly (appelée depuis la
+      # machine, jamais par nginx) et détail de /api/health pour la sonde
+      # Zabbix. Vide, la route interne répond 503.
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-}
       TRUSTED_PROXY_IPS: ${NGINX_API_PROXY_IP:-172.31.250.4}
       ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
@@ -157,7 +216,7 @@ services:
       RATE_LIMIT_WRITE_PER_MIN: ${RATE_LIMIT_WRITE_PER_MIN:-30}
       RATE_LIMIT_USER_READ_PER_MIN: ${RATE_LIMIT_USER_READ_PER_MIN:-300}
       RATE_LIMIT_USER_WRITE_PER_MIN: ${RATE_LIMIT_USER_WRITE_PER_MIN:-90}
-      LOGIN_MAX_FAILURES_PER_USER: ${LOGIN_MAX_FAILURES_PER_USER:-10}
+      LOGIN_MAX_FAILURES_PER_USER: ${LOGIN_MAX_FAILURES_PER_USER:-5}
       LOGIN_MAX_FAILURES_PER_IP: ${LOGIN_MAX_FAILURES_PER_IP:-30}
       LOGIN_LOCK_WINDOW_SECONDS: ${LOGIN_LOCK_WINDOW_SECONDS:-900}
       API_DOCS_ENABLED: ${API_DOCS_ENABLED:-false}
@@ -191,6 +250,7 @@ services:
       NOC_EMAIL_RECIPIENTS: ${NOC_EMAIL_RECIPIENTS:-}
       DASHBOARD_URL: ${DASHBOARD_URL:-}
       REPORT_OUTPUT_DIR: /reports
+      REPORT_FREEZE_ENABLED: ${REPORT_FREEZE_ENABLED:-true}
       REPORT_ORGANISATION: ${REPORT_ORGANISATION:-ANPTIC — RESINA}
       TZ: ${TZ:-Africa/Ouagadougou}
     volumes:
@@ -202,6 +262,8 @@ services:
         condition: service_healthy
     security_opt:
       - no-new-privileges:true
+    # Aucun privilège noyau : ni changement d'utilisateur, ni réseau brut.
+    cap_drop: [ALL]
     networks:
       - default
       - api_proxy
@@ -306,13 +368,52 @@ services:
       timeout: 5s
       retries: 10
 
-  nginx:
-    build: ./nginx
+  # Sauvegarde quotidienne de la base du NOC, restaurée à blanc à chaque fois
+  # (docs/09-exploitation.md). BACKUP_OFFSITE_DIR doit être un partage monté
+  # d'une AUTRE machine : une copie sur le même disque ne protège pas du disque.
+  backup:
+    image: postgres:16-alpine
+    entrypoint: ["sh", "/usr/local/bin/noc-backup.sh"]
+    command: ["run"]
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-noc}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD manquant dans .env}
+      PGDATABASE: ${POSTGRES_DB:-noc}
+      BACKUP_HOUR: ${BACKUP_HOUR:-2}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-30}
+      BACKUP_OFFSITE_DIR: ${BACKUP_OFFSITE_DIR:-}
+      TZ: ${TZ:-Africa/Ouagadougou}
+    volumes:
+      - ./backup/noc-backup.sh:/usr/local/bin/noc-backup.sh:ro
+      - ${BACKUP_DIR:-./sauvegardes}:/backups
+      - ${BACKUP_OFFSITE_DIR:-./sauvegardes}:/offsite
+    depends_on:
+      postgres:
+        condition: service_healthy
     security_opt:
       - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "sh", "/usr/local/bin/noc-backup.sh", "health"]
+      interval: 5m
+      timeout: 10s
+      start_period: 5m
+      retries: 2
+
+  nginx:
+    build: ./nginx
+    environment:
+      NOC_FRONT_PROXY_IPS: ${NOC_FRONT_PROXY_IPS:-}
+    security_opt:
+      - no-new-privileges:true
+    # SEULS ports ouverts au réseau : la redirection HTTP→HTTPS et le NOC en
+    # HTTPS. NOC_BIND_ADDRESS limite l'écoute à une interface (par exemple
+    # l'adresse du réseau d'administration de la VM) ; par défaut, toutes.
+    # Tout le reste est publié sur 127.0.0.1 ou pas du tout.
     ports:
-      - "8888:80"
-      - "8443:443"
+      - "${NOC_BIND_ADDRESS:-0.0.0.0}:8888:80"
+      - "${NOC_BIND_ADDRESS:-0.0.0.0}:8443:443"
     volumes:
       - ./nginx/certs:/etc/nginx/certs:ro
     depends_on:
@@ -378,6 +479,7 @@ services:
   zabbix-db:
     profiles: ["tools", "zabbix"]
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       - POSTGRES_USER=${ZABBIX_DB_USER:-zabbix}
       - POSTGRES_PASSWORD=${ZABBIX_DB_PASSWORD:-zabbix}
@@ -399,6 +501,7 @@ services:
   zabbix-server:
     profiles: ["tools", "zabbix"]
     image: zabbix/zabbix-server-pgsql:alpine-7.0.23
+    restart: unless-stopped
     environment:
       - DB_SERVER_HOST=zabbix-db
       - POSTGRES_USER=${ZABBIX_DB_USER:-zabbix}
@@ -440,6 +543,7 @@ services:
   zabbix-web:
     profiles: ["tools", "zabbix"]
     image: zabbix/zabbix-web-nginx-pgsql:alpine-7.0.23
+    restart: unless-stopped
     environment:
       - ZBX_SERVER_HOST=zabbix-server
       - DB_SERVER_HOST=zabbix-db
@@ -466,6 +570,7 @@ services:
   zabbix-agent:
     profiles: ["tools", "zabbix"]
     image: zabbix/zabbix-agent2:alpine-7.0.23
+    restart: unless-stopped
     hostname: zabbix-agent
     environment:
       - ZBX_HOSTNAME=Zabbix server

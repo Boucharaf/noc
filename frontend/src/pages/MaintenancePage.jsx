@@ -62,8 +62,8 @@ function MaintenanceTimeline({ windows }) {
     <div className="relative" style={{ paddingTop: 18 }}>
       {ticks.map((t) => (
         <div key={t} className="absolute top-0 bottom-0" style={{ left: x(t), borderLeft: "1px dashed var(--border)" }}>
-          <span className="absolute text-[10px] num -translate-x-1/2" style={{ top: -2, color: "var(--ink-3)" }}>
-            {new Date(t).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" })}
+          <span className="absolute text-[12px] num -translate-x-1/2" style={{ top: -2, color: "var(--ink-3)" }}>
+            {new Date(t).toLocaleDateString("fr-FR", { timeZone: "Africa/Ouagadougou", day: "2-digit", month: "2-digit" })}
           </span>
         </div>
       ))}
@@ -94,7 +94,7 @@ function MaintenanceTimeline({ windows }) {
                 title={`${w.title} — ${dateTime(w.start)} → ${w.end ? dateTime(w.end) : "non bornée"}`}
               />
               <span
-                className="absolute top-0 bottom-0 flex items-center text-[11px] whitespace-nowrap px-1.5"
+                className="absolute top-0 bottom-0 flex items-center text-[12px] whitespace-nowrap px-1.5"
                 style={
                   alignRight
                     ? { right: `calc(100% - ${x(start)})` }
@@ -153,7 +153,7 @@ export default function MaintenancePage() {
       render: (w) => (
         <span>
           <span className="font-medium">{w.title}</span>
-          <span className="block text-[11px]" style={{ color: "var(--ink-3)" }}>
+          <span className="block text-[12px]" style={{ color: "var(--ink-3)" }}>
             {SOURCE[w.kind] ?? w.tool}
             {w.kind === "change" && w.ref ? ` ${w.ref}` : ""}
             {w.change_type ? ` · ${w.change_type.replace("Change", "")}` : ""}
@@ -177,10 +177,10 @@ export default function MaintenancePage() {
       header: "Début → fin",
       width: 230,
       render: (w) => (
-        <span className="num text-[11.5px]">
+        <span className="num text-[12px]">
           {dateTime(w.start)} → {w.end ? dateTime(w.end) : "non bornée"}
           {w.start && w.end && (
-            <span className="block text-[11px]" style={{ color: "var(--ink-3)" }}>
+            <span className="block text-[12px]" style={{ color: "var(--ink-3)" }}>
               durée {duration((new Date(w.end) - new Date(w.start)) / 60000)}
             </span>
           )}
@@ -208,14 +208,14 @@ export default function MaintenancePage() {
             ))}
             {w.nodes_total > 3 && ` + ${num(w.nodes_total - 3)}`}
             {w.sites?.length > 0 && (
-              <span className="block text-[11px]" style={{ color: "var(--ink-3)" }}>
+              <span className="block text-[12px]" style={{ color: "var(--ink-3)" }}>
                 {w.sites.slice(0, 3).join(" · ")}
                 {w.sites.length > 3 ? " …" : ""}
               </span>
             )}
           </span>
         ) : (
-          <span className="text-[11.5px]" style={{ color: "var(--sev-medium)" }}>
+          <span className="text-[12px]" style={{ color: "var(--sev-medium)" }}>
             {w.cis?.length
               ? `${num(w.cis.length)} CI non retrouvé(s) dans la supervision`
               : "aucun CI rattaché"}
@@ -266,7 +266,7 @@ export default function MaintenancePage() {
         <div className="p-2 border-b" style={{ borderColor: "var(--border)" }}>
           <Toolbar
             right={
-              <span className="text-[11.5px]" style={{ color: "var(--ink-3)" }}>
+              <span className="text-[12px]" style={{ color: "var(--ink-3)" }}>
                 <span className="num" style={{ color: "var(--ink-2)" }}>{num(rows.length)}</span> maintenance(s)
               </span>
             }
@@ -291,7 +291,7 @@ export default function MaintenancePage() {
         </QueryBoundary>
       </Panel>
 
-      <p className="text-[11px] px-1" style={{ color: "var(--ink-3)" }}>
+      <p className="text-[12px] px-1" style={{ color: "var(--ink-3)" }}>
         Statuts iTop : {Object.values(CHANGE_STATUS).map((s) => s.label).join(", ")}. Un changement refusé ou
         non approuvé n'est pas affiché ; un changement clos ne neutralise plus ses équipements.
       </p>

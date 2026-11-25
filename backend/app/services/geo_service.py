@@ -96,8 +96,15 @@ def scope_nodes(
     province: str | None = None,
     site: str | None = None,
     search: str | None = None,
+    organisation: str | None = None,
+    node_type: str | None = None,
 ) -> list[dict]:
     """Équipements du périmètre demandé.
+
+    Le périmètre est celui de la barre de filtres UNIQUE (AM-30) : localité
+    (région › province › site), organisation et type d'équipement. Tous les
+    écrans le lisent ici, pour qu'un même filtre donne les mêmes équipements
+    partout.
 
     La recherche porte sur ce qu'un exploitant tape spontanément : nom,
     nom technique, adresse IP, site, province, région, organisation.
@@ -105,6 +112,10 @@ def scope_nodes(
     needle = (search or "").strip().casefold()
     kept = []
     for node in nodes:
+        if organisation and node.get("organisation") != organisation:
+            continue
+        if node_type and (node.get("node_type") or node.get("type")) != node_type:
+            continue
         if region and not _same_place(node.get("region"), region, "region"):
             continue
         if province and not _same_place(node.get("province"), province, "province"):
@@ -226,12 +237,40 @@ async def snapshot(db: Session) -> tuple[list[dict], list[dict], list[dict], Nod
     return result
 
 
+def is_scoped(region=None, province=None, site=None, organisation=None, node_type=None,
+              search=None) -> bool:
+    """Un filtre de périmètre est-il actif ?"""
+    return bool(region or province or site or organisation or node_type or (search or "").strip())
+
+
+def scope_ids(
+    nodes: list[dict],
+    region: str | None = None,
+    province: str | None = None,
+    site: str | None = None,
+    organisation: str | None = None,
+    node_type: str | None = None,
+) -> set[str] | None:
+    """Identifiants des équipements du périmètre, ou None si aucun filtre :
+    « tout le réseau » inclut aussi ce qui n'est rattaché à aucun équipement."""
+    if not is_scoped(region, province, site, organisation, node_type):
+        return None
+    return {
+        node["id"]
+        for node in scope_nodes(
+            nodes, region, province, site, organisation=organisation, node_type=node_type
+        )
+    }
+
+
 async def scoped(
     db: Session,
     region: str | None = None,
     province: str | None = None,
     site: str | None = None,
     search: str | None = None,
+    organisation: str | None = None,
+    node_type: str | None = None,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """Équipements, alertes des outils et incidents iTop DU PÉRIMÈTRE.
 
@@ -241,9 +280,9 @@ async def scoped(
     connu sort du périmètre dès qu'une localité est demandée.
     """
     nodes, alerts, incidents, _index = await snapshot(db)
-    if not (region or province or site or (search or "").strip()):
+    if not is_scoped(region, province, site, organisation, node_type, search):
         return nodes, alerts, incidents
-    kept = scope_nodes(nodes, region, province, site, search)
+    kept = scope_nodes(nodes, region, province, site, search, organisation, node_type)
     ids = {node["id"] for node in kept}
     return kept, _records_in(alerts, ids), _records_in(incidents, ids)
 
@@ -255,15 +294,16 @@ def _records_in(records: list[dict], node_ids: set[str]) -> list[dict]:
 def kpis(nodes: list[dict], alerts: list[dict], incidents: list[dict]) -> dict:
     """Indicateurs d'un ensemble d'équipements.
 
-    Disponibilité : équipements « up » sur équipements suivis hors
-    maintenance planifiée. Un état inconnu, muet ou dégradé ne prouve pas
-    que l'équipement est disponible : il compte au dénominateur (même règle
-    que live_service.sites_summary et collector/rollup.py).
+    Disponibilité : équipements « up » sur équipements SUPERVISÉS (en
+    service, dégradés, en panne). La maintenance planifiée et les états non
+    observés (inconnu, muet) sortent du dénominateur et sont comptés à part :
+    un équipement non supervisé n'est pas en panne (AM-29 ; même règle que
+    live_service.sites_summary et collector/rollup.py).
     """
     states: dict[str, int] = defaultdict(int)
     for node in nodes:
         states[node.get("state") or "unknown"] += 1
-    measured = len(nodes) - states["maintenance"]
+    measured = states["up"] + states["degraded"] + states["down"]
     coordinates = [
         (float(node["latitude"]), float(node["longitude"]))
         for node in nodes
@@ -277,6 +317,8 @@ def kpis(nodes: list[dict], alerts: list[dict], incidents: list[dict]) -> dict:
         "silent": states["silent"],
         "maintenance": states["maintenance"],
         "unknown": states["unknown"],
+        "supervised": measured,
+        "unsupervised": states["unknown"] + states["silent"],
         "availability_pct": round(100.0 * states["up"] / measured, 2) if measured else None,
         "alerts": len(alerts),
         "alerts_critical": sum(1 for a in alerts if a.get("severity") == "critical"),
@@ -314,6 +356,8 @@ async def breakdown(
     province: str | None = None,
     site: str | None = None,
     search: str | None = None,
+    organisation: str | None = None,
+    node_type: str | None = None,
 ) -> dict:
     """Le périmètre courant et ses subdivisions immédiates.
 
@@ -322,7 +366,7 @@ async def breakdown(
     clic sur une ligne descend d'un niveau.
     """
     nodes, alerts, incidents, _index = await snapshot(db)
-    scoped = scope_nodes(nodes, region, province, site, search)
+    scoped = scope_nodes(nodes, region, province, site, search, organisation, node_type)
     ids = {node["id"] for node in scoped}
     scoped_alerts = _records_in(alerts, ids)
     scoped_incidents = _records_in(incidents, ids)
@@ -444,8 +488,41 @@ async def options(db: Session) -> dict:
                 ],
             }
             for region, provinces in ((r, tree[r]) for r in ordered(tree))
-        ]
+        ],
+        # Filtres d'attribut de la barre unique (AM-30), avec leur effectif.
+        "organisations": _counted(node.get("organisation") for node in nodes),
+        "node_types": _counted(node.get("node_type") or node.get("type") for node in nodes),
+        # INC-35 / AM-31 : un même site écrit de plusieurs façons dans les
+        # outils (« Zôrgho » / « Zorgho »). Signalé pour être corrigé à la
+        # source — le NOC ne réécrit pas le référentiel de l'agence.
+        "site_spelling_variants": spelling_variants(node.get("site") for node in nodes),
     }
+
+
+def spelling_variants(names) -> list[dict]:
+    """Groupes de noms identiques sans accents ni casse, mais écrits
+    différemment : [{"key", "names": [...], "nodes"}], du plus gros au plus
+    petit."""
+    groups: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for name in names:
+        if name and str(name).strip():
+            groups[locality_key(str(name))][str(name).strip()] += 1
+    return sorted(
+        (
+            {"key": key, "names": sorted(variants), "nodes": sum(variants.values())}
+            for key, variants in groups.items()
+            if len(variants) > 1
+        ),
+        key=lambda item: (-item["nodes"], item["key"]),
+    )
+
+
+def _counted(values) -> list[dict]:
+    counts: dict[str, int] = defaultdict(int)
+    for value in values:
+        if value:
+            counts[value] += 1
+    return [{"name": name, "nodes": counts[name]} for name in sorted(counts, key=str.lower)]
 
 
 async def site_detail(db: Session, site: str) -> dict | None:

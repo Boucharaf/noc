@@ -30,14 +30,15 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import os
 
 from .base import SourceClient, ToolUnavailable
 from .models import Alert, Node, ToolHealth
 from .netxms import (
-    _OBJECT_STATE,
     AVAILABILITY_ATTRIBUTES,
     availability_from_attributes,
     interface_summary,
+    node_state,
     watched_links,
 )
 from .normalize import display_locality, epoch_to_dt, severity, source_severity
@@ -157,6 +158,10 @@ WHERE (a.alarm_state & 15) IN (0, 1)
 _EXTRAS = {
     "facts": (
         ("nodes", ("boot_time", "down_since", "vendor", "product_name", "serial_number")),
+    ),
+    "outages": (
+        ("nodes", ("down_since",)),
+        ("downtime_log", ("object_id", "end_time")),
     ),
     # Vue créée par le script de droits, limitée aux attributs de
     # disponibilité : la table entière peut contenir des identifiants.
@@ -337,6 +342,33 @@ class NetXMSDatabaseClient(SourceClient):
                 )
         return self._extras[extra]
 
+    async def _outages(self) -> set | None:
+        """Équipements que NetXMS dit hors de portée : panne ouverte dans
+        downtime_log, ou `down_since` renseigné. None si le compte n'a pas les
+        droits de le lire : le statut seul décide alors, comme avant."""
+        if not await self._allowed("outages"):
+            return None
+        columns = dict(await self._query(
+            "SELECT column_name, data_type FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'downtime_log'"
+        ))
+        tag = next((name for name in _DOWNTIME_TAG_COLUMNS if name in columns), None)
+        if tag is None or not all(name in columns for name in _DOWNTIME_COLUMNS):
+            return None
+        timestamps = "timestamp" in columns["end_time"]
+        opened = await self._query(
+            f"SELECT object_id, {tag} FROM downtime_log WHERE end_time IS NULL"
+            + ("" if timestamps else " OR end_time = 0")
+        )
+        since = await self._query("SELECT id FROM nodes WHERE down_since > 0")
+        tags = {
+            item.strip() for item in os.getenv("NETXMS_DOWNTIME_TAGS", "").split(",")
+            if item.strip()
+        }
+        return {row[0] for row in since} | {
+            row[0] for row in opened if not tags or (row[1] or "").strip() in tags
+        }
+
     async def _details(self) -> dict[str, dict]:
         """Faits de fiche d'équipement, par nœud — mêmes clés que netxms.py."""
         details: dict[str, dict] = {}
@@ -412,6 +444,7 @@ class NetXMSDatabaseClient(SourceClient):
         nodes: list[Node] = []
         rows = await self._query(sql)
         details = await self._details()
+        outages = await self._outages()
         for (
             node_id, name, primary_name, ip, status, city, site,
             latitude, longitude, province, region, containers,
@@ -432,7 +465,7 @@ class NetXMSDatabaseClient(SourceClient):
                     name=name or primary_name or "(sans nom)",
                     hostname=technical or "",
                     ip=_valid_ip(ip),
-                    state=_OBJECT_STATE.get(status, "unknown"),
+                    state=node_state(status, None if outages is None else node_id in outages),
                     enabled=status not in (6, 7),  # 6 non géré, 7 désactivé
                     # Les conteneurs NetXMS de l'agence sont des catégories
                     # (« Client », « Core ») plus que des lieux : ils restent
@@ -475,3 +508,127 @@ class NetXMSDatabaseClient(SourceClient):
                 )
             )
         return alerts
+
+    async def data_horizon(self):
+        # Dernier changement d'alarme, toutes alarmes confondues : sur un
+        # serveur vivant, il date de quelques minutes au plus.
+        rows = await self._query(
+            "SELECT max(GREATEST(creation_time, last_state_change_time)) FROM alarms"
+        )
+        return _downtime_time(rows[0][0]) if rows else None
+
+    async def fetch_downtimes(self, since) -> list[dict]:
+        """Pannes de `downtime_log` closes après `since`, ou en cours.
+
+        Rend [{object_id, start, end (None = en cours), tag}], dates en UTC.
+        Lu par collector/downtime.py, pas par le cycle d'inventaire.
+
+        LES COLONNES SONT VÉRIFIÉES AVANT LECTURE : la table n'existe que dans
+        les versions récentes de NetXMS, et le compte de lecture doit en avoir
+        le droit. Si elle manque ou ne ressemble pas à ce qui est attendu, la
+        lecture échoue avec les colonnes réellement trouvées, pour corriger
+        sans deviner.
+        """
+        columns = dict(await self._query(
+            "SELECT column_name, data_type FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'downtime_log'"
+        ))
+        # L'étiquette s'appelle `downtime_tag` en NetXMS 5 (schéma 50.x, celui
+        # de l'agence) ; `tag` est accepté pour les autres versions.
+        tag_column = next((name for name in _DOWNTIME_TAG_COLUMNS if name in columns), None)
+        missing = [name for name in _DOWNTIME_COLUMNS if name not in columns]
+        if tag_column is None:
+            missing.append(" ou ".join(_DOWNTIME_TAG_COLUMNS))
+        if missing:
+            found = ", ".join(sorted(columns)) or "aucune (table absente ou droits manquants)"
+            raise ToolUnavailable(
+                self.name,
+                f"downtime_log : colonnes {', '.join(missing)} introuvables — "
+                f"colonnes visibles : {found} (voir database/netxms_readonly_role.sql)",
+            )
+        epoch = "timestamp" not in columns["start_time"]
+        stamp = int(since.timestamp())
+        if epoch:
+            condition = f"end_time = 0 OR end_time IS NULL OR end_time >= {stamp}"
+        else:
+            condition = f"end_time IS NULL OR end_time >= to_timestamp({stamp})"
+        rows = await self._query(
+            f"SELECT object_id, start_time, end_time, {tag_column} FROM downtime_log "
+            f"WHERE {condition} ORDER BY start_time"
+        )
+        records = []
+        for object_id, start, end, tag in rows:
+            start_dt, end_dt = _downtime_time(start), _downtime_time(end)
+            if start_dt is None:
+                continue
+            records.append({
+                "object_id": object_id,
+                "start": start_dt,
+                "end": end_dt if end_dt and end_dt > start_dt else None,
+                "tag": (tag or "").strip(),
+            })
+        return records
+
+    async def fetch_supervision(self) -> dict:
+        """Depuis quand NetXMS supervise chaque équipement, et jusqu'où sa base
+        sait quelque chose (collector/downtime.py).
+
+        Rend {"objects": [{object_id, since, managed}], "horizon": datetime}.
+          * `since` : date de création de l'objet dans NetXMS ;
+          * `managed` : faux pour un équipement non géré ou désactivé — NetXMS
+            ne le supervise pas, il ne compte ni en service ni en panne ;
+          * `horizon` : dernière activité connue de la base (dernière panne,
+            dernier changement d'alarme). Sur une base vivante, c'est
+            maintenant ; sur un dump, sa date. Au-delà, la source ne dit rien ;
+          * `complete_since` : depuis quand le journal des pannes est COMPLET.
+            NetXMS efface les pannes terminées depuis plus de
+            DowntimeLog.RetentionTime jours (90 par défaut) : avant, seules
+            restent les pannes encore ouvertes, et reconstituer la
+            disponibilité reviendrait à l'inventer. C'est la fin de la plus
+            ancienne panne terminée encore présente — lue dans les données,
+            sans droit sur la configuration du serveur.
+        """
+        rows = await self._query(
+            "SELECT n.id, p.creation_time, p.status FROM nodes n "
+            "JOIN object_properties p ON p.object_id = n.id WHERE p.is_deleted = 0"
+        )
+        objects = [
+            {
+                "object_id": object_id,
+                "since": _downtime_time(created),
+                "managed": int(status or 0) not in _UNSUPERVISED_STATUS,
+            }
+            for object_id, created, status in rows
+        ]
+        horizon_rows = await self._query(
+            "SELECT GREATEST("
+            "(SELECT max(GREATEST(start_time, end_time)) FROM downtime_log), "
+            "(SELECT max(last_state_change_time) FROM alarms))"
+        )
+        horizon = _downtime_time(horizon_rows[0][0]) if horizon_rows else None
+        complete_rows = await self._query(
+            "SELECT min(end_time) FROM downtime_log WHERE end_time > 0"
+        )
+        complete_since = _downtime_time(complete_rows[0][0]) if complete_rows else None
+        return {"objects": objects, "horizon": horizon, "complete_since": complete_since}
+
+
+# Statuts NetXMS d'un objet NON supervisé : 6 non géré (unmanaged), 7 désactivé.
+_UNSUPERVISED_STATUS = (6, 7)
+_DOWNTIME_COLUMNS = ("object_id", "start_time", "end_time")
+_DOWNTIME_TAG_COLUMNS = ("downtime_tag", "tag")
+
+
+def _downtime_time(value):
+    """Date de downtime_log : entier epoch (0 = pas de fin) ou timestamp."""
+    if value is None:
+        return None
+    if hasattr(value, "tzinfo"):
+        from datetime import timezone
+
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return epoch_to_dt(number) if number > 0 else None

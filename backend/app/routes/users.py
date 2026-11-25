@@ -161,7 +161,7 @@ def reset_password(
     compromission, l'ancien mot de passe ne doit plus rien ouvrir, pas même
     une session déjà établie.
     """
-    auth_service.set_password(db, user_id, payload.new_password)
+    auth_service.set_password(db, user_id, payload.new_password, provisional=True)
     session_store.revoke_all_sessions(user_id)
     audit_service.record(
         db, "user.password_reset", actor=admin, target=_username(db, user_id),

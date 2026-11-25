@@ -7,10 +7,10 @@ import { FleetStatesChart } from "../components/domain/FleetInsights";
 import Panel from "../components/ui/Panel";
 import Stat from "../components/ui/Stat";
 import { LineChart } from "../components/charts";
-import { FilterSelect, Segmented, Toolbar } from "../components/ui/Controls";
 import { Meter } from "../components/ui/Stat";
 import { PageHeader } from "../components/layout/TopBar";
 import { QueryBoundary } from "../components/ui/States";
+import { useWindowStore, windowLabel } from "../store/ui";
 import { METRIC_TYPES, metricMeta, thresholdColor } from "../lib/vocabulary";
 import { bandwidth, dateTime, decimal, duration, num, pct, smartTime } from "../lib/format";
 import {
@@ -18,7 +18,6 @@ import {
   useNetworkRanking,
   useNetworkSeries,
   useNodeStates,
-  useNodes,
 } from "../hooks/queries";
 
 /**
@@ -36,51 +35,18 @@ import {
  * mauvaise disponibilité en tête, plus gros débit en tête.
  */
 
-const WINDOWS = [
-  { value: 6, label: "6 h" },
-  { value: 24, label: "24 h" },
-  { value: 72, label: "3 j" },
-  { value: 168, label: "7 j" },
-  { value: 720, label: "30 j" },
-];
-
 export default function PerformancePage() {
-  const [hours, setHours] = useState(24);
-  const [metric, setMetric] = useState("latency_ms");
-  const [site, setSite] = useState(null);
-  const [organisation, setOrganisation] = useState(null);
-  const [nodeType, setNodeType] = useState(null);
-
-  const allNodesQuery = useNodes({ limit: 2000 });
-  const allNodes = allNodesQuery.data?.items ?? [];
-  const siteOptions = [
-    ...new Set(allNodes.map((n) => n.locality).filter(Boolean)),
-  ].map((s) => ({ value: s, label: s }));
-  const orgOptions = [
-    ...new Set(allNodes.map((n) => n.organisation).filter(Boolean)),
-  ].map((o) => ({ value: o, label: o }));
-  const typeOptions = [
-    ...new Set(allNodes.map((n) => n.node_type).filter(Boolean)),
-  ].map((t) => ({ value: t, label: t }));
+  // Périmètre (localité, organisation, type) et période : barre unique
+  // (AM-30, INC-28). La page n'a plus de « Périmètre » propre — une liste
+  // plate de tous les sites — ni de second sélecteur de période.
+  const hours = useWindowStore((s) => s.hours);
+  // INC-27 : par défaut la même mesure que l'indicateur du haut.
+  const [metric, setMetric] = useState("availability_pct");
 
   const nodeStates = useNodeStates();
   const network = useNetworkKpi();
-  const series = useNetworkSeries({
-    metricType: metric,
-    hours,
-    sample: 15,
-    site,
-    organisation,
-    nodeType,
-  });
-  const top = useNetworkRanking({
-    metricType: metric,
-    hours,
-    sample: 15,
-    site,
-    organisation,
-    nodeType,
-  });
+  const series = useNetworkSeries({ metricType: metric, hours, sample: 15 });
+  const top = useNetworkRanking({ metricType: metric, hours, sample: 15 });
 
   const meta = metricMeta(metric);
   const points = series.data?.points ?? [];
@@ -94,45 +60,7 @@ export default function PerformancePage() {
     <div className="space-y-2.5">
       <PageHeader
         title="Performance réseau"
-        subtitle="Évolution des mesures du réseau"
-        actions={
-          <Toolbar>
-            <FilterSelect
-              label="Périmètre"
-              value={site}
-              onChange={setSite}
-              allLabel="Tous les sites"
-              width={170}
-              options={siteOptions}
-            />
-            {orgOptions.length > 0 && (
-              <FilterSelect
-                label="Organisation"
-                value={organisation}
-                onChange={setOrganisation}
-                allLabel="Toutes"
-                width={160}
-                options={orgOptions}
-              />
-            )}
-            {typeOptions.length > 0 && (
-              <FilterSelect
-                label="Type"
-                value={nodeType}
-                onChange={setNodeType}
-                allLabel="Tous types"
-                width={140}
-                options={typeOptions}
-              />
-            )}
-            <Segmented
-              ariaLabel="Fenêtre"
-              value={hours}
-              onChange={setHours}
-              options={WINDOWS}
-            />
-          </Toolbar>
-        }
+        subtitle={`Évolution des mesures du réseau · période ${windowLabel(hours)}`}
       />
 
       {/* Colonnes auto-ajustées : le nombre de tuiles dépend des mesures
@@ -144,6 +72,13 @@ export default function PerformancePage() {
           compact
         />
       </div>
+
+      <p className="text-[12px]" style={{ color: "var(--ink-3)" }}>
+        Trois mesures différentes : la tuile « Parc en service » est la part
+        des équipements en service <strong>à cet instant</strong> ; le classement est une moyenne{" "}
+        <strong>sur la période</strong>, pondérée par le temps supervisé (référence du NOC) ; les
+        « Indicateurs NetXMS » sont calculés <strong>par NetXMS</strong> et relayés tels quels.
+      </p>
 
       <LinksAndAgency data={network.data} />
 
@@ -184,11 +119,13 @@ export default function PerformancePage() {
             <QueryBoundary
               query={series}
               compact
-              empty={(data) => !data?.points?.length}
+              minHeight={280}
+        empty={(data) => !data?.points?.length}
               emptyMessage="Aucune mesure sur cette fenêtre"
               emptyHint="Aucune mesure disponible pour ce périmètre sur cette période."
             >
               <LineChart
+                exportName={`performance-${metric}-${hours}h`}
                 height={280}
                 labels={points.map((point) => smartTime(point.time))}
                 yMax={meta.unit === "%" ? 100 : undefined}
@@ -220,7 +157,12 @@ export default function PerformancePage() {
                   ? `Plus forte ${meta.label.toLowerCase()}`
                   : `Plus gros ${meta.label.toLowerCase()}`
             }
-            subtitle={`sur ${hours} h`}
+            // AM-17 : classement au 95e percentile (p95), sauf pour une mesure
+            // où « plus haut est mieux » (disponibilité), classée en moyenne.
+            subtitle={`${meta.higherIsBetter === true ? "moyenne" : "p95"} sur ${windowLabel(hours)} · top ${num(
+              top.data?.length ?? 0,
+            )}`}
+            scope={{ period: "window" }}
             flush
           >
             <QueryBoundary
@@ -229,15 +171,12 @@ export default function PerformancePage() {
               emptyMessage="Aucun classement disponible"
             >
               {(items) => {
+                const key = (item) =>
+                  meta.higherIsBetter === true ? item.avg_value : item.p95_value ?? item.avg_value;
                 const ranked = [...items].sort((left, right) =>
-                  meta.higherIsBetter === true
-                    ? left.avg_value - right.avg_value
-                    : right.avg_value - left.avg_value,
+                  meta.higherIsBetter === true ? key(left) - key(right) : key(right) - key(left),
                 );
-                const max = Math.max(
-                  ...ranked.map((item) => item.avg_value),
-                  1,
-                );
+                const max = Math.max(...ranked.map(key), 1);
                 return (
                   <ul
                     className="divide-y"
@@ -247,7 +186,7 @@ export default function PerformancePage() {
                       <li key={item.node_id} className="px-2.5 py-1.5">
                         <div className="flex items-baseline gap-2">
                           <span
-                            className="num text-[10.5px]"
+                            className="num text-[12px]"
                             style={{ color: "var(--ink-3)", width: 16 }}
                           >
                             {index + 1}
@@ -266,29 +205,33 @@ export default function PerformancePage() {
                             className="num text-[12px]"
                             style={{
                               color:
-                                thresholdColor(metric, item.avg_value) ??
+                                thresholdColor(metric, key(item)) ??
                                 "var(--ink)",
                             }}
                           >
-                            {formatValue(item.avg_value)}
+                            {formatValue(key(item))}
                           </span>
                         </div>
                         <div className="flex items-center gap-2 mt-0.5 pl-6">
                           <span
-                            className="text-[10.5px] flex-1 truncate"
+                            className="text-[12px] flex-1 truncate"
                             style={{ color: "var(--ink-3)" }}
                           >
-                            {item.locality} · max {formatValue(item.max_value)}{" "}
+                            {item.locality}
+                            {meta.higherIsBetter !== true && item.p95_value != null
+                              ? ` · moy. ${formatValue(item.avg_value)}`
+                              : ""}{" "}
+                            · max {formatValue(item.max_value)}{" "}
                             · <span className="num">{num(item.nb_points)}</span>{" "}
                             pts
                           </span>
                           <div style={{ width: 52 }}>
                             <Meter
-                              value={item.avg_value}
+                              value={key(item)}
                               max={max}
                               height={3}
                               color={
-                                thresholdColor(metric, item.avg_value) ??
+                                thresholdColor(metric, key(item)) ??
                                 "var(--accent)"
                               }
                             />
@@ -314,6 +257,17 @@ export default function PerformancePage() {
  * (état des interfaces, attributs personnalisés des nœuds). Rien n'est
  * affiché quand aucune source ne les publie sur le périmètre.
  */
+/**
+ * Le nombre de pannes NetXMS est-il compatible avec le MTBF affiché ? Sur
+ * une année au plus, N pannes par équipement imposent un MTBF ≤ 8 760 h / N.
+ * Un écart d'un facteur 2 signale un double comptage (INC-39).
+ */
+function agencyIncoherent(agency) {
+  if (!agency?.failures || !agency.nodes || !agency.avg_mtbf_h) return false;
+  const perNode = agency.failures / agency.nodes;
+  return perNode >= 1 && agency.avg_mtbf_h > (2 * 8760) / perNode;
+}
+
 function LinksAndAgency({ data }) {
   const links = data?.links;
   const agency = data?.agency_availability;
@@ -324,33 +278,52 @@ function LinksAndAgency({ data }) {
         <div className={`col-span-12 ${agency ? "lg:col-span-7" : ""}`}>
           <Panel
             title="Liens et interfaces"
-            subtitle={`état réel des interfaces · ${num(links.nodes)} équipement(s)`}
+            scope={{ period: "live" }}
+            sources="links"
+            subtitle={`état réel des interfaces · ${num(links.nodes)} équipement(s) mesuré(s)${
+              links.unmeasured_nodes
+                ? ` · ${num(links.unmeasured_nodes)} non mesuré(s), exclus (non supervisés ou NetXMS sans réponse)`
+                : ""
+            }`}
           >
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
               <Stat
                 compact
                 label="Liens surveillés actifs"
-                value={pct(links.watched_up_pct, 2)}
-                color={thresholdColor("availability_pct", links.watched_up_pct) ?? undefined}
-                hint={`${num(links.watched - links.watched_down, "0")} / ${num(links.watched, "0")} attendus actifs`}
+                // INC-08 : sans lien attendu, « Non surveillé » et non « — ».
+                value={links.watched ? pct(links.watched_up_pct, 2) : "Non surveillé"}
+                color={
+                  links.watched
+                    ? thresholdColor("availability_pct", links.watched_up_pct) ?? undefined
+                    : "var(--ink-3)"
+                }
+                hint={
+                  links.watched
+                    ? `${num(links.watched - links.watched_down, "0")} / ${num(links.watched, "0")} attendus actifs`
+                    : "aucun lien déclaré « attendu actif » dans NetXMS"
+                }
               />
               <Stat
                 compact
                 label="Interfaces activées actives"
-                value={pct(links.enabled_up_pct, 1)}
+                value={links.enabled_up + links.enabled_down ? pct(links.enabled_up_pct, 1) : "Non mesuré"}
                 hint={`${num(links.enabled_up, "0")} / ${num(links.enabled_up + links.enabled_down, "0")} · ports libres compris`}
               />
               <Stat
                 compact
                 label="Liens surveillés coupés"
-                value={num(links.watched_down, "0")}
-                color={links.watched_down ? "var(--sev-high)" : undefined}
+                // Un « 0 » vert sans lien surveillé se lisait « aucun défaut ».
+                value={links.watched ? num(links.watched_down, "0") : "Non surveillé"}
+                color={
+                  !links.watched ? "var(--ink-3)" : links.watched_down ? "var(--sev-high)" : undefined
+                }
+                hint={!links.watched ? "déclarer les liens attendus dans NetXMS" : undefined}
               />
               <Stat
                 compact
-                label="Capacité active"
-                value={bandwidth(links.capacity_bps / 1e6)}
-                hint="débit nominal des interfaces actives"
+                label="Capacité installée"
+                value={links.nodes ? bandwidth(links.capacity_bps / 1e6) : "Non mesuré"}
+                hint="débit nominal des interfaces en service — pas le débit utilisé"
               />
             </div>
           </Panel>
@@ -359,15 +332,27 @@ function LinksAndAgency({ data }) {
       {agency && (
         <div className={`col-span-12 ${links ? "lg:col-span-5" : ""}`}>
           <Panel
-            title="Disponibilité calculée par l'agence"
-            subtitle={`NetXMS · ${num(agency.nodes)} équipement(s)${
+            title="Indicateurs NetXMS (calcul de l'agence)"
+            // INC-42 : ce n'est PAS la disponibilité officielle du NOC ; ce
+            // sont les attributs calculés dans NetXMS, relayés tels quels.
+            subtitle={`attributs NetXMS, non recalculés par le NOC · ${num(agency.nodes)} équipement(s)${
               agency.computed_at ? ` · calcul du ${dateTime(agency.computed_at)}` : ""
             }`}
           >
-            <div className="grid grid-cols-3 gap-2">
+            {agencyIncoherent(agency) && (
+              <p className="text-[12px] mb-2" style={{ color: "var(--sev-medium)" }} role="status">
+                Incohérence : {num(agency.failures)} pannes pour {num(agency.nodes)} équipements (≈{" "}
+                {num(agency.failures / agency.nodes)} chacun) ne correspond pas à un MTBF de{" "}
+                {duration(agency.avg_mtbf_h * 60)}. Une même panne est probablement comptée à chaque
+                alerte dans le calcul NetXMS. Le NOC compte, lui, des épisodes continus (Disponibilité,
+                SLA).
+              </p>
+            )}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               <Stat
                 compact
-                label="Disponibilité moyenne"
+                label="Disponibilité NetXMS"
+                help="Disponibilité calculée par l'agence dans NetXMS (attribut perAvailability), moyenne simple des équipements qui la portent. Indicateur de contrôle : la disponibilité officielle du NOC est celle du journal historique, pondérée par le temps supervisé."
                 value={pct(agency.avg_pct, 2)}
                 color={thresholdColor("availability_pct", agency.avg_pct) ?? undefined}
               />

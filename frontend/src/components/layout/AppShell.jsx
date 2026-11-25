@@ -1,5 +1,6 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { BellRing, Home, Menu, Router, X } from "lucide-react";
 
 import ScopeBar from "./ScopeBar";
 import ErrorBoundary from "../ui/ErrorBoundary";
@@ -8,6 +9,8 @@ import TopBar from "./TopBar";
 import { PERMISSIONS, hasPermission, homeRoute } from "../../lib/permissions";
 import { useAuthStore } from "../../store/auth";
 import { useHealth, useInterop } from "../../hooks/queries";
+import MonthView from "../../pages/MonthView";
+import { MONTH_ROUTES, usePeriodStore } from "../../store/ui";
 import { useRealtime } from "../../hooks/useRealtime";
 
 /**
@@ -45,7 +48,19 @@ const SCOPED_ROUTES = [
 export default function AppShell() {
   const role = useAuthStore((s) => s.user?.role);
   const location = useLocation();
+  const liveMonth = usePeriodStore((s) => s.isCurrentPeriod());
+  const pastMonth = !liveMonth && MONTH_ROUTES.includes(location.pathname);
   const health = useHealth();
+  // Tiroir de navigation (téléphone) : fermé à chaque changement d'écran et
+  // par Échap.
+  const [menuOpen, setMenuOpen] = useState(false);
+  useEffect(() => setMenuOpen(false), [location.pathname]);
+  useEffect(() => {
+    if (!menuOpen) return undefined;
+    const onKey = (event) => event.key === "Escape" && setMenuOpen(false);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [menuOpen]);
   const canSeeInterop = hasPermission(role, PERMISSIONS.VIEW_INTEROP);
   const interop = useInterop({ enabled: canSeeInterop });
 
@@ -91,30 +106,70 @@ export default function AppShell() {
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
-      <TopBar
-        realtimeStatus={realtimeStatus}
-        health={health.data}
-        toolsHealthy={interop.data?.tools_healthy ?? 0}
-        toolsTotal={interop.data?.tools_total ?? 0}
-      />
+      {/* AM-26 : premier élément au clavier, pour sauter l'en-tête et le menu. */}
+      <a href="#contenu" className="skip-link">Aller au contenu</a>
+      {/* Maquette ANPTIC : barre latérale marine sur toute la hauteur, logo
+          en tête ; l'en-tête, les filtres et le contenu occupent la droite. */}
       <div className="flex-1 flex min-h-0">
-        <div className="hidden md:flex">
-          <SideNav role={role} toolsDown={toolsDown} />
+        <div className="hidden md:flex h-full">
+          <SideNav
+            role={role}
+            toolsDown={toolsDown}
+            toolsTotal={interop.data?.tools_total ?? 0}
+          />
         </div>
         <div className="flex-1 flex flex-col min-w-0 min-h-0">
+          <TopBar
+            realtimeStatus={realtimeStatus}
+            health={health.data}
+            toolsHealthy={interop.data?.tools_healthy ?? 0}
+            toolsTotal={interop.data?.tools_total ?? 0}
+            onMenu={() => setMenuOpen(true)}
+          />
           {SCOPED_ROUTES.some((prefix) => location.pathname.startsWith(prefix)) && <ScopeBar />}
-          <main className="flex-1 min-h-0 overflow-y-auto p-2.5">
+          <main id="contenu" tabIndex={-1} className="flex-1 min-h-0 overflow-y-auto px-5 pt-4 pb-10">
             {/* La frontière entoure UNIQUEMENT le contenu de page : si un
                 écran plante, la barre d'état, le ticker et la navigation
                 restent debout. C'est la différence entre « un écran est
                 en panne » et « le NOC n'a plus d'interface ». */}
             <ErrorBoundary resetKey={location.pathname}>
-              <Outlet />
+              {pastMonth ? <MonthView /> : <Outlet />}
             </ErrorBoundary>
           </main>
         </div>
       </div>
-      <MobileNav role={role} />
+      {menuOpen && (
+        <div className="nav-drawer md:hidden" role="dialog" aria-modal="true" aria-label="Menu">
+          <div className="nav-drawer-backdrop" onClick={() => setMenuOpen(false)} />
+          <div className="nav-drawer-panel side-nav">
+            <div
+              className="flex items-center justify-between px-3 border-b shrink-0"
+              style={{ height: "var(--topbar-h)", borderColor: "var(--rail-border)" }}
+            >
+              <span className="text-[12px] font-semibold uppercase tracking-[0.07em]" style={{ color: "var(--rail-ink-2)" }}>
+                Menu
+              </span>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => setMenuOpen(false)}
+                aria-label="Fermer le menu"
+                autoFocus
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <SideNav
+              role={role}
+              toolsDown={toolsDown}
+              toolsTotal={interop.data?.tools_total ?? 0}
+              onNavigate={() => setMenuOpen(false)}
+              expanded
+            />
+          </div>
+        </div>
+      )}
+      <MobileNav role={role} onMenu={() => setMenuOpen(true)} />
     </div>
   );
 }
@@ -122,40 +177,50 @@ export default function AppShell() {
 /**
  * Barre d'onglets mobile.
  *
- * Le rail latéral disparaît sous 768 px : sur téléphone, c'est l'agent
- * terrain qui utilise l'application, debout devant une baie. Quatre
- * cibles tactiles suffisent — sa tournée, les alertes, le parc, son
- * compte — et elles doivent être atteignables au pouce, donc en bas.
+ * Le rail latéral disparaît sous 768 px. Les écrans les plus consultés
+ * debout devant une baie restent à un pouce, en bas ; « Menu » ouvre le
+ * tiroir qui donne accès à TOUS les écrans permis au rôle (avant, un
+ * téléphone n'atteignait que quatre écrans).
  */
-function MobileNav({ role }) {
+function MobileNav({ role, onMenu }) {
   const items = [
     // L'accueil suit le rôle : envoyer un directeur sur /console lui
     // afficherait un écran interdit alors qu'il a le sien.
-    { to: homeRoute(role), label: "Accueil" },
-    { to: "/equipements", label: "Parc" },
-    { to: "/territoire", label: "Territoire" },
-    { to: "/compte", label: "Compte" },
-  ];
+    { to: homeRoute(role), label: "Accueil", icon: Home, end: true },
+    { to: "/alertes", label: "Alertes", icon: BellRing, permission: PERMISSIONS.VIEW_ALERTS },
+    { to: "/equipements", label: "Parc", icon: Router, permission: PERMISSIONS.VIEW_NODES },
+  ].filter((item) => !item.permission || hasPermission(role, item.permission));
 
+  const tab = "flex-1 flex flex-col items-center justify-center gap-0.5 py-1.5 text-[12px] min-h-[48px]";
   return (
     <nav
-      className="md:hidden shrink-0 flex border-t"
+      className="mobile-tabbar md:hidden shrink-0 flex border-t"
       style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+      aria-label="Navigation rapide"
     >
-      {items.map((item) => (
-        <NavLink
-          key={item.to}
-          to={item.to}
-          className="flex-1 text-center py-2 text-[11px]"
-          style={({ isActive }) => ({
-            color: isActive ? "var(--accent-ink)" : "var(--ink-2)",
-            textDecoration: "none",
-            fontWeight: isActive ? 600 : 400,
-          })}
-        >
-          {item.label}
-        </NavLink>
-      ))}
+      {items.map((item) => {
+        const Icon = item.icon;
+        return (
+          <NavLink
+            key={item.to}
+            to={item.to}
+            end={item.end}
+            className={tab}
+            style={({ isActive }) => ({
+              color: isActive ? "var(--accent-ink)" : "var(--ink-2)",
+              textDecoration: "none",
+              fontWeight: isActive ? 600 : 400,
+            })}
+          >
+            <Icon size={17} strokeWidth={1.8} aria-hidden="true" />
+            {item.label}
+          </NavLink>
+        );
+      })}
+      <button type="button" className={tab} style={{ color: "var(--ink-2)" }} onClick={onMenu}>
+        <Menu size={17} strokeWidth={1.8} aria-hidden="true" />
+        Menu
+      </button>
     </nav>
   );
 }

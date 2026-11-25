@@ -41,12 +41,12 @@ from urllib.parse import urlsplit
 
 from .base import SourceClient, ToolUnavailable
 from .models import Alert, Node, ToolHealth
-from .normalize import epoch_to_dt, locality_from_groups
+from .normalize import epoch_to_dt, locality_from_groups, outages_from_events
 
 logger = logging.getLogger(__name__)
 
 # --- statusjson.cgi (masques de bits) --------------------------------------
-_JSON_HOST_STATE = {1: "silent", 2: "up", 4: "down", 8: "degraded"}
+_JSON_HOST_STATE = {1: "silent", 2: "up", 4: "down", 8: "unknown"}  # 8 : UNREACHABLE
 _JSON_HOST_SEVERITY = {4: "critical", 8: "high"}
 _JSON_SERVICE_SEVERITY = {4: "medium", 8: "unknown", 16: "critical"}
 # Libellés d'origine Nagios, en clair (DOWN, UNREACHABLE, WARNING…).
@@ -56,7 +56,7 @@ _LS_HOST_LABEL = {1: "Hôte arrêté", 2: "Hôte injoignable"}
 _LS_SERVICE_LABEL = {1: "Avertissement", 2: "Critique", 3: "Inconnu"}
 
 # --- Livestatus (codes de retour) ------------------------------------------
-_LS_HOST_STATE = {0: "up", 1: "down", 2: "degraded"}
+_LS_HOST_STATE = {0: "up", 1: "down", 2: "unknown"}  # 2 : UNREACHABLE
 _LS_HOST_SEVERITY = {1: "critical", 2: "high"}
 _LS_SERVICE_SEVERITY = {1: "medium", 2: "critical", 3: "unknown"}
 
@@ -282,6 +282,68 @@ class NagiosClient(SourceClient):
         if self.mode == "xi":
             raise self._xi_not_implemented()
         raise self._unconfigured()
+
+    async def fetch_downtimes(self, since) -> list[dict]:
+        """Pannes des hôtes depuis `since` : changements d'état HARD lus dans
+        les journaux archivés de Nagios (collector/downtime.py).
+
+        Seul DOWN est une panne de l'hôte ; UNREACHABLE (panne en amont)
+        n'en est pas une, comme dans l'inventaire (« dégradé »).
+          statusjson  archivejson.cgi?query=statechangelist, un appel par hôte ;
+          livestatus  table `log`, une seule requête.
+        """
+        from datetime import datetime, timezone
+
+        stamp = int(since.timestamp())
+        changes: dict[str, list] = {}
+        if self.mode == "livestatus":
+            rows = await self._livestatus(
+                "GET log\nColumns: time host_name state state_type\n"
+                "Filter: class = 1\nFilter: type = HOST ALERT\n"
+                f"Filter: time > {stamp}\n"
+            )
+            for at, host, state, state_type in sorted(rows, key=lambda row: row[0]):
+                if str(state_type).upper() == "HARD":
+                    changes.setdefault(host, []).append((epoch_to_dt(at), int(state) == 1))
+        elif self.mode == "statusjson":
+            hosts = await self._cgi("statusjson.cgi", "hostlist")
+            now = int(datetime.now(timezone.utc).timestamp())
+            gate = asyncio.Semaphore(4)
+
+            async def one(host: str):
+                async with gate:
+                    data = await self._cgi("archivejson.cgi", "statechangelist", {
+                        "formatoptions": "enumerate", "objecttype": "host",
+                        "hostname": host, "starttime": stamp, "endtime": now,
+                    })
+                return host, data.get("statechangelist") or []
+
+            for host, entries in await asyncio.gather(
+                *(one(name) for name in (hosts.get("hostlist") or {}))
+            ):
+                for entry in entries:
+                    at = epoch_to_dt(int(entry.get("timestamp") or 0) // 1000)
+                    if at is None or at <= since:
+                        continue   # état initial reconstitué, pas un changement
+                    if str(entry.get("state_type", "")).lower() != "hard":
+                        continue
+                    state = str(entry.get("state", "")).lower()
+                    if state not in ("up", "down", "unreachable"):
+                        raise ToolUnavailable(
+                            self.name,
+                            f"archivejson.cgi : état d'hôte inattendu « {state} » "
+                            "(formatoptions=enumerate non respecté ?)",
+                        )
+                    changes.setdefault(host, []).append((at, state == "down"))
+        elif self.mode == "xi":
+            raise self._xi_not_implemented()
+        else:
+            raise self._unconfigured()
+        records: list[dict] = []
+        for host, events in changes.items():
+            events.sort(key=lambda item: item[0])
+            records.extend(outages_from_events(host, events))
+        return records
 
     async def fetch_alerts(self) -> list[Alert]:
         if self.mode == "statusjson":

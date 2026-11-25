@@ -17,11 +17,72 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from urllib.parse import quote, urlencode
 
-from app.core.config import SEVERITIES
+from app.core.config import ALERT_OBSOLETE_DAYS, SEVERITIES
 from app.services import geo_service, live_service, node_service
+from integrations.config import web_url
 
 logger = logging.getLogger(__name__)
+
+
+def _age_minutes(since: str | None, now: datetime) -> float | None:
+    """Âge calculé côté serveur sur UN instant de référence pour toute la
+    liste (INC-12 : deux âges différents pour un même horodatage)."""
+    if not since:
+        return None
+    try:
+        at = datetime.fromisoformat(str(since).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return max(0.0, round((now - at).total_seconds() / 60.0, 1))
+
+
+def source_links(alert: dict) -> dict:
+    """Actions rapides (AM-07) : où acquitter / assigner l'alerte, et
+    comment en faire un ticket iTop.
+
+    LE NOC NE MODIFIE RIEN DANS LES OUTILS (voir l'en-tête du module) :
+    l'acquittement et l'affectation se font dans l'outil source, le ticket
+    dans iTop. Ces liens y mènent directement, pré-remplis quand l'outil le
+    permet. Absents si `<OUTIL>_WEB_URL` n'est pas renseignée.
+    """
+    tool = alert.get("tool") or ""
+    base = web_url(tool)
+    acknowledge = None
+    if base:
+        if tool == "zabbix" and alert.get("node_ref"):
+            acknowledge = (
+                f"{base}/zabbix.php?action=problem.view&filter_set=1"
+                f"&hostids%5B%5D={quote(str(alert['node_ref']))}"
+            )
+        else:
+            acknowledge = base
+    itop = web_url("itop")
+    ticket = None
+    if itop and alert.get("kind", "technical") == "technical":
+        title = f"[{tool}] {alert.get('node_name') or ''} — {alert.get('message') or ''}".strip()
+        ticket = f"{itop}/pages/UI.php?" + urlencode({
+            "operation": "new",
+            "class": "Incident",
+            "default[title]": title[:250],
+            "default[description]": (
+                f"Alerte {tool} {alert.get('ref')} détectée le {alert.get('since')}. "
+                f"Site : {alert.get('site') or 'non renseigné'}."
+            ),
+        })
+    return {"acknowledge": acknowledge, "ticket": ticket}
+
+
+def is_obsolete(alert: dict, age_minutes: float | None) -> bool:
+    """Active depuis plus de ALERT_OBSOLETE_DAYS jours sans acquittement."""
+    return (
+        age_minutes is not None
+        and age_minutes > ALERT_OBSOLETE_DAYS * 1440
+        and not alert.get("acknowledged")
+    )
 
 
 def _severity_rank(severity: str) -> int:
@@ -56,6 +117,7 @@ async def list_alerts(
     search: str | None = None,
     node_type: str | None = None,
     acknowledged: bool | None = None,
+    confirmed: bool | None = None,
     include_maintenance: bool = True,
     limit: int = 500,
 ) -> dict:
@@ -66,7 +128,7 @@ async def list_alerts(
     """
     now = datetime.now(timezone.utc)
 
-    live = await live_service.get_alerts()
+    live = await live_service.get_all_alerts()
     nodes = {node["id"]: node for node in await live_service.get_nodes()}
 
     # Index (outil, référence) -> équipement fusionné, pour retrouver le site
@@ -98,10 +160,14 @@ async def list_alerts(
     enriched: list[dict] = []
     for alert in alerts:
         window = _covered_by_maintenance(windows, alert.get("node_key"))
+        age = _age_minutes(alert.get("since"), now)
 
         enriched.append(
             {
                 **alert,
+                "age_minutes": age,
+                "obsolete": is_obsolete(alert, age),
+                "links": source_links(alert),
                 "kind": alert.get("kind", "technical"),
                 # Acquittement tel que l'outil source le publie.
                 "acknowledged": bool(alert.get("acknowledged")),
@@ -146,25 +212,32 @@ async def list_alerts(
                 return False
         if acknowledged is not None and bool(alert.get("acknowledged")) != acknowledged:
             return False
+        if confirmed is not None and bool(alert.get("frozen")) == confirmed:
+            return False
         if not include_maintenance and alert.get("is_maintenance"):
             return False
         return True
 
     filtered = [a for a in enriched if keep(a)]
-    # Les plus graves d'abord, et à gravité égale les plus récentes : c'est
-    # l'ordre dans lequel un exploitant traite sa file.
-    #
-    # Deux tris successifs plutôt qu'une clé composite, parce que les deux
-    # critères vont en sens INVERSE — gravité croissante (critical d'abord),
-    # date décroissante — et que `since` est une chaîne ISO qu'on ne peut pas
-    # nier. Le tri de Python étant stable, trier d'abord sur le critère
-    # secondaire puis sur le principal donne exactement le bon résultat.
-    filtered.sort(key=lambda a: a.get("since") or "", reverse=True)
-    filtered.sort(key=lambda a: _severity_rank(a.get("severity", "unknown")))
+    # Ordre de traitement de la file (AM-07) : criticité, puis les NON
+    # acquittées d'abord, puis les plus ANCIENNES — la durée d'une alerte
+    # non traitée est ce qui presse. Une alerte sans date passe en dernier.
+    # Deux tris successifs : le tri de Python est stable, le critère
+    # secondaire (date) d'abord, puis le principal (gravité, acquittement).
+    filtered.sort(key=lambda a: (not a.get("since"), a.get("since") or ""))
+    filtered.sort(key=lambda a: (
+        # Les alertes confirmées d'abord ; celles d'une source arrêtée ensuite.
+        bool(a.get("frozen")),
+        _severity_rank(a.get("severity", "unknown")),
+        bool(a.get("acknowledged")),
+    ))
 
     return {
         "alerts": filtered[:limit],
         "total": len(filtered),
+        "obsolete_total": sum(1 for a in filtered if a["obsolete"]),
+        "obsolete_after_days": ALERT_OBSOLETE_DAYS,
+        "computed_at": now.isoformat(),
         "truncated": len(filtered) > limit,
         "snapshot_age_s": await live_service.snapshot_age_s(),
         "stale": await live_service.is_stale(),

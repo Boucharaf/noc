@@ -78,9 +78,9 @@ def test_monthly_report_reads_the_selected_month_everywhere(monkeypatch):
     assert data["itop_error"] is None
     assert ["Délai moyen de résolution (MTTR)", "5 h"] in report_service.incident_rows(data)
     assert report_service.severity_rows(data) == [
-        ["Critique", "4", "10 min", "3 h 20", "4 h", "75.0 %"]
+        ["Critique", "4", "10 min", "3 h 20", "4 h", "75,0 %"]
     ]
-    assert report_service.cause_rows(data) == [["Réparation matérielle", "9", "50.0 %"]]
+    assert report_service.cause_rows(data) == [["Réparation matérielle", "9", "50,0 %"]]
     assert report_service.breach_rows(data)[0][:3] == ["I-1", "RT-OUAGA", "Critique"]
 
 

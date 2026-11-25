@@ -20,6 +20,7 @@ moyen.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -30,6 +31,7 @@ from .normalize import (
     combine_series,
     iso_to_dt,
     locality_from_groups,
+    outages_from_events,
     severity,
     source_severity,
 )
@@ -278,6 +280,8 @@ class CentreonClient(SourceClient):
             scale = "centreon_host" if resource_type == "host" else "centreon_service"
             parent = row.get("parent") or {}
             acknowledged = bool(row.get("acknowledged"))
+            acknowledgement = row.get("acknowledgement") or {}
+            author = acknowledgement.get("author_name")
             since = iso_to_dt(row.get("last_status_change"))
             if since is None:
                 raise ToolUnavailable(
@@ -297,12 +301,67 @@ class CentreonClient(SourceClient):
                     node_ref=f"host-{parent.get('id') or row.get('id')}",
                     node_name=parent.get("name") or row.get("name"),
                     acknowledged=acknowledged,
-                    acknowledged_at=iso_to_dt(
-                        (row.get("acknowledgement") or {}).get("entry_time")
-                    ),
+                    acknowledged_at=iso_to_dt(acknowledgement.get("entry_time")),
+                    details={"acknowledged_by": str(author)} if author else {},
                 )
             )
         return alerts
+
+    async def fetch_downtimes(self, since: datetime) -> list[dict]:
+        """Pannes des hôtes depuis `since`, d'après leur chronologie.
+
+        `/monitoring/hosts/{id}/timeline` : les événements que Centreon
+        journalise (changements d'état, maintenances, acquittements), la page
+        « Chronologie » de la fiche d'un hôte. Un appel paginé par hôte, au
+        plus quatre à la fois ; seuls les événements d'état sont retenus.
+        """
+        hosts = [row.get("id") for row in await self._resources(["host"])
+                 if row.get("type", "host") == "host" and row.get("id") is not None]
+        gate = asyncio.Semaphore(4)
+
+        async def one(host_id) -> list[dict]:
+            async with gate:
+                events = await self._timeline(host_id, since)
+            return host_downtimes(f"host-{host_id}", events)
+
+        records: list[dict] = []
+        for chunk in await asyncio.gather(*(one(host_id) for host_id in hosts)):
+            records.extend(chunk)
+        return records
+
+    async def _timeline(self, host_id, since: datetime) -> list[tuple[datetime, int]]:
+        search = json.dumps({"date": {"$gt": since.astimezone(timezone.utc).isoformat()}})
+        events: list[tuple[datetime, int]] = []
+        page, filtered = 1, True
+        while page <= 200:
+            params = {"page": page, "limit": 100, "sort_by": json.dumps({"date": "ASC"})}
+            if filtered:
+                params["search"] = search
+            try:
+                body = await self._get(f"/monitoring/hosts/{host_id}/timeline", params)
+            except ToolUnavailable as exc:
+                # Filtre par date refusé par cette version : tout est relu,
+                # puis trié et filtré ici.
+                if filtered and "HTTP 400" in str(exc):
+                    filtered, page, events = False, 1, []
+                    continue
+                if "HTTP 404" in str(exc):
+                    return []
+                raise
+            rows = body.get("result") or []
+            for row in rows:
+                if row.get("type") != "event":
+                    continue
+                at = iso_to_dt(row.get("date"))
+                code = (row.get("status") or {}).get("code")
+                if at is not None and at > since and isinstance(code, int):
+                    events.append((at, code))
+            total = (body.get("meta") or {}).get("total")
+            if not rows or (total is not None and page * 100 >= int(total)):
+                break
+            page += 1
+        events.sort(key=lambda item: item[0])
+        return events
 
     async def fetch_history(
         self, node_ref: str, metric_type: str, start: datetime, end: datetime
@@ -405,7 +464,9 @@ def _host_state(status_code, in_maintenance: bool, resource_type: str = "host") 
     return {
         0: "up",
         1: "down",
-        2: "degraded",   # UNREACHABLE : la panne est en amont, pas sur l'hôte
+        # UNREACHABLE : la panne est en amont. L'hôte ne répond pas, mais rien
+        # ne dit qu'il est en panne : ni disponible, ni en panne (KPI-01).
+        2: "unknown",
         4: "silent",     # PENDING : jamais contrôlé depuis le dernier export
     }.get(status_code, "unknown")
 
@@ -419,3 +480,24 @@ def _site_from_groups(groups: list[dict]) -> str | None:
             if name.lower().startswith(prefix):
                 return name.split("/", 1)[-1].split(":", 1)[-1].strip() or None
     return None
+
+
+# ---------------------------------------------------------------------------
+# Pannes des hôtes (collector/downtime.py, CENTREON_DOWNTIME_ENABLED)
+# ---------------------------------------------------------------------------
+# Codes d'état d'un hôte Centreon : 0 UP, 1 DOWN, 2 UNREACHABLE, 4 PENDING.
+# Seul DOWN est une panne DE L'HÔTE ; UNREACHABLE dit que la panne est en
+# amont (lien, routeur parent) et reste « inconnu », hors du calcul, comme
+# dans l'inventaire (_host_state). Compter les injoignables comme en panne ferait d'une seule
+# coupure de lien autant de pannes que d'hôtes derrière lui.
+_HOST_DOWN = 1
+
+
+def host_downtimes(ref: str, events) -> list[dict]:
+    """Pannes d'un hôte à partir de ses changements d'état CONFIRMÉS (HARD).
+
+    `events` : [(date, code)] triés. Rend [{object_id, start, end, tag}] :
+    `end` None = panne en cours ; `start` None = fin d'une panne commencée
+    avant les événements lus (la synchronisation clôt alors la panne ouverte).
+    """
+    return outages_from_events(ref, ((at, code == _HOST_DOWN) for at, code in events))

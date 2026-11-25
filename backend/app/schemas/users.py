@@ -1,6 +1,7 @@
 """Schémas des comptes utilisateurs."""
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated
@@ -32,6 +33,20 @@ NewPassword = Annotated[
     Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH),
     AfterValidator(_bcrypt_compatible),
 ]
+
+_PHONE_PATTERN = re.compile(r"^\+?[0-9][0-9 ().-]*$")
+
+
+def _valid_phone(value: str | None) -> str | None:
+    if not value:
+        return None
+    value = value.strip()
+    if not _PHONE_PATTERN.match(value) or not 8 <= sum(c.isdigit() for c in value) <= 15:
+        raise ValueError("Numéro de téléphone invalide : 8 à 15 chiffres, « + » possible au début.")
+    return value
+
+
+Phone = Annotated[str | None, Field(max_length=30), AfterValidator(_valid_phone)]
 
 # Tout NOUVEAU code : exactement PIN_LENGTH chiffres. La connexion accepte
 # encore les codes plus courts définis auparavant (schemas/auth.py).
@@ -66,6 +81,7 @@ class UserOut(BaseModel):
     employee_code: str | None = None
     team: str | None = None
     has_pin: bool = False
+    must_change_password: bool = False
     last_login_at: datetime | None = None
 
     model_config = {"from_attributes": True}
@@ -94,7 +110,7 @@ class UserCreate(BaseModel):
     role: RoleEnum
     password: NewPassword
     pin: NewPin | None = None
-    phone_number: str | None = Field(default=None, max_length=30)
+    phone_number: Phone = None
     email: str | None = Field(default=None, max_length=254, pattern=_EMAIL_PATTERN)
     notify_email: bool = False
     site: str | None = Field(default=None, max_length=150)
@@ -108,7 +124,7 @@ class UserUpdate(BaseModel):
 
     full_name: str | None = Field(default=None, min_length=1, max_length=150)
     role: RoleEnum | None = None
-    phone_number: str | None = Field(default=None, max_length=30)
+    phone_number: Phone = None
     email: str | None = Field(default=None, max_length=254, pattern=_EMAIL_PATTERN)
     notify_email: bool | None = None
     site: str | None = Field(default=None, max_length=150)
@@ -133,7 +149,7 @@ class UserSelfUpdate(BaseModel):
         default=None, min_length=3, max_length=50, pattern=_USERNAME_PATTERN
     )
     full_name: str | None = Field(default=None, min_length=1, max_length=150)
-    phone_number: str | None = Field(default=None, max_length=30)
+    phone_number: Phone = None
     email: str | None = Field(default=None, max_length=254, pattern=_EMAIL_PATTERN)
     notify_email: bool | None = None
     # Exigé seulement pour changer d'identifiant : c'est changer le moyen de

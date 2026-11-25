@@ -50,7 +50,7 @@ export function Modal({ open, onClose, title, subtitle, children, footer, width 
           <div className="min-w-0">
             <h2 className="panel-title">{title}</h2>
             {subtitle && (
-              <p className="text-[11px] normal-case tracking-normal" style={{ color: "var(--ink-3)" }}>
+              <p className="text-[12px] normal-case tracking-normal" style={{ color: "var(--ink-3)" }}>
                 {subtitle}
               </p>
             )}
@@ -159,7 +159,7 @@ export function Drawer({ open, onClose, title, subtitle, badge, children, footer
         </header>
         {subtitle && (
           <div
-            className="px-2.5 py-1.5 text-[11.5px] border-b shrink-0"
+            className="px-2.5 py-1.5 text-[12px] border-b shrink-0"
             style={{ color: "var(--ink-2)", borderColor: "var(--border)", background: "var(--surface-2)" }}
           >
             {subtitle}

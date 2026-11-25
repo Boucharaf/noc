@@ -17,6 +17,7 @@ import {
   useInterop,
   useMergeReport,
   useNodeStates,
+  useToolsHistory,
 } from "../hooks/queries";
 
 /**
@@ -38,6 +39,7 @@ export default function IntegrationsPage() {
   const coverage = useCoverage();
   const trend = useCoverageTrend(60);
   const health = useHealth();
+  const toolsHistory = useToolsHistory(30);
   const nodeStates = useNodeStates();
   const merge = useMergeReport();
 
@@ -114,6 +116,45 @@ export default function IntegrationsPage() {
         />
       </div>
 
+      <Panel title="Disponibilité des outils" subtitle="30 derniers jours · temps observé">
+        <QueryBoundary
+          query={toolsHistory}
+          empty={(data) => !data?.tools?.length}
+          emptyMessage="Pas encore d'historique"
+          compact
+        >
+          <table className="w-full text-[12.5px]">
+            <thead>
+              <tr style={{ color: "var(--ink-3)" }}>
+                <th className="text-left font-normal py-1">Outil</th>
+                <th className="text-right font-normal">Disponibilité</th>
+                <th className="text-right font-normal">Observé</th>
+                <th className="text-right font-normal">Interruptions</th>
+                <th className="text-left font-normal pl-4">Dernière interruption</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(toolsHistory.data?.tools ?? []).map((tool) => {
+                const last = tool.outages[0];
+                return (
+                  <tr key={tool.tool}>
+                    <td className="py-1">{toolLabel(tool.tool)}</td>
+                    <td className="text-right num">{pct(tool.availability_pct, 2)}</td>
+                    <td className="text-right num">{num(Math.round(tool.observed_hours))} h</td>
+                    <td className="text-right num">{num(tool.interruptions)}</td>
+                    <td className="pl-4" title={last?.error ?? undefined}>
+                      {last
+                        ? `${dateTime(last.started_at)} · ${last.ended_at ? `${num(Math.round(last.minutes))} min` : "en cours"}${last.state === "partial" ? " · partielle" : ""}`
+                        : "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </QueryBoundary>
+      </Panel>
+
       <Panel title="Outils de supervision" flush>
         <QueryBoundary
           query={interop}
@@ -171,7 +212,7 @@ export default function IntegrationsPage() {
                     <td className="num" style={{ textAlign: "right", color: "var(--ink-2)" }}>
                       {num(tool.incidents_this_month, "0")}
                     </td>
-                    <td className="wrap" style={{ color: "var(--ink-3)", fontSize: 11.5 }}>
+                    <td className="wrap" style={{ color: "var(--ink-3)", fontSize: 12 }}>
                       {tool.detail}
                     </td>
                   </tr>
@@ -188,7 +229,7 @@ export default function IntegrationsPage() {
       >
         <QueryBoundary query={merge} compact>
           {(data) => (
-            <div className="space-y-2 text-[11.5px]">
+            <div className="space-y-2 text-[12px]">
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 <Row label="Équipements fusionnés" value={num(data.duplicates_resolved, "0")} />
                 <Row label="Identités confirmées" value={num(data.matched_by_verified_identity, "0")} />
@@ -245,7 +286,7 @@ export default function IntegrationsPage() {
             >
               {(data) => (
                 <>
-                  <p className="px-3 pt-2 text-[11.5px]" style={{ color: "var(--ink-3)" }}>
+                  <p className="px-3 pt-2 text-[12px]" style={{ color: "var(--ink-3)" }}>
                     {num(data.single_source_total ?? data.single_source_nodes.length)} équipement(s)
                     {data.single_source_total > data.single_source_nodes.length &&
                       ` — les ${data.single_source_nodes.length} premiers`}
@@ -261,7 +302,7 @@ export default function IntegrationsPage() {
                           <span className="truncate">{item.name}</span>
                         )}
                         {item.tool && (
-                          <span className="ml-auto shrink-0 text-[11px]" style={{ color: "var(--ink-3)" }}>
+                          <span className="ml-auto shrink-0 text-[12px]" style={{ color: "var(--ink-3)" }}>
                             {toolLabel(item.tool)} seul
                           </span>
                         )}
@@ -287,7 +328,7 @@ export default function IntegrationsPage() {
             >
               {(data) => (
                 <>
-                  <p className="px-3 pt-2 text-[11.5px]" style={{ color: "var(--sev-medium)" }}>
+                  <p className="px-3 pt-2 text-[12px]" style={{ color: "var(--sev-medium)" }}>
                     {num(data.orphan_alerts)} alerte(s) ou ticket(s) non rattaché(s)
                     {data.orphan_samples?.length < data.orphan_alerts &&
                       ` — les ${data.orphan_samples.length} premiers`}
@@ -297,7 +338,7 @@ export default function IntegrationsPage() {
                       <li key={alert.key}>
                         <span className="font-medium">{toolLabel(alert.tool)}</span>
                         {alert.kind === "itsm_ticket" && " (ticket)"} — {alert.message}
-                        <span className="block text-[11px]" style={{ color: "var(--ink-3)" }}>
+                        <span className="block text-[12px]" style={{ color: "var(--ink-3)" }}>
                           équipement cité : {alert.node_name || alert.node_ref || "aucun"}
                         </span>
                       </li>
@@ -337,7 +378,7 @@ export default function IntegrationsPage() {
                       centerValue={pct(data.coverage_pct, 0)}
                       centerLabel="couvert"
                     />
-                    <div className="flex-1 text-[11.5px] space-y-1">
+                    <div className="flex-1 text-[12px] space-y-1">
                       <Row label="Parc total" value={num(data.total_assets)} />
                       <Row
                         label="Supervisés"
@@ -355,7 +396,7 @@ export default function IntegrationsPage() {
                   </div>
                   {!data.is_complete_inventory && (
                     <p
-                      className="text-[11px] mt-2 pt-2 border-t"
+                      className="text-[12px] mt-2 pt-2 border-t"
                       style={{ borderColor: "var(--border)", color: "var(--sev-medium)" }}
                     >
                       Ce taux compare le parc aux équipements que les outils remontent —
@@ -375,8 +416,7 @@ export default function IntegrationsPage() {
             <QueryBoundary
               query={trend}
               compact
-              emptyMessage="Aucun historique de couverture"
-            >
+              emptyMessage="Aucun historique de couverture" minHeight={200}>
               <LineChart
                 height={200}
                 labels={trendPoints.map((point) => point.date)}
@@ -455,7 +495,7 @@ export default function IntegrationsPage() {
                                   : "var(--sev-critical)"
                             }
                           />
-                          <span className="num text-[11px]" style={{ width: 40, textAlign: "right" }}>
+                          <span className="num text-[12px]" style={{ width: 40, textAlign: "right" }}>
                             {pct(row.coverage_pct, 0)}
                           </span>
                         </div>

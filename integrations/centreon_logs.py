@@ -39,7 +39,7 @@ from datetime import datetime
 from urllib.parse import unquote, urlsplit
 
 from .base import SourceClient, ToolUnavailable
-from .centreon import _host_state
+from .centreon import _host_state, host_downtimes
 from .models import Alert, Node, ToolHealth
 from .normalize import epoch_to_dt, severity, source_severity
 
@@ -76,6 +76,8 @@ class _Check:
 class _Host(_Check):
     ip: str | None = None
     has_host_state: bool = False
+    # Changements d'état HARD de l'hôte, dans l'ordre : (date, code).
+    events: list = field(default_factory=list)
     services: dict[str, _Check] = field(default_factory=dict)
 
 
@@ -163,6 +165,7 @@ class CentreonLogClient(SourceClient):
                 if row.get("type") != _SOFT:
                     _apply(host, status, at, output)
                     host.has_host_state = True
+                    host.events.append((at, status))
             elif msg_type in _SERVICE_STATE and service_id not in ("", "0", "NULL"):
                 service = host.services.setdefault(
                     service_id, _Check(name=row.get("service_description") or service_id)
@@ -234,6 +237,19 @@ class CentreonLogClient(SourceClient):
             )
             for host_id, host in sorted(hosts.items())
         ]
+
+    async def data_horizon(self) -> datetime | None:
+        _hosts, meta = self._replay()
+        return meta["last"]
+
+    async def fetch_downtimes(self, since: datetime) -> list[dict]:
+        """Pannes des hôtes d'après le journal (mêmes règles que l'API)."""
+        hosts, _meta = self._replay()
+        records: list[dict] = []
+        for host_id, host in sorted(hosts.items()):
+            events = [(at, code) for at, code in host.events if at and at > since]
+            records.extend(host_downtimes(f"host-{host_id}", events))
+        return records
 
     async def fetch_alerts(self) -> list[Alert]:
         hosts, _meta = self._replay()

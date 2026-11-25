@@ -7,7 +7,7 @@ faibles privilèges pourrait appeler ces routes directement en HTTP.
 """
 import hmac
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
@@ -21,7 +21,12 @@ bearer_scheme = HTTPBearer(auto_error=True)
 internal_bearer_scheme = HTTPBearer(auto_error=False)
 
 
+# Seules routes ouvertes avec un mot de passe provisoire : se lire et le changer.
+_PROVISIONAL_PATHS = {"/api/auth/me", "/api/auth/me/password"}
+
+
 def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> User:
@@ -45,6 +50,18 @@ def get_current_user(
     # doivent plus rien ouvrir, même s'ils n'ont pas encore expiré.
     if session_store.is_access_token_revoked(user.id, payload.get("iat")):
         raise HTTPException(status_code=401, detail="Session révoquée, reconnexion nécessaire.")
+
+    if user.must_change_password and not (
+        request.url.path in _PROVISIONAL_PATHS
+        and (request.method == "GET" or request.url.path.endswith("/password"))
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "password_change_required",
+                "message": "Mot de passe provisoire : changez-le avant de continuer.",
+            },
+        )
 
     return user
 

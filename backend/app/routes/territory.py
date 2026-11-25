@@ -38,6 +38,9 @@ _VIEW_INCIDENTS = ("directeur", "chef_noc", "technicien")
 
 Place = Annotated[str | None, Query(max_length=200)]
 Search = Annotated[str | None, Query(max_length=200)]
+# Filtres d'attribut de la barre unique (AM-30), appliqués comme la localité.
+Organisation = Annotated[str | None, Query(max_length=200)]
+NodeType = Annotated[str | None, Query(max_length=100)]
 
 
 @router.get("/geo/options")
@@ -57,11 +60,15 @@ async def geo_breakdown(
     province: Place = None,
     site: Place = None,
     search: Search = None,
+    organisation: Organisation = None,
+    node_type: NodeType = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     try:
-        return await geo_service.breakdown(db, region, province, site, search)
+        return await geo_service.breakdown(
+            db, region, province, site, search, organisation, node_type
+        )
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
 
@@ -108,12 +115,15 @@ async def list_incidents(
     status: str | None = Query(None, max_length=40),
     limit: int = Query(500, ge=1, le=5000),
     offset: int = Query(0, ge=0),
+    organisation: Organisation = None,
+    node_type: NodeType = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(*_VIEW_INCIDENTS)),
 ):
     try:
         return await incident_service.list_incidents(
-            db, region, province, site, search, severity, status, limit, offset
+            db, region, province, site, search, severity, status, limit, offset,
+            organisation=organisation, node_type=node_type,
         )
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
@@ -142,12 +152,15 @@ async def incident_history(
     status: str | None = Query(None, max_length=40),
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=500),
+    organisation: Organisation = None,
+    node_type: NodeType = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(*_VIEW_INCIDENTS)),
 ):
     try:
         return await incident_service.incident_history(
-            db, days, region, province, site, search, severity, status, offset, limit
+            db, days, region, province, site, search, severity, status, offset, limit,
+            organisation=organisation, node_type=node_type,
         )
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
@@ -179,12 +192,15 @@ async def sla_incidents(
     region: Place = None,
     province: Place = None,
     site: Place = None,
+    organisation: Organisation = None,
+    node_type: NodeType = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     try:
         return await incident_service.sla_by_group(
-            db, group_by, days, start_at, end_at, region, province, site
+            db, group_by, days, start_at, end_at, region, province, site,
+            organisation=organisation, node_type=node_type,
         )
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
@@ -197,6 +213,8 @@ async def sla_at_risk(
     region: Place = None,
     province: Place = None,
     site: Place = None,
+    organisation: Organisation = None,
+    node_type: NodeType = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -206,7 +224,9 @@ async def sla_at_risk(
     laisse encore le temps d'agir. Lu sur l'instantané, sans appel à iTop.
     """
     try:
-        return await incident_service.at_risk(db, region, province, site)
+        return await incident_service.at_risk(
+            db, region, province, site, organisation=organisation, node_type=node_type
+        )
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
 
@@ -227,11 +247,15 @@ async def kpi_incidents(
     region: Place = None,
     province: Place = None,
     site: Place = None,
+    organisation: Organisation = None,
+    node_type: NodeType = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     try:
-        return await incident_service.incident_kpis(db, days, region, province, site)
+        return await incident_service.incident_kpis(
+            db, days, region, province, site, organisation=organisation, node_type=node_type
+        )
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
     except incident_service.IncidentsUnavailable as exc:

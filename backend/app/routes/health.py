@@ -29,7 +29,8 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -41,14 +42,46 @@ from app.services import live_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["santé"])
+_optional_bearer = HTTPBearer(auto_error=False)
 
-# Cette route est PUBLIQUE (sondes, répartiteur). Le texte d'une exception —
+
+def _authenticated(credentials: HTTPAuthorizationCredentials | None) -> bool:
+    """Jeton d'accès valide ? Le DÉTAIL des contrôles (outils en panne, état
+    du schéma, file des notifications) ne se montre qu'à un utilisateur
+    connecté, ou à la sonde qui présente INTERNAL_API_KEY : publié à tous, il
+    décrivait l'intérieur du système à n'importe quel visiteur. Le verdict global et le code HTTP, eux, restent
+    publics : ce sont eux que lisent les sondes."""
+    if credentials is None:
+        return False
+    import hmac
+
+    from app.core.config import INTERNAL_API_KEY
+    from app.services.auth_service import decode_access_token
+
+    # Sonde de supervision (Zabbix de l'agence) : la clé de service.
+    if INTERNAL_API_KEY and hmac.compare_digest(
+        credentials.credentials.encode(), INTERNAL_API_KEY.encode()
+    ):
+        return True
+
+    try:
+        decode_access_token(credentials.credentials)
+    except HTTPException:
+        return False
+    return True
+
+# Cette route est PUBLIQUE (sondes, répartiteur) pour son verdict ; le détail
+# n'est rendu qu'avec un jeton valide (_authenticated). Le texte d'une exception —
 # nom d'hôte et utilisateur de la base, adresse interne de Redis — part donc
 # dans les journaux, jamais dans la réponse.
 
 
 @router.get("/health")
-async def health(response: Response, db: Session = Depends(get_db)):
+async def health(
+    response: Response,
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials | None = Depends(_optional_bearer),
+):
     checks: dict = {}
 
     # -- Redis ------------------------------------------------------------
@@ -162,6 +195,8 @@ async def health(response: Response, db: Session = Depends(get_db)):
     else:
         overall = "ok"
 
+    if not _authenticated(credentials):
+        return {"status": overall}
     return {"status": overall, "checks": checks}
 
 

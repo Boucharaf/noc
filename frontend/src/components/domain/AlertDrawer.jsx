@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { Wrench } from "lucide-react";
+import { ExternalLink, Wrench } from "lucide-react";
 
 import LocationLink from "./LocationLink";
 import { Drawer } from "../ui/Overlay";
@@ -14,17 +14,22 @@ import { useIncident } from "../../hooks/queries";
  * Fiche d'une alerte d'outil de supervision — caractéristiques TECHNIQUES
  * uniquement.
  *
- * Aucun geste de traitement : ni acquittement, ni affectation, ni clôture.
- * Le traitement et les affectations sont tenus dans iTop (écran Incidents
- * iTop) ; le NOC montre ce que disent les outils, sans tenir un second
- * circuit de travail qui divergerait de l'ITSM.
+ * Aucun geste de traitement DANS le NOC : ni acquittement, ni affectation,
+ * ni clôture. Le traitement et les affectations sont tenus dans les outils
+ * et dans iTop ; le NOC montre ce que disent les outils, sans tenir un
+ * second circuit de travail qui divergerait de l'ITSM.
+ *
+ * Actions rapides (AM-07) : des LIENS qui ouvrent l'outil source sur
+ * l'alerte (acquitter, assigner) ou iTop sur un ticket pré-rempli. Ils
+ * n'apparaissent que si l'adresse web de l'outil est configurée
+ * (<OUTIL>_WEB_URL).
  */
 function Section({ title, aside, children }) {
   return (
     <section className="mb-3">
       <div className="flex items-center gap-2 mb-1">
         <h3
-          className="text-[10.5px] font-semibold uppercase tracking-[0.07em]"
+          className="text-[12px] font-semibold uppercase tracking-[0.07em]"
           style={{ color: "var(--ink-3)" }}
         >
           {title}
@@ -69,6 +74,32 @@ export default function AlertDrawer({ alertKey, open, onClose }) {
         )
       }
     >
+      {alert && (alert.links?.acknowledge || alert.links?.ticket) && (
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          {alert.links.acknowledge && (
+            <a
+              className="btn btn-sm btn-primary"
+              href={alert.links.acknowledge}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={`Ouvre ${toolLabel(alert.tool)} : l'acquittement et l'affectation s'y font`}
+            >
+              <ExternalLink size={12} /> Acquitter / assigner dans {toolLabel(alert.tool)}
+            </a>
+          )}
+          {alert.links.ticket && (
+            <a
+              className="btn btn-sm"
+              href={alert.links.ticket}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Ouvre iTop sur un nouvel incident pré-rempli avec cette alerte"
+            >
+              <ExternalLink size={12} /> Créer un ticket iTop
+            </a>
+          )}
+        </div>
+      )}
       {query.isLoading && <LoadingState />}
       {query.isError && <ErrorState error={query.error} onRetry={query.refetch} />}
       {alert && (
@@ -87,7 +118,7 @@ export default function AlertDrawer({ alertKey, open, onClose }) {
             {alert.stale && (
               <DefRow label="Fraîcheur">
                 <span style={{ color: "var(--sev-medium)" }}>
-                  outil injoignable — dernière valeur connue
+                  {alert.frozen ? "source arrêtée — non corrigée à sa dernière donnée" : "outil injoignable — dernière valeur connue"}
                 </span>
               </DefRow>
             )}
@@ -119,7 +150,7 @@ export default function AlertDrawer({ alertKey, open, onClose }) {
                     >
                       problème {details.cause_ref}
                     </Link>
-                    <span className="block text-[11px]" style={{ color: "var(--ink-3)" }}>
+                    <span className="block text-[12px]" style={{ color: "var(--ink-3)" }}>
                       Zabbix rattache ce problème à une cause : traiter la cause d'abord.
                     </span>
                   </DefRow>
@@ -137,7 +168,7 @@ export default function AlertDrawer({ alertKey, open, onClose }) {
                   <ul className="space-y-1.5 mt-1.5 text-[12px]">
                     {details.actions.map((action, index) => (
                       <li key={`${action.at}-${index}`}>
-                        <span className="text-[11px] num" style={{ color: "var(--ink-3)" }}>
+                        <span className="text-[12px] num" style={{ color: "var(--ink-3)" }}>
                           {dateTime(action.at)}
                           {action.user ? ` · ${action.user}` : ""}
                         </span>
@@ -182,7 +213,7 @@ export default function AlertDrawer({ alertKey, open, onClose }) {
                       <DefRow key={tool} label={`Réf. ${toolLabel(tool)}`} mono>
                         {ref}
                         {node.state_conflict?.[tool] && (
-                          <span className="ml-1.5 text-[11px]" style={{ color: "var(--ink-3)" }}>
+                          <span className="ml-1.5 text-[12px]" style={{ color: "var(--ink-3)" }}>
                             ({node.state_conflict[tool]})
                           </span>
                         )}

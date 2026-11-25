@@ -1,4 +1,5 @@
 import { AlertTriangle, Inbox, Loader2, ShieldOff, WifiOff } from "lucide-react";
+import { useEffect, useState } from "react";
 
 import { errorMessage } from "../../api/client";
 
@@ -22,19 +23,45 @@ export function EmptyState({ message = "Aucune donnée", hint, icon: Icon = Inbo
     >
       <Icon size={compact ? 16 : 20} strokeWidth={1.6} />
       <p className="text-[12.5px]">{message}</p>
-      {hint && <p className="text-[11px] max-w-[42ch] leading-snug">{hint}</p>}
+      {hint && <p className="text-[12px] max-w-[42ch] leading-snug">{hint}</p>}
     </div>
   );
 }
 
-export function LoadingState({ label = "Chargement…", compact = false }) {
+/**
+ * Chargement. Au-delà de `slowAfterMs` (10 s), le bloc le DIT (INC-19) au
+ * lieu de tourner sans fin : un squelette éternel se lit comme « l'écran
+ * est cassé » alors que c'est souvent la source qui ne répond pas.
+ * `minHeight` réserve la place du contenu (INC-36) : la page ne saute pas
+ * quand la courbe arrive.
+ */
+export function LoadingState({
+  label = "Chargement…",
+  compact = false,
+  slowMessage = "La source de données tarde à répondre. Les chiffres s'afficheront dès réception ; si cela dure, vérifiez l'écran Collecte.",
+  slowAfterMs = 10_000,
+  minHeight,
+}) {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => setSlow(true), slowAfterMs);
+    return () => clearTimeout(timer);
+  }, [slowAfterMs]);
   return (
     <div
-      className={`flex items-center justify-center gap-2 ${compact ? "py-5" : "py-10"}`}
-      style={{ color: "var(--ink-3)" }}
+      className={`flex flex-col items-center justify-center gap-1 ${compact ? "py-5" : "py-10"}`}
+      style={{ color: "var(--ink-3)", minHeight }}
+      role="status"
     >
-      <Loader2 size={14} className="animate-spin" />
-      <span className="text-[12px]">{label}</span>
+      <span className="flex items-center gap-2">
+        <Loader2 size={14} className="animate-spin" />
+        <span className="text-[12px]">{label}</span>
+      </span>
+      {slow && (
+        <span className="text-[12px] text-center max-w-md px-3" style={{ color: "var(--sev-medium)" }}>
+          {slowMessage}
+        </span>
+      )}
     </div>
   );
 }
@@ -68,7 +95,7 @@ export function ErrorState({ error, onRetry, compact = false }) {
     >
       <Icon size={compact ? 16 : 20} strokeWidth={1.6} />
       <p className="text-[12.5px] font-medium">{title}</p>
-      <p className="text-[11px] max-w-[46ch] leading-snug" style={{ color: "var(--ink-3)" }}>
+      <p className="text-[12px] max-w-[46ch] leading-snug" style={{ color: "var(--ink-3)" }}>
         {forbidden
           ? "Votre profil ne donne pas accès à cette information."
           : errorMessage(error)}
@@ -119,9 +146,19 @@ export function QueryBoundary({
   emptyIcon,
   skeleton,
   compact = false,
+  slowMessage,
+  minHeight,
 }) {
   if (query.isLoading) {
-    return skeleton ?? <LoadingState compact={compact} />;
+    return (
+      skeleton ?? (
+        <LoadingState
+          compact={compact}
+          minHeight={minHeight}
+          {...(slowMessage ? { slowMessage } : {})}
+        />
+      )
+    );
   }
   if (query.isError) {
     return <ErrorState error={query.error} onRetry={query.refetch} compact={compact} />;

@@ -71,3 +71,47 @@ def test_monthly_trend_reads_the_daily_rows_of_the_calendar_month(monkeypatch):
     assert calls == [
         {"site": "Ouaga DGI", "start_at": date(2026, 12, 1), "end_at": date(2027, 1, 1)}
     ]
+
+
+def test_health_score_weights_components_and_reports_missing_ones():
+    """AM-03 : 40 % dispo, 20 % incidents, 20 % alertes, 20 % couverture."""
+    from app.services.kpi_service import health_score
+
+    full = health_score(90.0, critical_incidents=1, critical_alerts=2, supervised=80, expected=100)
+    # 0,4×90 + 0,2×90 + 0,2×80 + 0,2×80 = 86
+    assert full["score"] == 86
+    assert full["missing"] == []
+
+    # iTop indisponible : la composante « incidents » est écartée, poids renormalisés.
+    no_itop = health_score(90.0, None, 2, 80, 100)
+    assert no_itop["missing"] == ["incidents"]
+    assert no_itop["score"] == round((0.4 * 90 + 0.2 * 80 + 0.2 * 80) / 0.8)
+
+    # Aucun équipement supervisé : non évaluable.
+    assert health_score(None, 0, 0, 0, 10)["score"] is None
+
+
+def test_cmdb_coverage_and_ack_delay():
+    from app.services.kpi_service import _cmdb_coverage, _delay_minutes
+
+    nodes = [
+        {"sources": {"itop": "1", "zabbix": "1"}, "state": "up"},
+        {"sources": {"itop": "2"}, "state": "unknown"},          # CMDB seule
+        {"sources": {"itop": "3", "netxms": "3"}, "state": "unknown"},  # vu, pas observé
+        {"sources": {"zabbix": "4"}, "state": "up"},              # hors CMDB
+    ]
+    assert _cmdb_coverage(nodes) == {
+        "cmdb_nodes": 3, "cmdb_supervised": 1, "cmdb_coverage_pct": 33.3,
+    }
+    assert _delay_minutes("2026-01-01T00:00:00+00:00", "2026-01-01T00:12:00Z") == 12.0
+    assert _delay_minutes("2026-01-01T00:12:00+00:00", "2026-01-01T00:00:00+00:00") is None
+    assert _delay_minutes(None, "2026-01-01T00:00:00+00:00") is None
+
+
+def test_naming_convention_flags_names_outside_site_role_nn():
+    from app.services.kpi_service import _naming
+
+    result = _naming([{"name": "PA-RTR-01"}, {"name": "pa-sw-12"}, {"name": "OUAHA-x"},
+                      {"name": "PA2BONI"}])
+    assert result["naming_nonconforming"] == 2
+    assert result["naming_examples"] == ["OUAHA-x", "PA2BONI"]

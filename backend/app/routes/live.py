@@ -57,9 +57,15 @@ def scope_params(
     province: str | None = Query(None, max_length=200),
     site: str | None = Query(None, max_length=200),
     search: str | None = Query(None, max_length=200),
+    organisation: str | None = Query(None, max_length=200),
+    node_type: str | None = Query(None, max_length=100),
 ) -> dict:
-    """Périmètre commun à tous les écrans (barre région > province > site)."""
-    return {"region": region, "province": province, "site": site, "search": search}
+    """Périmètre commun à tous les écrans : la barre de filtres unique
+    (région › province › site, organisation, type — AM-30)."""
+    return {
+        "region": region, "province": province, "site": site, "search": search,
+        "organisation": organisation, "node_type": node_type,
+    }
 
 
 Scope = Annotated[dict, Depends(scope_params)]
@@ -88,13 +94,17 @@ async def overview(
     province: str | None = Query(None, max_length=200),
     site: str | None = Query(None, max_length=200),
     search: str | None = Query(None, max_length=200),
+    organisation: str | None = Query(None, max_length=200),
+    node_type: str | None = Query(None, max_length=100),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Tuiles du haut de page : le parc, les alertes, la fraîcheur — sur le
     périmètre demandé (tout le parc par défaut)."""
     try:
-        return await kpi_service.live_summary(db, region, province, site, search)
+        return await kpi_service.live_summary(
+            db, region, province, site, search, organisation, node_type
+        )
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
 
@@ -166,11 +176,16 @@ async def alert_ages(
 @router.get("/alerts/hour-distribution")
 async def hour_distribution(
     scope: Scope,
+    hours: int | None = Query(None, ge=1, le=8760),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Heure d'apparition des alertes actives apparues dans les `hours`
+    dernières heures (toutes si absent)."""
     try:
-        return await kpi_service.hour_distribution((await geo_service.scoped(db, **scope))[1])
+        return await kpi_service.hour_distribution(
+            (await geo_service.scoped(db, **scope))[1], hours
+        )
     except live_service.SnapshotUnavailable as exc:
         raise _unavailable(exc) from exc
 
@@ -192,6 +207,7 @@ async def list_alerts(
     organisation: str | None = Query(None, max_length=200),
     node_type: str | None = Query(None, max_length=100),
     acknowledged: bool | None = None,
+    confirmed: bool | None = None,
     include_maintenance: bool = True,
     limit: int = Query(500, ge=1, le=5000),
     current_user: User = Depends(get_current_user),
@@ -208,6 +224,7 @@ async def list_alerts(
             organisation=organisation,
             node_type=node_type,
             acknowledged=acknowledged,
+            confirmed=confirmed,
             include_maintenance=include_maintenance,
             limit=limit,
         )
@@ -462,7 +479,8 @@ async def network_series(
     """
     try:
         nodes, _alerts, _incidents = await geo_service.scoped(
-            db, region=region, province=province, site=site, search=search
+            db, region=region, province=province, site=site, search=search,
+            organisation=organisation, node_type=node_type,
         )
         return await metrics_service.network_series(
             metric, period, sample, None, organisation, node_type, nodes=nodes

@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
+import { useWindowStore, windowDays } from "../store/ui";
 
 import ItopIncidentDrawer from "../components/domain/ItopIncidentDrawer";
 import Panel from "../components/ui/Panel";
@@ -12,7 +13,12 @@ import { QueryBoundary, SkeletonRows } from "../components/ui/States";
 import { dateTime, duration, num, pct } from "../lib/format";
 import { ITOP_STATUS, itopStatusMeta, slaStatusMeta } from "../lib/itop";
 import { SEVERITIES, severityMeta } from "../lib/vocabulary";
-import { useItopIncidentHistory, useItopIncidents, useLiveTrend } from "../hooks/queries";
+import {
+  useItopIncidentHistory,
+  useItopIncidents,
+  useLiveTrend,
+  useSlaIncidents,
+} from "../hooks/queries";
 import { scopeLabel, useScopeStore } from "../store/scope";
 
 /**
@@ -32,13 +38,6 @@ import { scopeLabel, useScopeStore } from "../store/scope";
  */
 const PAGE_SIZE = 50;
 const CLOSED = ["resolved", "closed", "rejected"];
-const HISTORY_DAYS = [
-  { value: "7", label: "7 jours" },
-  { value: "30", label: "30 jours" },
-  { value: "90", label: "90 jours" },
-  { value: "180", label: "6 mois" },
-  { value: "365", label: "12 mois" },
-];
 
 /**
  * Barres horizontales d'une répartition. `part` (facultatif) colore la part
@@ -57,7 +56,7 @@ function Bars({ rows, onSelect, selected, partLabel }) {
                 {row.label}
               </span>
               {row.part > 0 && (
-                <span className="text-[10.5px]" style={{ color: "var(--sev-critical)" }}>
+                <span className="text-[12px]" style={{ color: "var(--sev-critical)" }}>
                   {num(row.part)} {partLabel}
                 </span>
               )}
@@ -113,7 +112,11 @@ export default function IncidentsPage() {
   const selected = params.get("id");
   const view = params.get("vue") === "historique" ? "history" : "open";
   const page = Math.max(1, Number(params.get("page")) || 1);
-  const days = params.get("jours") || "30";
+  // Historique : période globale de la barre unique (INC-28), en jours.
+  const days = windowDays(useWindowStore((s) => s.hours));
+  // AM-20 : temps moyen par étape du circuit, sur l'historique iTop de la
+  // période (mêmes tickets que l'écran SLA).
+  const stages = useSlaIncidents({ days }).data?.totals;
 
   const setParam = (key, value) => {
     const next = new URLSearchParams(params);
@@ -169,7 +172,7 @@ export default function IncidentsPage() {
       render: (row) => (
         <span>
           <span className="font-medium">{row.node_name ?? "CI non rattaché"}</span>
-          <span className="block text-[11px]" style={{ color: "var(--ink-3)" }}>
+          <span className="block text-[12px]" style={{ color: "var(--ink-3)" }}>
             {[row.site, row.province, row.region].filter(Boolean).join(" · ") || "localité inconnue"}
           </span>
         </span>
@@ -245,7 +248,7 @@ export default function IncidentsPage() {
         row.resolved_at ? (
           <span>
             <span className="num">{dateTime(row.resolved_at)}</span>
-            <span className="block text-[11px]" style={{ color: "var(--ink-3)" }}>
+            <span className="block text-[12px]" style={{ color: "var(--ink-3)" }}>
               en {duration(row.sla?.ttr_minutes)}
             </span>
           </span>
@@ -266,6 +269,7 @@ export default function IncidentsPage() {
 
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
         <Stat
+          sources="incidents"
           label="Incidents ouverts"
           value={num(data?.total)}
           spark={trend.data?.incidents}
@@ -289,13 +293,40 @@ export default function IncidentsPage() {
         />
         <Stat
           label="SLA dépassé"
-          value={num(data?.sla_breached)}
-          color={data?.sla_breached ? "var(--sev-critical)" : "var(--state-up)"}
+          // INC-38 : pas de « hors délai » affirmé sur des données iTop
+          // périmées ou sans objectif de délai.
+          value={data && !data.sla_evaluable ? "Non évaluable" : num(data?.sla_breached)}
+          color={
+            data && !data.sla_evaluable
+              ? "var(--ink-3)"
+              : data?.sla_breached
+                ? "var(--sev-critical)"
+                : "var(--state-up)"
+          }
+          hint={
+            data && !data.sla_evaluable
+              ? data.itop_stale
+                ? "iTop indisponible : délais non vérifiables"
+                : "aucun ticket avec objectif de délai"
+              : data && `sur ${num(data.sla_evaluated)} ticket(s) avec objectif`
+          }
+          help="Tickets ouverts dont le délai de résolution (TTR) est déjà dépassé, parmi ceux qui ont un objectif de délai. Non évaluable si iTop ne répond pas."
         />
         <Stat
-          label="Sans équipement"
-          value={num(data?.unlocated)}
-          hint="CI iTop non retrouvé"
+          label="Rattachés à un équipement"
+          value={pct(data?.attachment_rate_pct, 0)}
+          target="≥ 95 %"
+          color={
+            data?.attachment_rate_pct == null
+              ? undefined
+              : data.attachment_rate_pct >= 95
+                ? "var(--state-up)"
+                : data.attachment_rate_pct >= 80
+                  ? "var(--sev-medium)"
+                  : "var(--sev-critical)"
+          }
+          hint={data && `${num(data.network_unlocated)} ticket(s) sans équipement`}
+          help="Part des tickets iTop ouverts liés à un équipement (CI iTop, ou équipement cité dans le titre). Un ticket non rattaché ne peut être placé ni sur la carte, ni dans une région."
         />
       </div>
 
@@ -322,7 +353,15 @@ export default function IncidentsPage() {
           </Panel>
           <Panel
             title="Circuit de traitement"
-            subtitle="où en sont les tickets · clic pour filtrer"
+            subtitle={
+              stages && (stages.mtto_minutes != null || stages.mttr_minutes != null)
+                ? `Nouveau → Affecté : ${duration(stages.mtto_minutes)} en moyenne · Affecté → Résolu : ${duration(
+                    stages.mttr_minutes != null && stages.mtto_minutes != null
+                      ? Math.max(0, stages.mttr_minutes - stages.mtto_minutes)
+                      : null,
+                  )} · clic pour filtrer`
+                : "où en sont les tickets · clic pour filtrer"
+            }
             className="col-span-12 lg:col-span-6"
           >
             <Bars
@@ -343,9 +382,14 @@ export default function IncidentsPage() {
         <Notice tone="info">
           <strong>{num(data.total)}</strong> incident(s) dans ce périmètre, sur{" "}
           <strong>{num(data.network_total)}</strong> tickets ouverts dans iTop.{" "}
-          {num(data.network_unlocated)} ticket(s) n'ont aucun équipement identifiable
-          (ni CI lié, ni équipement cité dans le titre) : ils ne peuvent être rattachés à
-          aucune localité et n'apparaissent qu'avec « Tout le réseau ».
+          {data.network_unlocated > 0 && (
+            <>
+              <strong>{num(data.network_unlocated)}</strong> ticket(s) ne sont liés à aucun
+              équipement : ils ne peuvent pas être placés sur la carte, et ne sont visibles
+              qu'avec « Tout le réseau ». Pour les corriger, liez le ticket à son équipement
+              (CI) dans iTop.
+            </>
+          )}
         </Notice>
       )}
 
@@ -353,7 +397,11 @@ export default function IncidentsPage() {
         <div className="grid grid-cols-12 gap-2 items-start">
           <Panel
             title="Tickets iTop par région"
-            subtitle={`les ${num(data.network_total)} tickets ouverts · clic pour filtrer`}
+            // INC-11 : les parts régionales sont calculées sur les tickets
+            // LOCALISABLES ; les non localisés sont comptés à part.
+            subtitle={`% sur ${num(data.network_located)} tickets localisables · ${num(
+              data.network_unlocated,
+            )} non localisé(s) · clic pour filtrer`}
             className="col-span-12 lg:col-span-6"
           >
             <ul className="space-y-1">
@@ -382,11 +430,13 @@ export default function IncidentsPage() {
                             fontWeight: active ? 600 : undefined,
                           }}
                         >
-                          {unknown ? "Sans localité identifiable" : row.region}
+                          {unknown ? "Non localisés (aucun équipement lié)" : row.region}
                         </span>
                         <span className="num">{num(row.count)}</span>
                         <span className="num" style={{ width: 44, textAlign: "right", color: "var(--ink-3)" }}>
-                          {pct((100 * row.count) / data.network_total, 0)}
+                          {unknown || !data.network_located
+                            ? ""
+                            : pct((100 * row.count) / data.network_located, 0)}
                         </span>
                       </div>
                     </button>
@@ -445,7 +495,7 @@ export default function IncidentsPage() {
         <div className="p-2 border-b" style={{ borderColor: "var(--border)" }}>
           <Toolbar
             right={
-              <span className="text-[11.5px]" style={{ color: "var(--ink-3)" }}>
+              <span className="text-[12px]" style={{ color: "var(--ink-3)" }}>
                 <span className="num" style={{ color: "var(--ink-2)" }}>
                   {num(listTotal)}
                 </span>{" "}
@@ -466,16 +516,6 @@ export default function IncidentsPage() {
               </span>
             }
           >
-            {view === "history" && (
-              <FilterSelect
-                label="Période"
-                value={days}
-                onChange={(value) => setParam("jours", value === "30" ? null : value)}
-                allLabel="30 jours"
-                width={120}
-                options={HISTORY_DAYS.filter((option) => option.value !== "30")}
-              />
-            )}
             <SearchField
               value={params.get("q") ?? ""}
               onChange={(value) => setParam("q", value)}
@@ -506,7 +546,7 @@ export default function IncidentsPage() {
             />
           </Toolbar>
         </div>
-        <div style={{ maxHeight: "calc(100vh - 300px)", overflow: "auto" }}>
+        <div style={{ maxHeight: "calc(var(--vh) - 300px)", overflow: "auto" }}>
           <QueryBoundary
             query={listQuery}
             skeleton={<SkeletonRows rows={10} columns={8} />}

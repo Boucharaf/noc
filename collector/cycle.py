@@ -23,12 +23,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
 from integrations.base import SourceClient
 from integrations.models import Alert, Node, ToolHealth, ToolSnapshot
 
-from . import config, history
+from . import config, downtime, history, identity, retention, tool_health
 from .merge import MergedNode, attach_alerts, merge_nodes
 from .operations import active_maintenance_keys, link_operations
 from .rollup import export_accumulator, observe, rollup_key
@@ -194,6 +195,41 @@ async def _cached_records(store, name: str, collection: str) -> list[dict]:
     return []
 
 
+async def _record_tool_health(healths: dict, source_status: dict, at: datetime) -> None:
+    """Jamais bloquant : un échec ne coûte que cet historique."""
+    if not config.HISTORY_ENABLED:
+        return
+    try:
+        await asyncio.wait_for(
+            tool_health.record(healths, source_status, at), timeout=config.HISTORY_TIMEOUT_S
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Santé des outils non historisée")
+
+
+async def _frozen_since(name: str, client) -> datetime | None:
+    """Date de la dernière donnée si la source est arrêtée, sinon None.
+
+    Une date illisible ne fige rien : mieux vaut l'ancien comportement qu'une
+    source vivante déclarée arrêtée.
+    """
+    read = getattr(client, "data_horizon", None)
+    if config.SOURCE_FROZEN_HOURS <= 0 or read is None:
+        return None
+    try:
+        horizon = await read()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s : date de la dernière donnée illisible — %s", name, exc)
+        return None
+    if horizon is None:
+        return None
+    limit = timedelta(hours=config.SOURCE_FROZEN_HOURS)
+    if datetime.now(timezone.utc) - horizon <= limit:
+        return None
+    logger.debug("%s : source arrêtée au %s", name, horizon.isoformat())
+    return horizon
+
+
 async def poll_tool(name: str, client) -> ToolSnapshot:
     """Interroge un outil. Ne lève jamais.
 
@@ -277,6 +313,18 @@ async def poll_tool(name: str, client) -> ToolSnapshot:
             error="; ".join(errors),
         )
 
+    data_until = await _frozen_since(name, client)
+    if data_until is not None:
+        nodes = [
+            replace(node, stale=True, frozen=True, observed_at=data_until) for node in nodes
+        ]
+        alerts = [
+            replace(alert, stale=True, frozen=True, last_observed_at=data_until)
+            for alert in alerts
+        ]
+        # Des mesures d'une source arrêtée ne sont pas des mesures actuelles.
+        latest = {}
+
     logger.info(
         "%s : %d équipement(s), %d alerte(s) active(s)", name, len(nodes), len(alerts)
     )
@@ -289,7 +337,28 @@ async def poll_tool(name: str, client) -> ToolSnapshot:
         latest=latest,
         maintenance=operations["maintenance"],
         work_orders=operations["work_orders"],
+        data_until=data_until,
     )
+
+
+# Dernière lecture des outils lents (config.SLOW_TOOLS), réussie ou non : un
+# outil qui refuse l'accès n'est pas réessayé à chaque minute.
+_slow_reads: dict[str, tuple[datetime, ToolSnapshot]] = {}
+
+
+async def _poll(name: str, client, now: datetime) -> ToolSnapshot:
+    """Interroge l'outil, sauf s'il est lent et lu récemment."""
+    if name not in config.SLOW_TOOLS:
+        return await poll_tool(name, client)
+    previous = _slow_reads.get(name)
+    # Cinq secondes de marge : les cycles ne tombent pas à la seconde près.
+    if previous and (now - previous[0]).total_seconds() < config.SLOW_INTERVAL_S - 5:
+        return previous[1]
+    _slow_reads.pop(name, None)
+    snapshot = await poll_tool(name, client)
+    if config.SLOW_INTERVAL_S > config.COLLECT_INTERVAL_S:
+        _slow_reads[name] = (now, snapshot)
+    return snapshot
 
 
 async def run_cycle(
@@ -302,7 +371,7 @@ async def run_cycle(
     started = time.perf_counter()
 
     tasks = {
-        name: asyncio.create_task(poll_tool(name, client), name=f"collecte-{name}")
+        name: asyncio.create_task(_poll(name, client, started_at), name=f"collecte-{name}")
         for name, client in clients.items()
     }
 
@@ -323,6 +392,7 @@ async def run_cycle(
     source_data_status: dict[str, dict[str, dict[str, object]]] = {}
     # Dernières valeurs, clé « outil:ref » — la même que Node.key().
     latest_values: dict[str, dict[str, float]] = {}
+    healths: dict[str, ToolHealth] = {}
     maintenance_records: list[dict] = []
     work_order_records: list[dict] = []
 
@@ -335,9 +405,11 @@ async def run_cycle(
     ) -> dict[str, object]:
         if fresh:
             values = list(records)
-            await store.write_source_data(name, collection, values, started_at)
+            # Outil lent repris : l'heure reste celle de sa vraie lecture.
+            read_at = _slow_reads[name][0] if name in _slow_reads else started_at
+            await store.write_source_data(name, collection, values, read_at)
             destination.extend(values)
-            return {"stale": False, "collected_at": started_at.isoformat()}
+            return {"stale": False, "collected_at": read_at.isoformat()}
 
         values, collected_at = await _fallback_source_data(store, name, collection)
         destination.extend(values)
@@ -362,6 +434,7 @@ async def run_cycle(
                 reachable=False,
                 error=f"délai de cycle dépassé ({timeout_s:.0f} s)",
             )
+            healths[name] = health
             await store.write_tool_health(health)
             source_data_status[name] = {
                 "nodes": await collect_stream(name, "nodes", False, (), all_nodes),
@@ -377,6 +450,7 @@ async def run_cycle(
             # mais un cycle de collecte ne peut pas dépendre de ce « devrait ».
             logger.exception("%s : exception inattendue pendant la collecte", name)
             health = ToolHealth(tool=name, reachable=False, error="exception interne")
+            healths[name] = health
             await store.write_tool_health(health)
             source_data_status[name] = {
                 "nodes": await collect_stream(name, "nodes", False, (), all_nodes),
@@ -385,6 +459,7 @@ async def run_cycle(
             tools_failed.append(name)
             continue
 
+        healths[name] = snapshot.health
         await store.write_tool_health(snapshot.health)
         source_data_status[name] = {
             "nodes": await collect_stream(
@@ -394,6 +469,9 @@ async def run_cycle(
                 name, "alerts", snapshot.alerts_complete, snapshot.alerts, all_alerts
             ),
         }
+        if snapshot.data_until is not None:
+            for stream in source_data_status[name].values():
+                stream["data_until"] = snapshot.data_until.isoformat()
         (tools_ok if snapshot.health.reachable else tools_failed).append(name)
         for ref, values in snapshot.latest.items():
             latest_values[f"{name}:{ref}"] = values
@@ -417,6 +495,7 @@ async def run_cycle(
             "Aucune source ni collecte mémorisée disponible : "
             "instantané précédent conservé"
         )
+        await _record_tool_health(healths, source_data_status, started_at)
         return {
             "snapshot_published": False,
             "tools_ok": tools_ok,
@@ -425,6 +504,11 @@ async def run_cycle(
         }
 
     merged, report = merge_nodes(all_nodes)
+    # Avant tout rattachement (alertes, maintenances, historique) : tous
+    # doivent porter l'identifiant stable de l'équipement.
+    identified = True
+    if config.HISTORY_ENABLED:
+        identified = await identity.apply(merged, report, source_data_status, started_at)
     # Un seul état « inconnu » pour l'exploitant : qu'un outil ne remonte plus
     # rien (muet) ou qu'aucun état ne soit mesuré, on ne sait pas si
     # l'équipement fonctionne — et il compte de la même façon (non disponible).
@@ -433,6 +517,9 @@ async def run_cycle(
             node.state = "unknown"
     merged, orphans = attach_alerts(merged, all_alerts)
     technical_alerts = [alert for alert in all_alerts if alert.kind == "technical"]
+    # Alertes confirmées par une source vivante : les seules comptées. Celles
+    # d'une source arrêtée restent listées comme non corrigées.
+    active_alerts = [alert for alert in technical_alerts if not alert.frozen]
     itsm_tickets = [alert for alert in all_alerts if alert.kind == "itsm_ticket"]
 
     link_operations(merged, maintenance_records, work_order_records)
@@ -449,7 +536,7 @@ async def run_cycle(
         started_at=started_at,
         duration_s=time.perf_counter() - started,
         nodes=len(merged),
-        alerts=len(technical_alerts),
+        alerts=len(active_alerts),
         tools_ok=tools_ok,
         tools_failed=tools_failed,
     )
@@ -488,7 +575,9 @@ async def run_cycle(
     await store.write_operations(maintenance_records, work_order_records)
     await store.write_snapshot(merged, all_alerts, meta)
     try:
-        await store.append_trend(trend_sample(merged, all_alerts, maintenance[0], started_at))
+        await store.append_trend(trend_sample(
+            merged, [a for a in all_alerts if not a.frozen], maintenance[0], started_at
+        ))
     except Exception:  # noqa: BLE001 — les mini-courbes ne valent pas un cycle perdu
         logger.exception("Historique court non enregistré")
 
@@ -496,7 +585,11 @@ async def run_cycle(
     # publication, borné dans le temps, et jamais bloquant — une base du NOC
     # lente ou indisponible retarde l'historique, pas le tableau de bord. Le
     # cycle suivant reprend là où celui-ci s'est arrêté.
-    if config.HISTORY_ENABLED:
+    # Identifiants non vérifiés (base indisponible au démarrage) : rien n'est
+    # écrit à ce cycle, plutôt que sous un identifiant qui ne serait pas le bon.
+    if config.HISTORY_ENABLED and not identified:
+        logger.warning("Identité des équipements non vérifiée : historique non écrit")
+    elif config.HISTORY_ENABLED:
         try:
             await asyncio.wait_for(
                 history.record(merged, all_alerts, maintenance[0], source_data_status,
@@ -505,13 +598,32 @@ async def run_cycle(
             )
         except Exception:  # noqa: BLE001
             logger.exception("Journal historique non mis à jour pour ce cycle")
+        # Pannes enregistrées par NetXMS (downtime_log), source maître de la
+        # disponibilité des équipements NetXMS. Même garde : un échec ne
+        # coûte que la fraîcheur de ce journal, le NOC revient alors à ses
+        # propres observations (collector/downtime.py).
+        if downtime.enabled_sources():
+            try:
+                await asyncio.wait_for(
+                    downtime.sync(merged, started_at), timeout=config.HISTORY_TIMEOUT_S
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("Pannes des outils non synchronisées")
+
+    await _record_tool_health(healths, source_data_status, started_at)
+    try:
+        await asyncio.wait_for(retention.run(started_at), timeout=config.HISTORY_TIMEOUT_S)
+    except Exception:  # noqa: BLE001
+        logger.exception("Conservation : purge non faite")
 
     # Alimente les compteurs du bilan journalier (collector/rollup.py). Fait
     # ici, dans le cycle, et non par une requête séparée : l'agrégat doit
     # porter sur ce qui a RÉELLEMENT été observé, cycle par cycle, y compris
     # les cycles où un outil manquait à l'appel.
     if config.ROLLUP_ENABLED:
-        _observe_rollup(merged, technical_alerts, started_at, *maintenance)
+        _observe_rollup(
+            [node for node in merged if node.observed], active_alerts, started_at, *maintenance
+        )
         try:
             await store.save_rollup(export_accumulator())
         except Exception:  # noqa: BLE001 — sauvegarde manquée : reprise au cycle suivant
@@ -521,6 +633,8 @@ async def run_cycle(
     # réveillé par une nouvelle alerte va immédiatement relire le parc, et il
     # doit y trouver l'équipement concerné.
     new_alerts = await store.diff_new_alerts(technical_alerts)
+    # Vues, mais jamais diffusées : rien ne dit qu'elles soient actuelles.
+    new_alerts = [alert for alert in new_alerts if not alert.frozen]
     if new_alerts:
         logger.info("%d nouvelle(s) alerte(s) diffusée(s)", len(new_alerts))
         await store.publish_new_alerts(new_alerts)

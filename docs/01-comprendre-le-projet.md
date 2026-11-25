@@ -28,8 +28,8 @@ Le **NOC** (*Network Operations Center*, centre de supervision) est la salle
 où l'équipe surveille le réseau. Cette plateforme est **son tableau de bord
 unique**. Elle :
 
-1. **lit** tous les outils par leurs API, à intervalle régulier (toutes les
-   5 minutes) ;
+1. **lit** tous les outils par leurs API, à intervalle régulier (chaque
+   minute) ;
 2. **traduit** leurs données dans un vocabulaire commun (une gravité
    « critique » veut dire la même chose partout) ;
 3. **fusionne** les équipements vus par plusieurs outils en un seul parc ;
@@ -73,10 +73,10 @@ les droits :
 | Équipements | `/equipements` | L'inventaire fusionné, et la fiche de chaque équipement (mesures, inventaire, interfaces, état chez chaque outil) |
 | Performance réseau | `/performance` | Courbes de latence, pertes, trafic ; disponibilité des liens |
 | SLA & disponibilité | `/sla` | Respect des engagements de service, incidents à risque, contrat iTop |
-| Rapports | `/rapports` | Rapport mensuel PDF / DOCX |
+| Rapports | `/rapports` | Rapport mensuel PDF / DOCX, et rapports **figés** d'un mois clos |
 | Maintenances | `/maintenances` | Maintenances planifiées lues dans iTop (changements) et Zabbix — lecture seule |
 | Interventions | `/interventions` | Ordres de travail iTop — lecture seule |
-| Collecte ETL | `/integrations` | L'état de la lecture de chaque outil, la qualité de la fusion, les équipements vus par un seul outil, les alertes sans équipement |
+| Collecte ETL | `/integrations` | L'état de la lecture de chaque outil, sa disponibilité sur 30 jours, la qualité de la fusion, les équipements vus par un seul outil, les alertes sans équipement |
 | Utilisateurs | `/utilisateurs` | Gestion des comptes (Chef NOC) |
 | Journal d'audit | `/audit` | Connexions, comptes, objectifs SLA : qui a fait quoi, quand, depuis où (Chef NOC, Directeur) |
 | Mon compte | `/compte` | Ses identifiants et préférences |
@@ -88,7 +88,7 @@ Voici ce qui se passe, de bout en bout, quand un routeur tombe :
 
 1. **Détection** — la sonde de Zabbix (ou NetXMS, Centreon…) constate que le
    routeur ne répond plus et ouvre un *problème* dans l'outil.
-2. **Collecte** — au plus 5 minutes plus tard, le collecteur du NOC lit
+2. **Collecte** — au plus une minute plus tard, le collecteur du NOC lit
    l'outil, voit une alerte qui n'existait pas au cycle précédent.
 3. **Diffusion** — l'alerte apparaît immédiatement sur tous les écrans ouverts
    (WebSocket), et si elle est critique ou majeure, un courriel part vers les
@@ -121,10 +121,13 @@ indicateurs.
 | **NOC** | *Network Operations Center* — la salle de supervision, et par extension cette plateforme. |
 | **Outil source** | Un outil de supervision que la plateforme lit (Zabbix, Centreon, iTop, NetXMS, Nagios, NSP). |
 | **Connecteur** | Le module de code qui sait lire un outil source (`integrations/`). |
-| **Collecteur** | Le service qui lit tous les outils toutes les 5 minutes (`collector/`). |
+| **Collecteur** | Le service qui lit tous les outils chaque minute (`collector/`). |
 | **Instantané** | L'état complet du parc et des alertes à un instant, écrit dans Redis par le collecteur. |
 | **Équipement** (ou nœud) | Un appareil supervisé : routeur, switch, serveur, point d'accès… |
 | **Fusion** | Le rapprochement d'un même équipement vu par plusieurs outils. |
+| **Identité** | L'identifiant qu'un équipement reçoit une fois et garde, même si ses outils changent (`collector/identity.py`). |
+| **Rapport figé** | Le rapport d'un mois clos, enregistré avec ses données et son empreinte ; il ne se modifie plus. |
+| **MTTA** | *Mean Time To Acknowledge* — délai moyen entre l'ouverture d'une alerte et son acquittement dans l'outil. |
 | **Site** | Le lieu où se trouve un équipement (« DREP Gaoua », « ANPTIC Fada-Ngourma »). |
 | **Alerte** | Un problème actif remonté par un outil source. Identifiée par `<outil>:<référence>`, par ex. `netxms:5647364`. |
 | **Incident** | Un ticket **iTop** (classes `Incident`, `UserRequest`). Le NOC ne fabrique pas d'incident à partir d'une alerte. |

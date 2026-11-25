@@ -54,3 +54,17 @@ def test_drain_averages_over_real_samples_and_clears_only_that_day(monkeypatch):
     # 2 « up » sur 3 observations mesurées : la maintenance sort du dénominateur.
     assert row["fleet_availability_pct"] == 66.67
     assert list(rollup._ACCUMULATOR) == [(date(2026, 10, 2), None)]
+
+
+def test_drain_excludes_unsupervised_nodes_from_availability(monkeypatch):
+    """AM-29 : un équipement inconnu (non supervisé) n'est pas en panne."""
+    day = date(2026, 10, 3)
+    monkeypatch.setattr(rollup, "_ACCUMULATOR", {})
+    rollup.observe(day, None, [_node("a", "up"), _node("b", "unknown")], [])
+    rollup.observe(day, "Site sans supervision", [_node("c", "unknown")], [])
+
+    rows = {row["site"]: row for row in rollup._drain(day)}
+
+    assert rows[None]["fleet_availability_pct"] == 100.0
+    # Aucun équipement supervisé : pas de taux, et surtout pas 0 %.
+    assert rows["Site sans supervision"]["fleet_availability_pct"] is None

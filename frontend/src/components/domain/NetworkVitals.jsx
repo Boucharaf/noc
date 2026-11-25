@@ -1,7 +1,8 @@
 import Stat from "../ui/Stat";
-import { bandwidth, decimal, num, pct } from "../../lib/format";
-import { thresholdColor } from "../../lib/vocabulary";
-import { useLiveTrend } from "../../hooks/queries";
+import { availabilityBasis, bandwidth, decimal, num, pct } from "../../lib/format";
+import { fleetColor, THRESHOLDS, thresholdColor, thresholdTarget } from "../../lib/vocabulary";
+import { useKpiTrend, useLiveTrend } from "../../hooks/queries";
+import { useWindowStore, windowDays, windowLabel } from "../../store/ui";
 
 /**
  * Constantes vitales du réseau.
@@ -21,7 +22,9 @@ import { useLiveTrend } from "../../hooks/queries";
 // barre, l'écart se voit sans lire. Pour une mesure où plus bas est mieux
 // (latence, pertes), la jauge se remplit vers le seuil à NE PAS dépasser.
 const GAUGES = {
-  availability_pct: { target: 99, max: 100 },
+  get availability_pct() {
+    return { target: THRESHOLDS.fleet[0], max: 100 };
+  },
   packet_loss_pct: { target: 2, max: 10 },
   latency_ms: { target: 100, max: 400 },
   cpu_pct: { target: 80, max: 100 },
@@ -29,9 +32,18 @@ const GAUGES = {
   disk_pct: { target: 90, max: 100 },
 };
 
+/** Variation entre le premier et le dernier point d'une série. */
+function trendDelta(series) {
+  const values = (series ?? []).filter((value) => value !== null && value !== undefined);
+  if (values.length < 2) return "évolution non disponible";
+  const change = Math.round(values[values.length - 1] - values[0]);
+  if (change === 0) return "= stable";
+  return change > 0 ? `▲ +${num(change)}` : `▼ ${num(change)}`;
+}
+
 const HELP = {
   availability_pct:
-    "Part des équipements suivis qui répondent, hors maintenance planifiée. Un équipement à l'état inconnu compte comme non disponible.",
+    "Parc en service, à l'instant : équipements en service ÷ équipements supervisés. Les équipements non supervisés (aucune observation récente) et ceux en maintenance sont comptés à part et n'entrent pas dans le calcul. Ce n'est pas la disponibilité sur la durée (temps où l'équipement répond ÷ temps supervisé), affichée dans Performance et SLA.",
   packet_loss_pct: "Pertes de paquets moyennes au ping, sur les équipements mesurés par Zabbix ou Centreon.",
   latency_ms: "Temps de réponse moyen au ping (aller-retour), sur les équipements mesurés.",
   bandwidth_in_mbps: "Débit up moyen par équipement mesuré (somme de ses interfaces).",
@@ -43,7 +55,14 @@ const HELP = {
 };
 
 export default function NetworkVitals({ data, expectedNodes, compact = false }) {
-  const trend = useLiveTrend();
+  // INC-34 : la tendance « HS » suit la période globale — historique court
+  // jusqu'à 24 h, bilans journaliers au-delà.
+  const hours = useWindowStore((s) => s.hours);
+  const live = useLiveTrend();
+  const daily = useKpiTrend(windowDays(hours));
+  const downSeries =
+    hours > 24 ? (daily.data ?? []).map((row) => row.down) : live.data?.nodesDown;
+  const downDelta = trendDelta(downSeries);
   // Ce que l'ETL publie RÉELLEMENT : une métrique absente de cette liste
   // n'est pas à zéro, elle n'est pas collectée. La distinction est faite
   // ici une fois pour toutes.
@@ -64,10 +83,10 @@ export default function NetworkVitals({ data, expectedNodes, compact = false }) 
   const tiles = [
     {
       key: "availability_pct",
-      label: "Disponibilité",
+      label: "Parc en service",
       value: has("availability_pct") ? pct(data?.availability_pct, 2) : null,
-      color: thresholdColor("availability_pct", data?.availability_pct),
-      target: "≥ 99 %",
+      color: fleetColor(data?.availability_pct),
+      target: thresholdTarget("fleet"),
     },
     {
       key: "packet_loss_pct",
@@ -144,6 +163,7 @@ export default function NetworkVitals({ data, expectedNodes, compact = false }) 
           target={tile.target}
           compact={compact}
           help={HELP[tile.key]}
+          sources={tile.key === "availability_pct" ? "fleet" : "metrics"}
           gauge={
             GAUGES[tile.key] && {
               ...GAUGES[tile.key],
@@ -159,32 +179,43 @@ export default function NetworkVitals({ data, expectedNodes, compact = false }) 
           }
 
           // Une moyenne sur 6 équipements d'un parc de 1 300 doit le dire.
+          // Parc en service : base du calcul affichée (AM-34).
           hint={
-            data?.metric_nodes?.[tile.key] != null
-              ? `sur ${num(data.metric_nodes[tile.key])} équip. mesuré(s)`
-              : undefined
+            tile.key === "availability_pct"
+              ? availabilityBasis(data?.availability_basis)
+              : data?.metric_nodes?.[tile.key] != null
+                ? `sur ${num(data.metric_nodes[tile.key])} équip. mesuré(s)`
+                : undefined
           }
         />
       ))}
       {missing.length > 0 && (
         <Stat
-          label="Mesures non collectées"
-          value={num(missing.length)}
-          color="var(--ink-3)"
+          // INC-06 : une couverture (mesures publiées / mesures suivies), et
+          // non un « 8 » sans unité.
+          label="Couverture des mesures"
+          value={`${num(collected.length)} / ${num(tiles.length)}`}
+          unit="mesures"
+          color={collected.length ? "var(--sev-medium)" : "var(--sev-critical)"}
           compact={compact}
+          help="Mesures suivies par le NOC que les outils branchés publient réellement sur ce périmètre. Une mesure absente n'est pas à zéro : elle est inconnue."
           // On dit lesquelles et pourquoi : sans cela la case vide passe pour
           // un défaut d'affichage alors qu'aucun connecteur ne la publie.
-          hint={missing.map((tile) => tile.label.toLowerCase()).join(", ")}
+          hint={`non collectées : ${missing.map((tile) => tile.label.toLowerCase()).join(", ")}`}
+          sources="metrics"
         />
       )}
       <Stat
-        label="Équip. qui remontent"
+        label="Équip. supervisés"
         value={num(reporting)}
         color={reportingColor}
         compact={compact}
+        help="Équipements dont l'état est observé par un outil de supervision (en service, dégradé ou en panne). Les inconnus, muets et en maintenance n'en font pas partie."
         hint={
           expectedNodes
-            ? `sur ${num(expectedNodes)} actifs`
+            ? `sur ${num(expectedNodes)} au parc${
+                data?.nodes_unsupervised ? ` · ${num(data.nodes_unsupervised)} non supervisé(s)` : ""
+              }`
             : "aucune référence de parc"
         }
         status={
@@ -196,8 +227,9 @@ export default function NetworkVitals({ data, expectedNodes, compact = false }) 
         value={num(data?.nodes_down)}
         color={data?.nodes_down ? "var(--state-down)" : "var(--state-up)"}
         compact={compact}
-        hint="évolution sur 24 h"
-        spark={trend.data?.nodesDown}
+        // INC-26 : la variation est écrite en clair (« = » ou « ▲ +2 »).
+        hint={`${downDelta} sur ${windowLabel(hours)}`}
+        spark={downSeries}
         invertDelta
       />
     </>

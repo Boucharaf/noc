@@ -35,7 +35,7 @@ export default function LocationLink({ site, province, region, position, name, c
       <span title="Aucune coordonnée connue pour ce lieu">
         {label}
         {!compact && (
-          <span className="block text-[11px]" style={{ color: "var(--ink-3)" }}>
+          <span className="block text-[12px]" style={{ color: "var(--ink-3)" }}>
             non géolocalisé
           </span>
         )}

@@ -29,7 +29,7 @@ function Section({ title, children, aside }) {
     <section className="mb-3">
       <div className="flex items-center gap-2 mb-1">
         <h3
-          className="text-[10.5px] font-semibold uppercase tracking-[0.07em]"
+          className="text-[12px] font-semibold uppercase tracking-[0.07em]"
           style={{ color: "var(--ink-3)" }}
         >
           {title}
@@ -48,7 +48,7 @@ function SlaLine({ label, value, target }) {
     <DefRow label={label}>
       <span style={{ color: over ? "var(--sev-critical)" : undefined }}>{duration(value)}</span>
       {target != null && (
-        <span className="text-[11px] ml-1.5" style={{ color: "var(--ink-3)" }}>
+        <span className="text-[12px] ml-1.5" style={{ color: "var(--ink-3)" }}>
           objectif {duration(target)}
         </span>
       )}
@@ -100,7 +100,7 @@ export default function ItopIncidentDrawer({ incidentKey, open, onClose }) {
             {incident.trigger && (
               <DefRow label="Événement Zabbix" mono>
                 {incident.trigger.ref}
-                <span className="ml-1.5 text-[11px]" style={{ color: "var(--ink-3)" }}>
+                <span className="ml-1.5 text-[12px]" style={{ color: "var(--ink-3)" }}>
                   {incident.trigger.active ? "problème en cours" : "problème clos dans Zabbix"}
                 </span>
               </DefRow>
@@ -159,7 +159,7 @@ export default function ItopIncidentDrawer({ incidentKey, open, onClose }) {
                 ? incident.cis.map((ci) => ci.name).filter(Boolean).join(", ")
                 : "aucun CI rattaché"}
               {incident.cis?.some((ci) => ci.from_title) && (
-                <span className="block text-[11px]" style={{ color: "var(--ink-3)" }}>
+                <span className="block text-[12px]" style={{ color: "var(--ink-3)" }}>
                   cité dans le titre du ticket — aucun CI lié dans iTop
                 </span>
               )}
@@ -192,7 +192,7 @@ export default function ItopIncidentDrawer({ incidentKey, open, onClose }) {
                     <span className="text-[12.5px] font-medium truncate">{view.name}</span>
                     <NodeStateBadge state={view.state} />
                   </div>
-                  <div className="flex flex-wrap gap-x-3 text-[11px]" style={{ color: "var(--ink-3)" }}>
+                  <div className="flex flex-wrap gap-x-3 text-[12px]" style={{ color: "var(--ink-3)" }}>
                     {Object.entries(view.sources).map(([tool, ref]) => (
                       <span key={tool} title={`Référence ${toolLabel(tool)} : ${ref}`}>
                         {toolLabel(tool)}

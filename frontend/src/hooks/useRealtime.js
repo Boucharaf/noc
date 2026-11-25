@@ -42,6 +42,7 @@ export function useRealtime({ onAlert } = {}) {
 
   const socketRef = useRef(null);
   const retryRef = useRef(0);
+  const refreshedRef = useRef(0);
   const watchdogRef = useRef(null);
   const reconnectRef = useRef(null);
   const onAlertRef = useRef(onAlert);
@@ -90,8 +91,9 @@ export function useRealtime({ onAlert } = {}) {
 
       socket.onopen = () => {
         socket.send(JSON.stringify({ type: "auth", token }));
-        retryRef.current = 0;
-        setStatus("live");
+        // Ni « live » ni remise à zéro du délai ici : seule une réponse du
+        // serveur prouve que l'authentification a réussi. Sinon, un refus
+        // relançait une connexion par seconde, indéfiniment (A07).
         armWatchdog();
       };
 
@@ -106,13 +108,20 @@ export function useRealtime({ onAlert } = {}) {
           return;
         }
 
-        if (payload.type === "ping") return;
         if (payload.type === "auth_error") {
           setStatus("offline");
+          // Jeton refusé : un nouveau jeton relance la connexion (dépendance
+          // `token` de l'effet). Au plus un essai par minute.
+          if (Date.now() - refreshedRef.current > 60_000) {
+            refreshedRef.current = Date.now();
+            useAuthStore.getState().refresh().catch(() => {});
+          }
           return;
         }
 
+        retryRef.current = 0;
         setStatus("live");
+        if (payload.type === "ping" || payload.type === "ready") return;
         setEvents((current) => [payload, ...current].slice(0, MAX_EVENTS));
         onAlertRef.current?.(payload);
 

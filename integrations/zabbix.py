@@ -39,6 +39,7 @@ from .normalize import (
     combine_series,
     epoch_to_dt,
     locality_from_groups,
+    outages_from_events,
     severity,
     source_severity,
 )
@@ -360,6 +361,77 @@ class ZabbixClient(SourceClient):
                 }
         return mapping
 
+    async def fetch_downtimes(self, since: datetime) -> list[dict]:
+        """Pannes des hôtes depuis `since`, d'après les événements des
+        déclencheurs de DISPONIBILITÉ (collector/downtime.py).
+
+        Même règle que l'état affiché (_host_state) : un hôte sondé en ICMP
+        est en panne quand son déclencheur sur `icmpping` est en problème
+        (« Unavailable by ICMP ping ») ; sinon, quand celui de la
+        disponibilité de l'agent / SNMP / IPMI / JMX l'est (« Zabbix agent
+        is not available », « No SNMP data collection »). Les déclencheurs de
+        pertes ou de latence ne sont pas des pannes.
+
+        `event.get` relit l'historique : ici seulement, et seulement pour
+        ces déclencheurs, depuis la dernière synchronisation.
+        """
+        items = await self._call("item.get", {
+            "output": ["itemid", "hostid", "key_"],
+            "monitored": True,
+            "search": {"key_": list(_AVAILABILITY_SEARCH)},
+            "searchByAny": True,
+            "selectTriggers": ["triggerid"],
+        })
+        families: dict[str, dict[str, set[str]]] = {}
+        for item in items:
+            family = _availability_family(str(item.get("key_", "")))
+            if family is None:
+                continue
+            triggers = {str(t["triggerid"]) for t in item.get("triggers") or []}
+            if triggers:
+                families.setdefault(str(item["hostid"]), {}).setdefault(family, set()).update(
+                    triggers
+                )
+        trigger_host: dict[str, tuple[str, str]] = {}
+        for host_id, by_family in families.items():
+            # L'ICMP prime, comme dans _host_state.
+            family = "icmp" if "icmp" in by_family else "agent"
+            for trigger_id in by_family.get(family, ()):
+                trigger_host[trigger_id] = (host_id, family)
+        if not trigger_host:
+            return []
+
+        events: dict[str, list[tuple[datetime, bool]]] = {}
+        seen: set[str] = set()
+        time_from = int(since.timestamp()) + 1
+        for _page in range(200):
+            rows = await self._call("event.get", {
+                "output": ["eventid", "clock", "value", "objectid"],
+                "source": 0, "object": 0,
+                "objectids": sorted(trigger_host),
+                "time_from": time_from,
+                "sortfield": ["clock", "eventid"], "sortorder": "ASC",
+                "limit": _PAGE_SIZE,
+            })
+            fresh = [row for row in rows if str(row["eventid"]) not in seen]
+            for row in fresh:
+                seen.add(str(row["eventid"]))
+                at = epoch_to_dt(row.get("clock"))
+                events.setdefault(str(row["objectid"]), []).append(
+                    (at, str(row.get("value")) == "1")
+                )
+            if len(rows) < _PAGE_SIZE or not fresh:
+                break
+            # Page suivante : à partir de la dernière seconde lue (les
+            # événements de cette seconde déjà lus sont écartés par eventid).
+            time_from = int(rows[-1]["clock"])
+
+        records: list[dict] = []
+        for trigger_id, changes in events.items():
+            host_id, family = trigger_host[trigger_id]
+            records.extend(outages_from_events(host_id, changes, f"{family}:{trigger_id}"))
+        return records
+
     async def fetch_history(
         self, node_ref: str, metric_type: str, start: datetime, end: datetime
     ) -> list[MetricPoint]:
@@ -669,17 +741,18 @@ def _problem_details(problem: dict, acknowledges: list[dict]) -> dict:
         details["suppressed"] = True
     if str(problem.get("cause_eventid") or "0") not in ("", "0"):
         details["cause_ref"] = str(problem["cause_eventid"])
+    author = _acknowledged_by(acknowledges)
+    if author:
+        details["acknowledged_by"] = author
     actions = []
     for action in acknowledges:
         message = str(action.get("message") or "").strip()
         if not message:
             continue
-        user = (
-            " ".join(filter(None, (action.get("name"), action.get("surname")))).strip()
-            or action.get("username")
-            or None
-        )
-        actions.append({"at": epoch_to_dt(action.get("clock")), "user": user, "message": message})
+        actions.append({
+            "at": epoch_to_dt(action.get("clock")), "user": _action_user(action),
+            "message": message,
+        })
     if actions:
         oldest = datetime.min.replace(tzinfo=timezone.utc)
         details["actions"] = sorted(actions, key=lambda a: a["at"] or oldest)
@@ -774,7 +847,26 @@ def _acknowledged_at(acknowledges: list[dict]):
     changement de gravité…) dans un ordre non garanti. Seules celles qui
     portent le bit « acquitter » (2) comptent.
     """
-    clocks = []
+    first = _first_acknowledge(acknowledges)
+    return first[0] if first else None
+
+
+def _acknowledged_by(acknowledges: list[dict]) -> str | None:
+    """Auteur du premier acquittement."""
+    first = _first_acknowledge(acknowledges)
+    return _action_user(first[1]) if first else None
+
+
+def _action_user(action: dict) -> str | None:
+    return (
+        " ".join(filter(None, (action.get("name"), action.get("surname")))).strip()
+        or action.get("username")
+        or None
+    )
+
+
+def _first_acknowledge(acknowledges: list[dict]) -> tuple[datetime, dict] | None:
+    found = []
     for action in acknowledges:
         try:
             flags = int(action.get("action", 0))
@@ -783,8 +875,8 @@ def _acknowledged_at(acknowledges: list[dict]):
         if flags & 2:
             stamp = epoch_to_dt(action.get("clock"))
             if stamp is not None:
-                clocks.append(stamp)
-    return min(clocks) if clocks else None
+                found.append((stamp, action))
+    return min(found, key=lambda item: item[0]) if found else None
 
 
 def _host_state(host: dict, interfaces: list[NetworkInterface]) -> str:
@@ -847,4 +939,23 @@ def _site_from_groups(groups: tuple[str, ...]) -> str | None:
         for prefix in ("site/", "localité/", "localite/", "site:"):
             if group.lower().startswith(prefix):
                 return group.split("/", 1)[-1].split(":", 1)[-1].strip() or None
+    return None
+
+
+# Clés d'item qui disent si l'hôte répond (fetch_downtimes).
+_AVAILABILITY_SEARCH = ("icmpping", "agent.ping", "zabbix[host,")
+_AGENT_AVAILABILITY = {
+    "zabbix[host,agent,available]", "zabbix[host,snmp,available]",
+    "zabbix[host,ipmi,available]", "zabbix[host,jmx,available]",
+}
+
+
+def _availability_family(key: str) -> str | None:
+    """« icmp » (icmpping), « agent » (disponibilité de l'interface), ou None
+    (icmppingloss, icmppingsec et le reste ne sont pas des pannes)."""
+    compact = key.replace(" ", "")
+    if compact.split("[", 1)[0] == "icmpping":
+        return "icmp"
+    if compact == "agent.ping" or compact in _AGENT_AVAILABILITY:
+        return "agent"
     return None

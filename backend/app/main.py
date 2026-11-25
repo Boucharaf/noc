@@ -138,6 +138,22 @@ async def lifespan(app: FastAPI):
 
         tasks.append(asyncio.create_task(retry_loop(stop), name="notifications-retentees"))
 
+    # AM-27 : rapport hebdomadaire par courriel (désactivé par défaut).
+    from app.services import weekly_report_service
+
+    if weekly_report_service.WEEKLY_REPORT_ENABLED:
+        tasks.append(
+            asyncio.create_task(weekly_report_service.weekly_loop(stop), name="rapport-hebdo")
+        )
+
+    # Rapport du mois précédent figé automatiquement.
+    from app.services import report_archive_service
+
+    if report_archive_service.REPORT_FREEZE_ENABLED:
+        tasks.append(
+            asyncio.create_task(report_archive_service.freeze_loop(stop), name="rapport-fige")
+        )
+
     yield
 
     stop.set()

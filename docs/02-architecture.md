@@ -62,7 +62,8 @@ lancés à la demande.
 |---|---|---|---|
 | `collector` | Lit les outils sources, publie l'instantané dans Redis, écrit le bilan journalier | cœur | — |
 | `redis` | Instantané du parc et des alertes, dernières collectes valides par outil, cache des courbes et de l'historique iTop, sessions de connexion | cœur | volume `redisdata` |
-| `postgres` | Base du NOC : comptes, objectifs SLA, journal d'audit, notifications, agrégats journaliers | cœur | volume `pgdata` ⚠️ |
+| `postgres` | Base du NOC : comptes, objectifs SLA, journal d'audit, notifications, agrégats journaliers, journal historique, registre d'identité, rapports figés | cœur | volume `pgdata` ⚠️ |
+| `backup` | Sauvegarde quotidienne de `postgres`, restaurée à blanc à chaque fois | cœur | dossiers `BACKUP_DIR` et `BACKUP_OFFSITE_DIR` |
 | `backend` | API REST et WebSocket, notifications, rapports | cœur | volume `reports` |
 | `frontend` | Interface web (fichiers statiques servis par nginx interne) | cœur | — |
 | `nginx` | Passerelle HTTPS : `/api` et `/ws` vers le backend, le reste vers le frontend | cœur | — |
@@ -80,7 +81,8 @@ journal Centreon). La configuration de base n'en dépend pas.
 
 Le volume `pgdata` est **le seul dont la perte est grave** : il contient ce
 qu'aucun outil ne saurait redonner (comptes, objectifs SLA, journal d'audit,
-bilans journaliers passés).
+bilans journaliers passés, historique, acquittements, rapports figés). Le
+service `backup` le sauvegarde chaque nuit (chapitre 9).
 
 ## Le principe fondateur : qui possède quelle donnée
 
@@ -92,13 +94,15 @@ outil source ne saurait nous redonner.**
 | **État instantané** | équipements, leur état, alertes actives, tickets iTop ouverts, maintenances et ordres de travail, dernières mesures, santé des outils | l'outil source | **Redis**, réécrit en entier à chaque cycle, expire au bout de 3 cycles |
 | **Historique** | courbes de mesures, tickets iTop clos, engagements contractuels (SLT) | l'outil source | **nulle part** : demandé à l'outil au moment où on l'affiche, puis mis en cache |
 | **Agrégats** | bilan journalier par site (disponibilité, pannes, alertes) | le NOC, calculé sur ce qu'il a observé | **PostgreSQL** (`kpi_daily`) |
-| **Journal historique** | périodes d'état de chaque équipement et de chaque lien surveillé, ouverture et fermeture de chaque alerte — **pas les mesures** | le NOC, d'après ce qu'il a observé | **PostgreSQL** (`hist_state`, `hist_alert`) |
+| **Journal historique** | périodes d'état de chaque équipement et de chaque lien surveillé, ouverture et fermeture de chaque alerte — **pas les mesures** | le NOC, d'après ce qu'il a observé | **PostgreSQL** (`hist_state`, `hist_alert`, `hist_alert_event`) |
+| **Preuves** | acquittements, pannes copiées des outils, santé des outils, identité des équipements, rapports figés | le NOC | **PostgreSQL** (`hist_alert_event`, `hist_downtime`, `hist_tool_health`, `noc_asset*`, `report_snapshot`) |
 | **Données propres au NOC** | comptes, objectifs SLA, journal d'audit, abonnements et journal des notifications | **le NOC** | **PostgreSQL** |
 
 Conséquences concrètes :
 
-- La base PostgreSQL est **petite** (quelques Mo) : pas de métriques, pas
-  d'historique d'alertes, aucune copie d'équipement ou de ticket.
+- La base PostgreSQL reste **petite** (une centaine de Mo) : pas de mesures,
+  pas de copie des tickets ni de la fiche des équipements. Elle garde des
+  changements, des pannes et des identités, jamais des courbes.
 - Un équipement retiré d'un outil **disparaît** du NOC au cycle suivant.
 - Si la collecte s'arrête, les écrans affichent **« collecte interrompue »**
   plutôt qu'un parc faussement calme.
@@ -126,6 +130,7 @@ sequenceDiagram
         C->>R: mémoriser chaque collecte réussie, par outil
         C->>R: outil en échec → reprendre sa dernière collecte réussie (« périmée »)
         C->>C: fusionner les équipements multi-outils, consolider les états
+        C->>P: identité stable de chaque équipement (registre)
         C->>C: rattacher alertes, maintenances et interventions aux équipements
         C->>R: écrire l'instantané complet (atomique) + historique court 24 h
         C->>R: comparer au cycle précédent → publier les nouvelles alertes
@@ -226,11 +231,25 @@ de même pour chaque alerte. Les tables ne grandissent qu'aux changements
 
 - un outil qui ne répond pas **ne clôt rien** : seuls les outils lus à ce
   cycle peuvent faire disparaître un équipement ou une alerte ;
-- au-delà de trois cycles sans observation (collecteur arrêté, outil muet),
+- au-delà de trois cycles (5 min au moins) sans observation (collecteur arrêté, outil muet),
   la période s'arrête à sa dernière observation : le trou est publié comme
   **non observé**, jamais compté disponible ;
 - une erreur d'écriture est journalisée sans interrompre le cycle ; le cycle
   suivant reprend là où il s'était arrêté.
+
+Pour chaque alerte, il garde aussi son **premier acquittement** et tous ses
+changements (`hist_alert_event`). Une date d'acquittement inconnue reste
+inconnue : elle n'est jamais inventée, et l'alerte sort du MTTA.
+
+**Identité** (`collector/identity.py`) : avant tout rattachement, chaque
+équipement fusionné reçoit son identifiant stable, lu dans le registre. Base
+illisible : le dernier registre connu sert ; s'il n'y en a pas, le tableau de
+bord fonctionne mais l'historique n'est pas écrit à ce cycle. Le registre est
+lu **avant** la publication, dans la limite de `IDENTITY_TIMEOUT_S` (10 s).
+
+**Santé des outils** (`collector/tool_health.py`) : une ligne par période
+`up`, `partial` ou `down`, pour savoir plus tard pourquoi un équipement
+n'a pas été observé.
 
 Le backend le lit (`availability_service.py`, routes `/api/history/*`) pour
 la disponibilité sur la durée d'un équipement ou d'un lien, ses pannes, le

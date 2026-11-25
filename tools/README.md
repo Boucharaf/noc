@@ -206,6 +206,16 @@ supplémentaire.
 * **Le compte `nagiosadmin`** est créé au démarrage avec `NAGIOS_API_USER` /
   `NAGIOS_API_PASSWORD` ; c'est le seul que le `cgi.cfg` de l'image autorise
   à voir tous les hôtes.
+* **Changer `NAGIOS_API_PASSWORD` ne suffit pas** : l'image n'écrit
+  `htpasswd.users` qu'au tout premier démarrage, dans `/opt/nagios/etc`, un
+  volume qu'elle déclare elle-même et que Docker conserve même après
+  `--force-recreate`. Le collecteur prend le nouveau mot de passe, Apache
+  garde l'ancien : `nagios : HTTP 401 sur …/statusjson.cgi`. Pour réaligner
+  le fichier sur le `.env` :
+
+  ```sh
+  docker compose exec nagios sh -c 'htpasswd -b -s /opt/nagios/etc/htpasswd.users "$NAGIOSADMIN_USER" "$NAGIOSADMIN_PASS"'
+  ```
 * Le frontend du NOC n'est pas déclaré : il n'est pas sur le réseau
   `default`, la sonde le verrait toujours DOWN.
 

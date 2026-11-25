@@ -10,7 +10,7 @@ import { PageHeader } from "../components/layout/TopBar";
 import { QueryBoundary } from "../components/ui/States";
 import { ROLE_DESCRIPTION, ROLE_LABEL, ROLES } from "../lib/permissions";
 import { severityMeta } from "../lib/vocabulary";
-import { dateTime, num } from "../lib/format";
+import { phoneValid, dateTime, num } from "../lib/format";
 import { errorMessage } from "../api/client";
 import { useCurrentUser } from "../hooks/useSession";
 import {
@@ -119,7 +119,7 @@ export default function UsersPage() {
             title={ROLE_DESCRIPTION[role]}
           >
             <div
-              className="text-[10.5px] uppercase tracking-[0.07em] flex items-center gap-1"
+              className="text-[12px] uppercase tracking-[0.07em] flex items-center gap-1"
               style={{ color: "var(--ink-3)" }}
             >
               <span className="dot" style={{ background: ROLE_COLOR[role], width: 6, height: 6 }} />
@@ -181,7 +181,7 @@ export default function UsersPage() {
                       <td className="font-medium">
                         {user.full_name || "—"}
                         {isSelf && (
-                          <span className="text-[10.5px] ml-1.5" style={{ color: "var(--ink-3)" }}>
+                          <span className="text-[12px] ml-1.5" style={{ color: "var(--ink-3)" }}>
                             (vous)
                           </span>
                         )}
@@ -301,7 +301,7 @@ export default function UsersPage() {
                 <span className="dot" style={{ background: ROLE_COLOR[role] }} />
                 <span className="text-[12px] font-semibold">{ROLE_LABEL[role]}</span>
               </div>
-              <p className="text-[11.5px] leading-snug" style={{ color: "var(--ink-3)" }}>
+              <p className="text-[12px] leading-snug" style={{ color: "var(--ink-3)" }}>
                 {ROLE_DESCRIPTION[role]}
               </p>
             </div>
@@ -472,7 +472,7 @@ function EmailAlertsPanel() {
                 configuration, puis activez l'envoi.
               </Notice>
             )}
-            <p className="text-[10.5px]" style={{ color: "var(--ink-3)" }}>
+            <p className="text-[12px]" style={{ color: "var(--ink-3)" }}>
               Pour ajouter un destinataire, modifiez son compte : adresse courriel et case
               « Recevoir les alertes ». Chacun peut aussi s'abonner depuis « Mon compte ».
             </p>
@@ -520,6 +520,7 @@ function UserFormModal({ user, isSelf, onClose, actions, onDone }) {
       : form.full_name.trim()) &&
     !pinInvalid &&
     !emailInvalid &&
+    phoneValid(form.phone_number) &&
     !notifyWithoutEmail;
 
   const submit = async () => {
@@ -542,7 +543,7 @@ function UserFormModal({ user, isSelf, onClose, actions, onDone }) {
           password: form.password,
           pin: form.pin || null,
         });
-        onDone(`Compte « ${username} » créé. Il peut se connecter immédiatement.`);
+        onDone(`Compte « ${username} » créé. Son mot de passe est provisoire : il devra le changer à sa première connexion.`);
       } else {
         const roleChanged = form.role !== user.role;
         await actions.update.mutateAsync({
@@ -590,7 +591,7 @@ function UserFormModal({ user, isSelf, onClose, actions, onDone }) {
       <div className="space-y-2.5">
         {error && <Notice tone="error">{error}</Notice>}
 
-        <div className="grid grid-cols-2 gap-2.5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
           <Field
             label="Identifiant"
             required
@@ -639,7 +640,7 @@ function UserFormModal({ user, isSelf, onClose, actions, onDone }) {
         </Field>
 
         {isNew && (
-          <div className="grid grid-cols-2 gap-2.5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
             <Field
               label="Mot de passe provisoire"
               required
@@ -677,7 +678,7 @@ function UserFormModal({ user, isSelf, onClose, actions, onDone }) {
           </div>
         )}
 
-        <div className="grid grid-cols-2 gap-2.5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
           <Field
             label="Courriel"
             error={
@@ -696,7 +697,10 @@ function UserFormModal({ user, isSelf, onClose, actions, onDone }) {
               placeholder="k.ouedraogo@anptic.bf"
             />
           </Field>
-          <Field label="Téléphone">
+          <Field
+            label="Téléphone"
+            error={phoneValid(form.phone_number) ? null : "8 à 15 chiffres, « + » possible au début."}
+          >
             <input
               className="input"
               value={form.phone_number}
@@ -716,7 +720,7 @@ function UserFormModal({ user, isSelf, onClose, actions, onDone }) {
           Recevoir les alertes graves par courriel
         </label>
 
-        <div className="grid grid-cols-3 gap-2.5">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
           <Field label="Équipe">
             <input className="input" value={form.team} onChange={set("team")} placeholder="Quart A" />
           </Field>
@@ -805,7 +809,7 @@ function PasswordResetModal({ user, onClose, actions, onDone }) {
             autoFocus
           />
         </Field>
-        <p className="text-[10.5px]" style={{ color: "var(--ink-3)" }}>
+        <p className="text-[12px]" style={{ color: "var(--ink-3)" }}>
           Toutes ses sessions en cours sont coupées : si l'oubli cache une compromission,
           l'ancien mot de passe n'ouvre plus rien.
         </p>
@@ -862,7 +866,7 @@ function PinModal({ user, onClose, actions, onDone }) {
             autoFocus
           />
         </Field>
-        <p className="text-[10.5px]" style={{ color: "var(--ink-3)" }}>
+        <p className="text-[12px]" style={{ color: "var(--ink-3)" }}>
           Le PIN est un facteur faible, réservé aux agents terrain. Deux comptes ne
           peuvent pas partager le même code.
         </p>

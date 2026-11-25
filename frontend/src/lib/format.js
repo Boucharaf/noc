@@ -25,10 +25,60 @@ export function num(value, fallback = DASH) {
     .replace(/\B(?=(\d{3})+(?!\d))/g, NBSP);
 }
 
+/**
+ * « 1 site touché », « 3 sites touchés » — plus de « (s) » (INC-17).
+ * `plural` par défaut : le singulier suivi d'un « s » sur chaque mot.
+ */
+export function plural(count, singular, pluralForm) {
+  const many = Number(count) > 1;
+  const word = many
+    ? pluralForm ?? singular.split(" ").map((part) => `${part}s`).join(" ")
+    : singular;
+  return `${num(count)} ${word}`;
+}
+
+/** Téléphone : mêmes règles que le backend (schemas/users.py). Vide accepté. */
+export function phoneValid(value) {
+  const text = (value ?? "").trim();
+  if (!text) return true;
+  const digits = text.replace(/\D/g, "").length;
+  return /^\+?[0-9][0-9 ().-]*$/.test(text) && digits >= 8 && digits <= 15;
+}
+
 /** Décimal à `digits` chiffres après la virgule. */
 export function decimal(value, digits = 1, fallback = DASH) {
   if (isNil(value)) return fallback;
   return Number(value).toFixed(digits).replace(".", ",");
+}
+
+/**
+ * Disponibilité. Sans valeur, le backend dit qu'AUCUN équipement du
+ * périmètre n'est supervisé (AM-29, INC-40) : on l'écrit en toutes lettres,
+ * jamais « 0 % » ni « — », qui se liraient « tout est en panne » ou
+ * « défaut d'affichage ».
+ */
+export const UNSUPERVISED = "Non supervisé";
+
+export function availabilityPct(value, digits = 1) {
+  return pct(value, digits, UNSUPERVISED);
+}
+
+/**
+ * Base d'un indicateur de disponibilité instantané (AM-34, INC-42) :
+ * « 956 / 1 381 supervisés · 12 non supervisés · instantané, 10:42 ».
+ */
+export function availabilityBasis(basis) {
+  if (!basis) return undefined;
+  const parts = [`${num(basis.up)} / ${num(basis.supervised)} supervisés en service`];
+  if (basis.unsupervised) parts.push(`${num(basis.unsupervised)} non supervisé(s), à part`);
+  if (basis.maintenance) parts.push(`${num(basis.maintenance)} en maintenance`);
+  const at = basis.computed_at ? new Date(basis.computed_at) : null;
+  parts.push(
+    at && !Number.isNaN(at.getTime())
+      ? `instantané, calculé à ${at.toLocaleTimeString("fr-FR", { timeZone: NOC_TIMEZONE, hour: "2-digit", minute: "2-digit" })}`
+      : "instantané",
+  );
+  return parts.join(" · ");
 }
 
 /** Pourcentage. `digits` à 2 pour la disponibilité (99,95 % ≠ 100 %). */
@@ -64,26 +114,40 @@ export function ageFrom(isoDate, fallback = DASH) {
   return duration(ms / 60000, fallback);
 }
 
+/**
+ * Fuseau du NOC (INC-14, AM-28) : toutes les heures sont affichées en heure
+ * du Burkina Faso (GMT, sans heure d'été), quel que soit le réglage du poste,
+ * et les dates en jj/mm/aaaa HH:mm (année sur 4 chiffres).
+ */
+export const NOC_TIMEZONE = "Africa/Ouagadougou";
+
 const dateTimeFmt = new Intl.DateTimeFormat("fr-FR", {
+  timeZone: NOC_TIMEZONE,
   day: "2-digit",
   month: "2-digit",
-  year: "2-digit",
+  year: "numeric",
   hour: "2-digit",
   minute: "2-digit",
 });
 
 const timeFmt = new Intl.DateTimeFormat("fr-FR", {
+  timeZone: NOC_TIMEZONE,
   hour: "2-digit",
   minute: "2-digit",
 });
 
 const dateFmt = new Intl.DateTimeFormat("fr-FR", {
+  timeZone: NOC_TIMEZONE,
   day: "2-digit",
   month: "2-digit",
   year: "numeric",
 });
 
-const dayMonthFmt = new Intl.DateTimeFormat("fr-FR", { day: "2-digit", month: "short" });
+const dayMonthFmt = new Intl.DateTimeFormat("fr-FR", {
+  timeZone: NOC_TIMEZONE,
+  day: "2-digit",
+  month: "short",
+});
 
 export function dateTime(iso, fallback = DASH) {
   if (!iso) return fallback;

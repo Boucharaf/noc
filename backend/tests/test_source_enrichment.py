@@ -111,15 +111,17 @@ def test_itop_ticket_fields_fall_back_level_by_level():
     assert tickets[0]["agent"] == "A. Traoré"
 
     # Classe sans code de résolution : prise en charge conservée, champ absent.
+    # (1re requête avec les compteurs SLA, refusée sans nom de champ : ils
+    # sont abandonnés, puis le niveau suivant comme avant.)
     tickets, requested, client = run(("resolution_code",))
-    assert len(requested) == 2
+    assert len(requested) == 3
     assert tickets[0]["resolution_code"] is None
     assert tickets[0]["agent"] == "A. Traoré"
     assert client.collection_warnings == []
 
     # Classe sans champs de prise en charge : socle, perte signalée.
     tickets, requested, client = run(("resolution_code", "agent_id_friendlyname"))
-    assert len(requested) == 3
+    assert len(requested) == 4
     assert tickets[0]["agent"] is None
     assert tickets[0]["ref"] == "I-000007"
     assert client.collection_warnings == [

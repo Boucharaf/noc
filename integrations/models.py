@@ -118,6 +118,9 @@ class Node:
     details: dict = field(default_factory=dict)
     observed_at: datetime = field(default_factory=_now)
     stale: bool = False
+    # La source répond mais ses données sont arrêtées (dump, export) : l'état
+    # est le dernier connu, à `observed_at`, et non une observation actuelle.
+    frozen: bool = False
 
     def key(self) -> str:
         return f"{self.tool}:{self.ref}"
@@ -148,6 +151,9 @@ class Alert:
     source_severity: str | None = None
     last_observed_at: datetime = field(default_factory=_now)
     stale: bool = False
+    # Non corrigée à la dernière donnée d'une source arrêtée : personne ne
+    # peut dire si elle l'est encore (voir Node.frozen).
+    frozen: bool = False
 
     def key(self) -> str:
         return f"{self.tool}:{self.ref}"
@@ -217,6 +223,8 @@ class ToolSnapshot:
     # alors la dernière collecte réussie.
     maintenance: tuple | None = None
     work_orders: tuple | None = None
+    # Dernière donnée d'une source arrêtée ; None pour une source vivante.
+    data_until: datetime | None = None
 
 
 def to_jsonable(value: Any) -> Any:

@@ -18,10 +18,12 @@
 export const SEVERITIES = ["critical", "high", "medium", "low", "info", "unknown"];
 
 export const SEVERITY = {
-  critical: { label: "Critique", short: "CRIT", color: "var(--sev-critical)", rank: 0 },
-  high: { label: "Majeur", short: "MAJ", color: "var(--sev-high)", rank: 1 },
-  medium: { label: "Moyen", short: "MOY", color: "var(--sev-medium)", rank: 2 },
-  low: { label: "Mineur", short: "MIN", color: "var(--sev-low)", rank: 3 },
+  critical: { label: "Critique", plural: "Critiques", short: "CRIT", color: "var(--sev-critical)", rank: 0 },
+  // Accord au féminin (« une gravité, une alerte ») — INC-17 : une seule
+  // échelle, écrite pareil partout.
+  high: { label: "Majeure", plural: "Majeures", short: "MAJ", color: "var(--sev-high)", rank: 1 },
+  medium: { label: "Moyenne", plural: "Moyennes", short: "MOY", color: "var(--sev-medium)", rank: 2 },
+  low: { label: "Mineure", plural: "Mineures", short: "MIN", color: "var(--sev-low)", rank: 3 },
   info: { label: "Information", short: "INFO", color: "var(--sev-info)", rank: 4 },
   unknown: { label: "Inconnu", short: "?", color: "var(--sev-unknown)", rank: 5 },
 };
@@ -66,7 +68,7 @@ export const NODE_STATE = {
   // rien n'est ni en marche ni en panne connue.
   silent: {
     label: "Inconnu",
-    color: "var(--ink-3)",
+    color: "var(--state-unknown)",
     hint: "État non mesuré : l'outil ne remonte rien sur cet équipement.",
   },
   maintenance: {
@@ -77,7 +79,7 @@ export const NODE_STATE = {
   up: { label: "Normal", color: "var(--state-up)", hint: "En service." },
   unknown: {
     label: "Inconnu",
-    color: "var(--ink-3)",
+    color: "var(--state-unknown)",
     hint: "État non mesuré : rien ne remonte sur cet équipement, ou il n'est connu que de l'inventaire.",
   },
   inactive: {
@@ -203,14 +205,100 @@ export function thresholdColor(metricType, value) {
   return "var(--sev-critical)";
 }
 
-/** Couleur d'un taux de disponibilité (99 % = objectif RESINA). */
-export function availabilityColor(value) {
+/**
+ * Seuils [vert, orange] de l'agence (feuille « KPI NOC référence ») :
+ * KPI-01 pour la disponibilité sur la durée (cœur, accès), KPI-02 pour le
+ * parc en service. Valeurs par défaut ; le backend publie celles qui sont
+ * configurées (AVAILABILITY_THRESHOLDS_*, FLEET_THRESHOLDS).
+ */
+export const THRESHOLDS = { core: [99.9, 99], access: [99, 97], fleet: [98, 90] };
+
+export function applyThresholds(values) {
+  for (const key of Object.keys(THRESHOLDS)) {
+    if (Array.isArray(values?.[key]) && values[key].length === 2) THRESHOLDS[key] = values[key];
+  }
+}
+
+function levelColor(value, [green, orange]) {
   if (value === null || value === undefined) return "var(--ink-3)";
-  if (value >= 99) return "var(--state-up)";
-  if (value >= 97) return "var(--sev-medium)";
-  if (value >= 90) return "var(--sev-high)";
+  if (value >= green) return "var(--state-up)";
+  if (value >= orange) return "var(--sev-medium)";
   return "var(--sev-critical)";
 }
+
+const shown = (value) => String(value).replace(".", ",");
+
+/** Cible affichée sous une tuile : « ≥ 99 % ». */
+export function thresholdTarget(kind) {
+  return `≥ ${shown(THRESHOLDS[kind][0])} %`;
+}
+
+/** Disponibilité sur la durée (KPI-01). Sans classe connue : accès. */
+export function availabilityColor(value, kind = "access") {
+  return levelColor(value, THRESHOLDS[kind] ?? THRESHOLDS.access);
+}
+
+/** « cœur 98,20 % · accès 73,10 % » : leurs seuils diffèrent (KPI-01). */
+export function classHint(classes) {
+  const parts = [["core", "cœur"], ["access", "accès"]]
+    .filter(([key]) => classes?.[key]?.average_pct != null)
+    .map(([key, label]) => `${label} ${classes[key].average_pct.toFixed(2).replace(".", ",")} %`);
+  return parts.length ? parts.join(" · ") : undefined;
+}
+
+/** Parc en service à l'instant (KPI-02). */
+export function fleetColor(value) {
+  return levelColor(value, THRESHOLDS.fleet);
+}
+
+/** Légende des couleurs du parc en service : [couleur, libellé]. */
+export function fleetLegend() {
+  const [green, orange] = THRESHOLDS.fleet;
+  return [
+    ["var(--state-up)", `≥ ${shown(green)} %`],
+    ["var(--sev-medium)", `${shown(orange)}–${shown(green)} %`],
+    ["var(--sev-critical)", `< ${shown(orange)} % ou ≥ 1 panne / critique`],
+  ];
+}
+
+/* ------------------------------------------------------------------ */
+/* Type d'équipement (INC-33, AM-32)                                    */
+/* ------------------------------------------------------------------ */
+// Les outils publient leurs valeurs brutes, en anglais et à des niveaux
+// différents : « host » (Centreon), « NetworkDevice » (classe iTop),
+// « 7750 SR-7 » (un MODÈLE Nokia, pas un type). Un seul dictionnaire, en
+// français ; une valeur qui ressemble à une référence de modèle est
+// affichée comme modèle d'un « Équipement réseau ».
+const NODE_TYPE = {
+  host: "Hôte",
+  networkdevice: "Équipement réseau",
+  router: "Routeur",
+  switch: "Commutateur",
+  firewall: "Pare-feu",
+  server: "Serveur",
+  virtualmachine: "Machine virtuelle",
+  vm: "Machine virtuelle",
+  pc: "Poste de travail",
+  printer: "Imprimante",
+  storagesystem: "Stockage",
+  nas: "Stockage",
+  san: "Stockage",
+  wifi: "Borne Wi-Fi",
+  accesspoint: "Borne Wi-Fi",
+  ups: "Onduleur",
+  ne: "Équipement réseau",
+};
+
+export function nodeTypeInfo(raw) {
+  if (!raw) return { type: null, model: null };
+  const key = String(raw).replace(/[\s_-]/g, "").toLowerCase();
+  if (NODE_TYPE[key]) return { type: NODE_TYPE[key], model: null };
+  // « 7750 SR-7 », « 7210 SAS-M » : une référence de modèle.
+  if (/\d/.test(raw)) return { type: "Équipement réseau", model: String(raw) };
+  return { type: String(raw), model: null };
+}
+
+export const nodeTypeLabel = (raw) => nodeTypeInfo(raw).type;
 
 /* ------------------------------------------------------------------ */
 /* Outils sources                                                       */

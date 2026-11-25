@@ -115,7 +115,7 @@ C'est le motif dit de *query federation*, celui de Grafana ou de Perses.
 
 ### Ce que PostgreSQL garde, et pourquoi
 
-Trois choses, et rien d'autre :
+Quatre choses, et rien d'autre :
 
 * **les données propres au NOC** — comptes et rôles, objectifs SLA, journal
   d'audit, abonnements et trace des notifications. Aucun outil source ne les
@@ -135,6 +135,13 @@ Trois choses, et rien d'autre :
   été la disponibilité d'un lien sur l'année, ni de recalculer un bilan
   perdu. Elle reste petite parce qu'elle ne garde que les changements,
   jamais les mesures ;
+* **les preuves** — ce qu'il faut pour défendre un chiffre des mois plus tard,
+  quand les outils auront effacé ou modifié leurs données : qui a acquitté
+  une alerte et quand (`hist_alert_event`), quelles pannes l'outil a
+  enregistrées (`hist_downtime`), si l'outil répondait (`hist_tool_health`), à
+  quel équipement appartient chaque référence (`noc_asset`,
+  `noc_asset_source`, `noc_asset_event`), et le rapport tel qu'il a été
+  produit (`report_snapshot`) ;
 * rien de plus. **Pas de `metric_value`, pas de `fact_incident`, pas de
   TimescaleDB.**
 

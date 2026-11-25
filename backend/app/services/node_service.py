@@ -104,12 +104,16 @@ async def list_nodes(
     # Import local : geo_service dépend lui-même de ce module.
     from app.services.geo_service import scope_nodes
 
+    collected = await live_service.source_collected_at()
     enriched = []
     for node in scope_nodes(await nodes_with_maintenance(db), region, province, site):
+        seen = live_service.last_seen_at(node, collected)
         enriched.append(
             {
                 **node,
                 "tools": sorted((node.get("sources") or {}).keys()),
+                "last_seen_at": seen,
+                "seen_recently": live_service.is_fresh(seen),
             }
         )
 
@@ -158,11 +162,18 @@ async def get_node(db: Session, node_id: str) -> dict | None:
     nodes = await nodes_with_maintenance(db)
     node = next((item for item in nodes if item.get("id") == node_id), None)
     if node is None:
+        # Ancien identifiant (favori, lien d'un rapport) d'un équipement réuni
+        # depuis à un autre.
+        from app.services import availability_service
+
+        current = availability_service.current_asset(db, node_id)
+        node = next((item for item in nodes if item.get("id") == current), None)
+    if node is None:
         return None
 
     records = [
         alert
-        for alert in await live_service.get_alerts()
+        for alert in await live_service.get_all_alerts()
         if (node.get("sources") or {}).get(alert["tool"]) == alert.get("node_ref")
     ]
     alerts = [
@@ -175,8 +186,11 @@ async def get_node(db: Session, node_id: str) -> dict | None:
 
     facts = [item for item in (node.get("details") or {}).values() if isinstance(item, dict)]
     down_since = next((item["down_since"] for item in facts if item.get("down_since")), None)
+    seen = live_service.last_seen_at(node, await live_service.source_collected_at())
     return {
         **node,
+        "last_seen_at": seen,
+        "seen_recently": live_service.is_fresh(seen),
         # Heure de la panne, quand l'outil la date (NetXMS). Montrée seulement
         # si l'équipement n'est pas en service : un « hors service depuis »
         # sur un équipement disponible serait une contradiction à l'écran.

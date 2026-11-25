@@ -3,6 +3,7 @@ import {
   ChevronRight,
   LogOut,
   BookOpen,
+  Menu,
   Monitor,
   Moon,
   PanelLeft,
@@ -11,13 +12,15 @@ import {
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
-import { ROLE_LABEL } from "../../lib/permissions";
+import { PERMISSIONS, ROLE_LABEL, hasPermission } from "../../lib/permissions";
 import { auth } from "../../api/noc";
 import { useAuthStore } from "../../store/auth";
 import { useClock } from "../../hooks/useClock";
 import LegendModal from "./LegendModal";
 import { useUiStore } from "../../store/ui";
 import { ConfirmModal } from "../ui/Overlay";
+import { useSourceHealth } from "../../hooks/queries";
+import { isFailing, sourcesSentence } from "../../lib/sources";
 
 /**
  * Barre supérieure — le « fronton » de la salle.
@@ -35,10 +38,11 @@ import { ConfirmModal } from "../ui/Overlay";
 const REALTIME_STATE = {
   live: { label: "Temps réel", color: "var(--state-up)" },
   connecting: { label: "Connexion…", color: "var(--sev-medium)" },
-  offline: { label: "Flux coupé", color: "var(--sev-critical)" },
+  // Sans flux, les écrans continuent de relire l'API : le dire.
+  offline: { label: "Différé", color: "var(--sev-medium)" },
 };
 
-export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTotal }) {
+export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTotal, onMenu }) {
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
   const navigate = useNavigate();
@@ -52,6 +56,8 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
   const toggleRail = useUiStore((s) => s.toggleRail);
 
   const realtime = REALTIME_STATE[realtimeStatus] ?? REALTIME_STATE.connecting;
+  const sources = useSourceHealth();
+  const failingSources = (sources.data?.tools ?? []).filter(isFailing);
 
   const healthColor =
     health?.status === "ok"
@@ -76,23 +82,40 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
 
   return (
     <header
-      className="shrink-0 flex items-center gap-3 px-2.5 border-b"
+      className="app-header shrink-0 flex items-center gap-3 px-4 border-b"
       style={{
         height: "var(--topbar-h)",
         borderColor: "var(--border)",
         background: "var(--topbar-bg, var(--surface))",
       }}
     >
-      <button
-        type="button"
-        className="btn btn-ghost btn-sm"
-        onClick={toggleRail}
-        aria-label="Replier la navigation"
-        title="Replier / déplier la navigation"
-      >
-        <PanelLeft size={14} />
-      </button>
+      {/* Téléphone : ouvre le tiroir de navigation. Au-delà : replie le rail.
+          (Enveloppés : la règle .btn l'emporterait sur `hidden`.) */}
+      <span className="md:hidden">
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          onClick={onMenu}
+          aria-label="Ouvrir le menu"
+          title="Menu"
+        >
+          <Menu size={16} />
+        </button>
+      </span>
+      <span className="hidden md:inline-flex">
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          onClick={toggleRail}
+          aria-label="Replier la navigation"
+          title="Replier / déplier la navigation"
+        >
+          <PanelLeft size={14} />
+        </button>
+      </span>
 
+      {/* Le logo est dans la barre latérale (maquette) ; sur téléphone, où
+          elle est repliée dans un tiroir, il reste ici. */}
       <Link
         to="/"
         className="flex items-center gap-2 shrink-0"
@@ -112,15 +135,23 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
         <img
           src="/images.png"
           alt="ANPTIC"
-          style={{ height: 28, width: "auto", objectFit: "contain", display: "block" }}
+          className="block md:hidden"
+          style={{ height: 30, width: "auto", objectFit: "contain" }}
         />
+        <span
+          className="hidden md:inline text-[14px] font-semibold"
+          style={{ fontFamily: "var(--font-display)", color: "var(--ink)" }}
+        >
+          Centre des opérations réseau
+        </span>
       </Link>
 
       {/* Plus de compteurs d'alertes ni d'incidents dans l'en-tête : ils sont
           sur chaque tableau de bord, filtrés par le périmètre choisi. L'espace
           porte l'accès au mur d'écrans, le raccourci de l'exploitant pressé. */}
-      <div className="min-w-0 flex-1 flex items-center justify-center">
-        <Link
+      <div className="flex-1 sm:hidden" />
+      <div className="min-w-0 flex-1 hidden sm:flex items-center justify-center">
+        {hasPermission(user?.role, PERMISSIONS.VIEW_INCIDENTS) && <Link
           to="/mur"
           className="btn btn-sm shrink-0"
           style={{
@@ -134,21 +165,26 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
           title="Mode mur d'écrans : le résumé des incidents iTop, en plein écran"
         >
           <Monitor size={14} />
-          <span className="hidden sm:inline">Mode mur d'écran</span>
-          <span className="hidden md:inline text-[10.5px] font-normal" style={{ color: "var(--ink-3)" }}>
+          <span className="hidden lg:inline">Mode mur d'écran</span>
+          <span className="hidden 2xl:inline text-[12px] font-normal" style={{ color: "var(--ink-3)" }}>
             résumé des incidents · plein écran
           </span>
-        </Link>
+        </Link>}
       </div>
 
       {/* Fraîcheur de la collecte : un backend en bonne santé qui ne
           reçoit plus rien depuis 2 h affiche des données mortes. */}
+      {/* INC-32 : toujours visible (y compris menu replié et écran étroit),
+          avec la liste des sources en erreur au survol. */}
       {toolsTotal > 0 && (
         <Link
           to="/integrations"
-          className="hidden lg:flex items-center gap-1.5 shrink-0 text-[10.5px]"
-          style={{ textDecoration: "none", color: "var(--ink-3)" }}
-          title="Outils de supervision actifs sur le total configuré"
+          className="flex items-center gap-1.5 shrink-0 text-[12px]"
+          style={{ textDecoration: "none", color: failingSources.length ? "var(--sev-medium)" : "var(--ink-3)" }}
+          title={
+            sourcesSentence(sources.data?.tools) ??
+            `${toolsHealthy}/${toolsTotal} outils de supervision actifs — collecte complète`
+          }
         >
           <span
             className="dot"
@@ -164,14 +200,18 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
           <span className="num">
             {toolsHealthy}/{toolsTotal}
           </span>
-          collecte
+          <span className="hidden sm:inline">collecte</span>
         </Link>
       )}
 
       <span
-        className="hidden md:flex items-center gap-1.5 shrink-0 text-[10.5px]"
+        className="hidden lg:flex items-center gap-1.5 shrink-0 text-[12px]"
         style={{ color: "var(--ink-3)" }}
-        title={`Mise à jour en direct : ${realtime.label}`}
+        title={
+          realtimeStatus === "offline"
+            ? "Flux temps réel coupé : les écrans se mettent à jour toutes les 20 à 60 s. Reconnexion automatique."
+            : `Mise à jour en direct : ${realtime.label}`
+        }
       >
         {realtimeStatus === "live" ? (
           <span className="live-dot" style={{ background: realtime.color }} />
@@ -182,23 +222,28 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
       </span>
 
       <time
-        className="num shrink-0 text-[13px] tracking-tight"
+        className="num shrink-0 text-[15px] font-semibold tracking-tight px-2.5 py-1 rounded-full border"
+        style={{ borderColor: "var(--border)", background: "var(--surface-2)", fontFamily: "var(--font-display)" }}
         dateTime={now.toISOString()}
-        title={now.toLocaleDateString("fr-FR", { dateStyle: "full" })}
+        title={now.toLocaleDateString("fr-FR", { timeZone: "Africa/Ouagadougou", dateStyle: "full" })}
       >
-        {now.toLocaleTimeString("fr-FR", { hour12: false })}
+        {now.toLocaleTimeString("fr-FR", { timeZone: "Africa/Ouagadougou", hour12: false })}
+        {/* INC-14 : le fuseau est affiché (Burkina Faso : GMT, sans heure d'été). */}
+        <span className="hidden sm:inline text-[12px] ml-1" style={{ color: "var(--ink-3)" }}>GMT</span>
       </time>
 
       <div className="flex items-center gap-0.5 shrink-0">
-        <button
-          type="button"
-          className="btn btn-ghost btn-sm"
-          onClick={() => setLegendOpen(true)}
-          title="Légende : couleurs, états et vocabulaire du NOC"
-        >
-          <BookOpen size={13} />
-          <span className="hidden xl:inline text-[11px]">Légende</span>
-        </button>
+        <span className="hidden sm:inline-flex">
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={() => setLegendOpen(true)}
+            title="Légende : couleurs, états et vocabulaire du NOC"
+          >
+            <BookOpen size={13} />
+            <span className="hidden xl:inline text-[12px]">Légende</span>
+          </button>
+        </span>
         <button
           type="button"
           className="btn btn-ghost btn-sm"
@@ -210,14 +255,16 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
       </div>
 
       <div
-        className="flex items-center gap-2 pl-2.5 border-l shrink-0"
+        className="flex items-center gap-2 pl-1.5 sm:pl-2.5 border-l shrink-0"
         style={{ borderColor: "var(--border)" }}
       >
-        <Link to="/compte" className="text-right leading-tight" style={{ textDecoration: "none" }}>
+        {/* Nom et rôle à partir de la tablette ; sur téléphone, « Mon compte »
+            est dans le menu. */}
+        <Link to="/compte" className="hidden lg:block text-right leading-tight" style={{ textDecoration: "none" }}>
           <div className="text-[12px] font-medium" style={{ color: "var(--ink)" }}>
             {user?.full_name || user?.username}
           </div>
-          <div className="text-[10px]" style={{ color: "var(--ink-3)" }}>
+          <div className="text-[12px]" style={{ color: "var(--ink-3)" }}>
             {ROLE_LABEL[user?.role] ?? user?.role}
           </div>
         </Link>
@@ -253,14 +300,10 @@ export default function TopBar({ realtimeStatus, health, toolsHealthy, toolsTota
 /** Fil d'Ariane + navigation période, réutilisé en tête de chaque page. */
 export function PageHeader({ title, subtitle, actions, children }) {
   return (
-    <div className="flex items-start gap-3 flex-wrap mb-2">
+    <div className="flex items-end gap-3 flex-wrap mb-3">
       <div className="min-w-0">
-        <h1 className="text-[15px] font-semibold leading-tight tracking-tight">{title}</h1>
-        {subtitle && (
-          <p className="text-[11.5px] mt-0.5" style={{ color: "var(--ink-3)" }}>
-            {subtitle}
-          </p>
-        )}
+        <h1 className="page-title">{title}</h1>
+        {subtitle && <p className="page-subtitle">{subtitle}</p>}
       </div>
       {children}
       {actions && <div className="ml-auto flex max-w-full items-center gap-2 flex-wrap">{actions}</div>}

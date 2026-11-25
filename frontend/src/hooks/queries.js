@@ -35,7 +35,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import * as api from "../api/noc";
 import { usePeriodStore, useUiStore } from "../store/ui";
-import { useScopeParams } from "../store/scope";
+import { placeParams, useScopeParams } from "../store/scope";
 
 export const REFRESH = Object.freeze({
   LIVE: 20_000,
@@ -133,11 +133,12 @@ export function useAlertAges() {
   });
 }
 
-export function useHourDistribution() {
+export function useHourDistribution(hours) {
   const scope = useScopeParams();
+  const params = hours ? { ...scope, hours } : scope;
   return useQuery({
-    queryKey: ["alerts", "hour-distribution", scope],
-    queryFn: () => api.overview.hourDistribution(scope),
+    queryKey: ["alerts", "hour-distribution", params],
+    queryFn: () => api.overview.hourDistribution(params),
     refetchInterval: useInterval(REFRESH.ANALYTIC),
   });
 }
@@ -405,8 +406,10 @@ export function useNetworkSeries({ metric, metricType, period, hours, sample, si
     period: periodKey,
     sample: sampleSize,
     site: site ?? scope.site,
-    organisation,
-    node_type: nodeType,
+    // Sans valeur explicite, ceux de la barre unique : `undefined` écrasait
+    // le filtre global et la courbe ignorait organisation et type.
+    organisation: organisation ?? scope.organisation,
+    node_type: nodeType ?? scope.node_type,
   };
   return useQuery({
     queryKey: ["metrics", "network", params],
@@ -450,8 +453,10 @@ export function useNetworkRanking(options = {}) {
     period: periodKey,
     sample: sampleSize,
     site: site ?? scope.site,
-    organisation,
-    node_type: nodeType,
+    // Sans valeur explicite, ceux de la barre unique : `undefined` écrasait
+    // le filtre global et la courbe ignorait organisation et type.
+    organisation: organisation ?? scope.organisation,
+    node_type: nodeType ?? scope.node_type,
   };
   return useQuery({
     queryKey: ["metrics", "network", params],
@@ -471,7 +476,8 @@ export function useKpiTrend(options = {}) {
     typeof options === "number" ? { days: options } : options;
   // Tendance du PÉRIMÈTRE : agrégats journaliers du site, de la province ou
   // de la région choisis (la recherche libre ne s'applique pas aux agrégats).
-  const { search: _search, ...place } = useScopeParams();
+  // Agrégats rangés par localité : organisation et type ne s'y appliquent pas.
+  const place = placeParams(useScopeParams());
   const params = { days, ...place, ...(site ? { site } : {}) };
   return useQuery({
     queryKey: ["kpi", "trend", params],
@@ -490,7 +496,8 @@ export function useKpiTrend(options = {}) {
 
 export function useKpiMonthly(params) {
   const period = usePeriodParams();
-  const { search: _search, ...place } = useScopeParams();
+  // Agrégats rangés par localité : organisation et type ne s'y appliquent pas.
+  const place = placeParams(useScopeParams());
   const query = { ...period, ...place, ...params };
   return useQuery({
     queryKey: ["kpi", "monthly", query],
@@ -549,7 +556,8 @@ export function useIncidentKpis({ days = 30 } = {}) {
 }
 
 export function useKpiSites({ days = 30, limit = 20, sort = "availability" } = {}) {
-  const { search: _search, ...place } = useScopeParams();
+  // Agrégats rangés par localité : organisation et type ne s'y appliquent pas.
+  const place = placeParams(useScopeParams());
   const params = { days, limit, sort, ...place };
   return useQuery({
     queryKey: ["kpi", "sites", params],
@@ -599,9 +607,57 @@ export function useNodeHistory(nodeId, days = 30) {
   });
 }
 
+/** Équipements instables — flapping (AM-08, KPI-14). */
+export function useFlapping() {
+  const place = placeParams(useScopeParams());
+  return useQuery({
+    queryKey: ["history", "flapping", place],
+    queryFn: () => api.history.flapping(place),
+    refetchInterval: useInterval(REFRESH.OPERATIONAL),
+    retry: 1,
+  });
+}
+
+/** Disponibilité des outils de supervision. */
+export function useToolsHistory(days = 30) {
+  return useQuery({
+    queryKey: ["history", "tools", days],
+    queryFn: () => api.history.tools(days),
+    refetchInterval: useInterval(REFRESH.OPERATIONAL),
+    retry: 1,
+  });
+}
+
+/** Rapports mensuels figés. */
+export function useReportArchive() {
+  return useQuery({ queryKey: ["report", "archive"], queryFn: api.report.archive, retry: 1 });
+}
+
+/** Profondeur du journal historique : depuis quand il est tenu (INC-27). */
+export function useHistoryStatus() {
+  return useQuery({
+    queryKey: ["history", "status"],
+    queryFn: api.history.status,
+    staleTime: 300_000,
+    retry: 1,
+  });
+}
+
+/** Tableau de bord d'un mois passé, dans le périmètre (localité). */
+export function useHistoryMonth({ year, month }) {
+  const params = { year, month, ...placeParams(useScopeParams()) };
+  return useQuery({
+    queryKey: ["history", "month", params],
+    queryFn: () => api.history.month(params),
+    staleTime: 60_000,
+    retry: 1,
+  });
+}
+
 /** Équipements ou liens les moins disponibles sur la période, dans le périmètre. */
 export function useHistoryRanking({ kind = "node", days = 30, limit = 15 } = {}) {
-  const { search: _search, ...place } = useScopeParams();
+  // Agrégats rangés par localité : organisation et type ne s'y appliquent pas.
+  const place = placeParams(useScopeParams());
   return useQuery({
     queryKey: ["history", "ranking", kind, days, limit, place],
     queryFn: () => api.history.ranking({ kind, days, limit, ...place }),
@@ -630,6 +686,22 @@ export function useUpdateSlaTarget() {
 /* ================================================================== */
 /* Interopérabilité                                                    */
 /* ================================================================== */
+/**
+ * État des outils sources, sans l'inventaire ni les alertes que charge
+ * useInterop : lu par les avertissements de tuile (SourceWarning) et le
+ * bandeau de situation. Un 403 (rôle sans accès à la collecte) ne déclenche
+ * ni nouvel essai ni erreur affichée : simplement pas d'avertissement.
+ */
+export function useSourceHealth() {
+  return useQuery({
+    queryKey: ["interop", "status"],
+    queryFn: api.interop.status,
+    refetchInterval: useInterval(REFRESH.OPERATIONAL),
+    retry: (count, error) => error?.response?.status !== 403 && count < 2,
+    staleTime: 30_000,
+  });
+}
+
 export function useInterop() {
   const nodes = useNodes({ limit: 2000 });
   const alerts = useAlerts({ limit: 5000 });
@@ -653,7 +725,7 @@ export function useInterop() {
       // réponse du backend, ils valaient `undefined` et l'indicateur
       // « outils en panne » affichait NaN.
       tools_total: configuredTools.length,
-      tools_healthy: configuredTools.filter((tool) => tool.reachable && !tool.stale).length,
+      tools_healthy: configuredTools.filter((tool) => tool.reachable && !tool.stale && !tool.data_until).length,
       tools: (data?.tools ?? []).map((tool) => {
         const toolNodes = nodes.data?.items?.filter((node) =>
           (node.source_tools ?? []).includes(tool.tool),
@@ -676,12 +748,12 @@ export function useInterop() {
             : tool.never_collected
               ? "unknown"
               : tool.reachable
-                ? (tool.stale ? "stale" : "ok")
+                ? (tool.stale || tool.data_until ? "stale" : "ok")
                 : "error",
           last_run_at: tool.checked_at,
           detail: tool.not_configured
             ? "URL non renseignée dans .env — connecteur inactif"
-            : tool.error ?? tool.version ?? "Aucun détail fourni",
+            : tool.error ?? (tool.data_until ? `Source arrêtée : dernière donnée le ${new Date(tool.data_until).toLocaleString("fr-FR", { timeZone: "Africa/Ouagadougou" })}` : tool.version) ?? "Aucun détail fourni",
           nb_nodes: tool.nb_nodes ?? (completeInventory ? toolNodes : null),
           nb_technical_alerts:
             tool.nb_technical_alerts ??
@@ -846,7 +918,11 @@ function toIncident(alert) {
     ...alert,
     id: alert.key,
     detected_at: alert.since,
-    age_minutes: Number.isNaN(detectedAt) ? null : Math.max(0, (Date.now() - detectedAt) / 60_000),
+    // Âge calculé par le serveur sur un instant unique pour toute la liste
+    // (INC-12) ; calcul local seulement si le serveur ne le fournit pas.
+    age_minutes:
+      alert.age_minutes ??
+      (Number.isNaN(detectedAt) ? null : Math.max(0, (Date.now() - detectedAt) / 60_000)),
     status: alert.resolved_at ? "resolved" : alert.acknowledged ? "acknowledged" : "open",
     description: alert.message ?? alert.description,
     locality: alert.site,
@@ -901,7 +977,7 @@ export function useAlertSummary() {
 
 /** Alertes ouvertes, en liste plate comme l'attendaient les anciens écrans. */
 export function useOpenAlerts({ limit = 50, ...rest } = {}) {
-  const query = useAlerts({ limit, acknowledged: false, ...rest });
+  const query = useAlerts({ limit, acknowledged: false, confirmed: true, ...rest });
   return { ...query, data: query.data?.alerts?.map(toIncident) };
 }
 
@@ -921,14 +997,18 @@ export function useNetworkKpi() {
       ? {
           ...data,
           availability_pct: data.fleet_availability_pct,
-          // « Remontent » = les équipements dont un outil dit quelque chose.
-          // Les muets sont précisément ceux qui ne remontent plus rien.
-          // Un état « inconnu » (conflit entre outils, CMDB seule) ne remonte
-          // pas davantage de mesure qu'un équipement muet.
+          // « Remontent » = les équipements dont l'état est OBSERVÉ par un
+          // outil (en service, dégradé, en panne) : `nodes_supervised`, la
+          // même base que la disponibilité (AM-29). Inconnus et muets n'en
+          // font pas partie (INC-03 : « 9/9 remontent » avec « Vu : jamais »).
           nodes_reporting:
-            data.nodes_total == null
+            data.nodes_supervised ??
+            (data.nodes_total == null
               ? null
-              : data.nodes_total - (data.nodes_unknown ?? 0),
+              : data.nodes_total -
+                (data.nodes_unknown ?? 0) -
+                (data.nodes_silent ?? 0) -
+                (data.nodes_maintenance ?? 0)),
           // Disponibilité : déduite de l'état du parc. Latence, pertes,
           // débits, CPU… : dernières valeurs relevées par le collecteur
           // auprès des outils qui les fournissent (Zabbix, Centreon), et
@@ -954,6 +1034,7 @@ export function useIncidents(params = {}) {
     site,
     locality_id: legacySite,
     acknowledged,
+    confirmed,
     exclude_itsm: excludeItsm = false,
     ...filters
   } = params;
@@ -974,6 +1055,7 @@ export function useIncidents(params = {}) {
         tool,
         site: site ?? legacySite ?? scope.site,
         acknowledged: acknowledgedFilter,
+        confirmed,
         limit: 5000,
       }),
     refetchInterval: useInterval(REFRESH.LIVE),
@@ -1175,13 +1257,14 @@ export function useGeoSite(site) {
 /* ================================================================== */
 /* Incidents iTop                                                      */
 /* ================================================================== */
-export function useItopIncidents(params = {}, { global = false } = {}) {
+export function useItopIncidents(params = {}, { global = false, enabled = true } = {}) {
   const scope = useScopeParams();
   const query = { ...(global ? {} : scope), ...params };
   return useQuery({
     queryKey: ["incidents", "list", query],
     queryFn: () => api.itopIncidents.list(query),
     refetchInterval: useInterval(REFRESH.LIVE),
+    enabled,
   });
 }
 

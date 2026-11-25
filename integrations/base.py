@@ -254,6 +254,15 @@ class SourceClient(abc.ABC):
         """Latest supported measurements, when the source exposes them."""
         return {}
 
+    async def data_horizon(self) -> datetime | None:
+        """Date de la dernière donnée connue de la source.
+
+        None (défaut) pour une API, qui répond à l'instant présent. Une base
+        restaurée ou un export rendent la date de leur dernier événement : le
+        collecteur en déduit que leurs données sont arrêtées.
+        """
+        return None
+
     async def fetch_maintenance(self) -> list[dict]:
         """Maintenances planifiées connues de l'outil (en cours, à venir et
         récentes). Chaque fenêtre :

@@ -38,7 +38,8 @@ logger = logging.getLogger(__name__)
 # repartir de zéro, et un bilan non écrit (base indisponible) reste en
 # attente jusqu'à ce qu'il le soit.
 _ACCUMULATOR: dict[tuple[date, str | None], dict] = {}
-_COUNTERS = ("samples", "nodes", "up", "down", "degraded", "maintenance", "alerts", "critical")
+_COUNTERS = ("samples", "nodes", "up", "down", "degraded", "maintenance", "alerts", "critical",
+             "responding_s", "supervised_s")
 
 
 def rollup_key(level: str, name: str) -> str:
@@ -75,7 +76,8 @@ def observe(
     bucket = _ACCUMULATOR.setdefault(
         key,
         {"samples": 0, "nodes": 0, "up": 0, "down": 0, "degraded": 0,
-         "maintenance": 0, "alerts": 0, "critical": 0},
+         "maintenance": 0, "alerts": 0, "critical": 0,
+         "responding_s": 0, "supervised_s": 0},
     )
     bucket["samples"] += 1
     bucket["nodes"] += len(nodes)
@@ -84,6 +86,13 @@ def observe(
     bucket["degraded"] += sum(
         1 for n in nodes if not is_maintenance(n) and n.state == "degraded"
     )
+    # Disponible = répond (KPI-01) : en service ou dégradé. En secondes, pour
+    # qu'un mois se calcule au temps supervisé, quelle que soit la cadence.
+    states = [n.state for n in nodes if not is_maintenance(n)]
+    responding = sum(1 for state in states if state in ("up", "degraded"))
+    supervised = responding + states.count("down")
+    bucket["responding_s"] += responding * config.COLLECT_INTERVAL_S
+    bucket["supervised_s"] += supervised * config.COLLECT_INTERVAL_S
     bucket["maintenance"] += sum(1 for n in nodes if is_maintenance(n))
     bucket["alerts"] += len(alerts)
     bucket["critical"] += sum(1 for a in alerts if a.severity == "critical")
@@ -108,6 +117,12 @@ def restore_accumulator(payload: list) -> int:
         try:
             key = (date.fromisoformat(item["day"]), item.get("site"))
             counters = {name: int(item.get(name) or 0) for name in _COUNTERS}
+            if "supervised_s" not in item:
+                # Sauvegarde d'une version antérieure, sans les durées : elle
+                # a été faite à la cadence d'alors, 5 min.
+                responding = counters["up"] + counters["degraded"]
+                counters["responding_s"] = responding * 300
+                counters["supervised_s"] = (responding + counters["down"]) * 300
         except (KeyError, TypeError, ValueError, AttributeError):
             continue
         _ACCUMULATOR[key] = counters
@@ -158,17 +173,16 @@ def _drain(day: date) -> list[dict]:
                 "avg_degraded": round(counters["degraded"] / samples, 2),
                 "avg_alerts": round(counters["alerts"] / samples, 2),
                 "avg_critical": round(counters["critical"] / samples, 2),
-                # Disponibilité du parc : proportion moyenne d'équipements
-                # « up » parmi ceux que la supervision voyait. Ce n'est PAS
-                # une disponibilité au sens SLA d'un équipement donné — c'est
-                # un indicateur de santé globale, et il est nommé comme tel.
+                # Disponibilité : part du temps supervisé où les équipements
+                # RÉPONDAIENT (en service ou dégradés, KPI-01). Les non supervisés (inconnu, muet) et
+                # la maintenance sortent du dénominateur (AM-29).
                 "fleet_availability_pct": round(
-                    100.0 * counters["up"]
-                    / (counters["nodes"] - counters["maintenance"]),
-                    2,
+                    100.0 * counters["responding_s"] / counters["supervised_s"], 2,
                 )
-                if counters["nodes"] > counters["maintenance"]
+                if counters["supervised_s"]
                 else None,
+                "responding_s": counters["responding_s"],
+                "supervised_s": counters["supervised_s"],
             }
         )
         del _ACCUMULATOR[(bucket_day, site)]
@@ -203,12 +217,13 @@ async def write_rows(rows: list[dict]) -> None:
                     INSERT INTO kpi_daily (
                         day, site, samples, avg_nodes, avg_up, avg_down,
                         avg_degraded, avg_alerts, avg_critical,
-                        fleet_availability_pct
+                        fleet_availability_pct, responding_s, supervised_s
                     )
                     VALUES (
                         %(day)s, %(site)s, %(samples)s, %(avg_nodes)s, %(avg_up)s,
                         %(avg_down)s, %(avg_degraded)s, %(avg_alerts)s,
-                        %(avg_critical)s, %(fleet_availability_pct)s
+                        %(avg_critical)s, %(fleet_availability_pct)s,
+                        %(responding_s)s, %(supervised_s)s
                     )
                     -- Réécriture plutôt qu'échec : un collecteur redémarré en
                     -- fin de journée doit pouvoir compléter le bilan du jour.
@@ -220,7 +235,9 @@ async def write_rows(rows: list[dict]) -> None:
                         avg_degraded = EXCLUDED.avg_degraded,
                         avg_alerts = EXCLUDED.avg_alerts,
                         avg_critical = EXCLUDED.avg_critical,
-                        fleet_availability_pct = EXCLUDED.fleet_availability_pct
+                        fleet_availability_pct = EXCLUDED.fleet_availability_pct,
+                        responding_s = EXCLUDED.responding_s,
+                        supervised_s = EXCLUDED.supervised_s
                     """,
                     row,
                 )

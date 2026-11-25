@@ -2,13 +2,15 @@ import { ArrowDownRight, ArrowRight, ArrowUpRight, HelpCircle } from "lucide-rea
 import { Link } from "react-router-dom";
 
 import { DASH } from "../../lib/format";
+import SourceWarning from "./SourceWarning";
+import { helpFor } from "../../lib/glossary";
 
 /**
  * Tuile d'indicateur.
  *
  * Trois règles tenues partout :
  *
- * 1. La valeur domine (20 px, chasse fixe tabulaire), le libellé est
+ * 1. La valeur domine (32 px Poppins, chiffres tabulaires), le libellé est
  *    secondaire. Un exploitant lit la colonne de chiffres en balayage
  *    vertical ; des libellés aussi gros que les valeurs cassent ce
  *    balayage.
@@ -32,7 +34,7 @@ function Gauge({ value, target, max = 100, color = "var(--accent)" }) {
   const clamp = (v) => Math.min(100, Math.max(0, (100 * v) / max));
   const filled = value == null || !Number.isFinite(Number(value)) ? 0 : clamp(Number(value));
   return (
-    <div className="relative mt-1.5" style={{ height: 6 }} aria-hidden="true">
+    <div className="relative mt-2 mb-0.5" style={{ height: 6 }} aria-hidden="true">
       <div className="absolute inset-0 rounded-full" style={{ background: "var(--surface-3)" }} />
       <div
         className="absolute left-0 top-0 bottom-0 rounded-full"
@@ -59,8 +61,8 @@ function Gauge({ value, target, max = 100, color = "var(--accent)" }) {
 function MiniSpark({ values, color }) {
   const points = (values ?? []).filter((v) => v != null && Number.isFinite(Number(v))).map(Number);
   if (points.length < 2) return null;
-  const width = 64;
-  const height = 20;
+  const width = 84;
+  const height = 28;
   // Échelle verticale d'au moins 5 % de la valeur (et d'une unité) :
   // ramenée à son propre min/max, une variation de 69,6 à 69,7 % dessinerait
   // une envolée. Seul un changement notable doit se voir.
@@ -104,10 +106,20 @@ export default function Stat({
   spark,
   breakdown,
   help,
+  // Dépendance envers un outil source (INC-24) : clé de lib/sources.js.
+  sources,
+  // Pied de tuile standard (AM-04) : fenêtre et source, « 24 h · iTop ».
+  footer,
+  // Tuile mise en avant (Santé réseau, zone Z2) : fond marine ANPTIC.
+  emphasis = false,
 }) {
+  // INC-37 / AM-24 : chaque indicateur a son « ? », lu dans le glossaire
+  // quand l'écran n'en fournit pas.
+  help = help ?? helpFor(label);
   if ((delta === null || delta === undefined) && spark) {
     delta = sparkDelta(spark);
-    deltaLabel = deltaLabel ?? "Variation sur 24 h";
+    // INC-34 : la série couvre la période affichée, pas forcément 24 h.
+    deltaLabel = deltaLabel ?? "Variation sur la période affichée";
   }
   const hasDelta = delta !== null && delta !== undefined && Number.isFinite(Number(delta));
   const numericDelta = hasDelta ? Number(delta) : 0;
@@ -121,18 +133,23 @@ export default function Stat({
       : "var(--sev-high)";
   const DeltaIcon = flat ? ArrowRight : numericDelta > 0 ? ArrowUpRight : ArrowDownRight;
 
+  // Maquette : un verdict en mots (« Non évaluable », « Non mesuré ») n'est
+  // pas un chiffre — plus petit et atténué, pour ne pas crier un faux KPI.
+  const textual = typeof value === "string" && !/\d/.test(value) && value !== DASH;
+  const valueSize = textual ? (compact ? 15 : 19) : compact ? 24 : 32;
+
   const body = (
     <>
       <div className="flex min-w-0 items-start gap-1.5">
         <span
-          className="min-w-0 text-[10.5px] font-semibold uppercase leading-tight tracking-[0.07em] break-words"
-          style={{ color: "var(--ink-3)", overflowWrap: "anywhere" }}
+          className="stat-label min-w-0 break-words"
+          style={{ overflowWrap: "anywhere" }}
         >
           {label}
         </span>
         {help && (
           <span className="shrink-0 cursor-help" title={help} style={{ color: "var(--ink-3)" }}>
-            <HelpCircle size={11} aria-label={help} />
+            <HelpCircle size={13} aria-label={help} />
           </span>
         )}
         {status && (
@@ -144,19 +161,20 @@ export default function Stat({
         )}
       </div>
 
-      <div className="flex min-w-0 flex-wrap items-baseline gap-1 mt-0.5">
+      <div className="flex min-w-0 flex-wrap items-baseline gap-1 mt-1">
         <span
-          className="num min-w-0 font-semibold leading-tight break-words"
+          className="stat-value min-w-0 break-words"
           style={{
-            fontSize: compact ? 17 : 21,
-            color: color ?? "var(--ink)",
+            fontSize: valueSize,
+            color: textual ? "var(--ink-3)" : color ?? "var(--ink)",
+            fontWeight: textual ? 600 : 700,
             overflowWrap: "anywhere",
           }}
         >
           {value ?? DASH}
         </span>
         {unit && (
-          <span className="text-[11px]" style={{ color: "var(--ink-3)" }}>
+          <span className="text-[14px] font-medium" style={{ color: "var(--ink-3)" }}>
             {unit}
           </span>
         )}
@@ -168,6 +186,11 @@ export default function Stat({
       </div>
 
       {gauge && <Gauge {...gauge} color={gauge.color ?? color ?? "var(--accent)"} />}
+      {sources && (
+        <div className="mt-1">
+          <SourceWarning sources={sources} />
+        </div>
+      )}
       {breakdown && (
         <div className="mt-1.5">
           <StackedBar segments={breakdown} height={5} />
@@ -177,13 +200,13 @@ export default function Stat({
       {(target || hasDelta || hint) && (
         <div className="flex items-center gap-2 mt-1 flex-wrap">
           {target && (
-            <span className="text-[10.5px] num" style={{ color: "var(--ink-3)" }}>
+            <span className="text-[12px] num" style={{ color: "var(--ink-3)" }}>
               cible {target}
             </span>
           )}
           {hasDelta && (
             <span
-              className="text-[10.5px] num inline-flex items-center gap-0.5"
+              className="text-[12px] num inline-flex items-center gap-0.5"
               style={{ color: deltaColor }}
               title={deltaLabel ?? "Variation vs mois précédent"}
             >
@@ -195,7 +218,7 @@ export default function Stat({
           )}
           {hint && (
             <span
-              className="text-[10.5px] break-words"
+              className="text-[12px] break-words"
               style={{ color: "var(--ink-3)", overflowWrap: "anywhere" }}
             >
               {hint}
@@ -203,12 +226,20 @@ export default function Stat({
           )}
         </div>
       )}
+      {footer && (
+        <div
+          className="stat-foot pt-1.5 mt-2 border-t text-[12px]"
+          style={{ borderColor: "var(--border)", color: "var(--ink-3)" }}
+        >
+          {footer}
+        </div>
+      )}
     </>
   );
 
-  const className = `panel min-w-0 px-2.5 ${compact ? "py-1.5" : "py-2"} block ${
-    to ? "hover:border-[var(--border-strong)] transition-colors" : ""
-  }`;
+  const className = `panel stat-tile ${compact ? "compact" : ""} min-w-0 ${
+    emphasis ? "stat-emphasis" : ""
+  } ${to ? "hover:border-[var(--accent)] transition-colors" : ""}`;
 
   return to ? (
     <Link to={to} className={className} style={{ textDecoration: "none", color: "inherit" }}>
@@ -282,7 +313,7 @@ export function DefRow({ label, children, mono = false }) {
   return (
     <div className="flex items-baseline gap-2 py-[3px]">
       <span
-        className="text-[10.5px] uppercase tracking-[0.06em] shrink-0"
+        className="text-[12px] uppercase tracking-[0.06em] shrink-0"
         style={{ color: "var(--ink-3)", minWidth: 108 }}
       >
         {label}

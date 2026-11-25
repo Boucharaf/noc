@@ -58,7 +58,7 @@ export default function SlaAtRisk({ limit = 8, className = "" }) {
                         {row.ref ? `${row.ref} · ` : ""}
                         {row.title}
                       </span>
-                      <span className="block text-[10.5px] truncate" style={{ color: "var(--ink-3)" }}>
+                      <span className="block text-[12px] truncate" style={{ color: "var(--ink-3)" }}>
                         {row.node_name || "CI non rattaché"}
                         {row.site ? ` · ${row.site}` : ""}
                         {" · "}
@@ -66,7 +66,7 @@ export default function SlaAtRisk({ limit = 8, className = "" }) {
                       </span>
                     </span>
                     <span
-                      className="num text-[11px] text-right"
+                      className="num text-[12px] text-right"
                       style={{
                         color: row.breached ? "var(--sev-critical)" : "var(--sev-medium)",
                         minWidth: 74,
@@ -81,7 +81,7 @@ export default function SlaAtRisk({ limit = 8, className = "" }) {
                 </li>
               ))}
               {rows.length > limit && (
-                <li className="px-2.5 py-1 text-[10.5px]" style={{ color: "var(--ink-3)" }}>
+                <li className="px-2.5 py-1 text-[12px]" style={{ color: "var(--ink-3)" }}>
                   et {num(rows.length - limit)} autre(s)
                 </li>
               )}

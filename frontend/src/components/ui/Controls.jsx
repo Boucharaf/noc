@@ -106,8 +106,28 @@ export function SearchField({
   delay = 300,
   suggest,
   onPick,
+  id,
+  shortcut,
 }) {
   const [draft, setDraft] = useState(value ?? "");
+  const inputRef = useRef(null);
+  // AM-22 : « / » place le curseur dans la recherche, comme sur la plupart
+  // des consoles — sauf si l'on est déjà en train d'écrire ailleurs.
+  useEffect(() => {
+    if (!shortcut) return undefined;
+    const onKey = (event) => {
+      if (event.key !== shortcut || event.ctrlKey || event.metaKey || event.altKey) return;
+      const target = event.target;
+      const typing =
+        target instanceof HTMLElement &&
+        (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
+      if (typing) return;
+      event.preventDefault();
+      inputRef.current?.focus();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [shortcut]);
   const boxRef = useRef(null);
 
   // Resynchronise quand la valeur est réinitialisée depuis l'extérieur
@@ -139,17 +159,20 @@ export function SearchField({
   const showList = suggest && box.open && draft.trim().length >= 2;
 
   return (
-    <div className="relative" style={{ width }} ref={boxRef}>
+    <div className="relative" style={{ width, maxWidth: "100%" }} ref={boxRef}>
       <Search
         size={13}
         className="absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none"
         style={{ color: "var(--ink-3)" }}
       />
       <input
+        ref={inputRef}
+        id={id}
         className="input"
         style={{ paddingLeft: 24, paddingRight: draft ? 24 : 8 }}
         value={draft}
         placeholder={placeholder}
+        aria-keyshortcuts={shortcut}
         onChange={(event) => {
           setDraft(event.target.value);
           box.setOpen(true);
@@ -176,10 +199,15 @@ export function SearchField({
         <ul
           role="listbox"
           className="absolute left-0 top-full mt-1 z-[1500] panel py-1 overflow-auto"
-          style={{ minWidth: Math.max(width, 340), maxHeight: 340, boxShadow: "0 12px 32px rgba(0,0,0,.35)" }}
+          style={{
+            minWidth: `min(${Math.max(typeof width === "number" ? width : 0, 340)}px, calc(100vw - 20px))`,
+            maxWidth: "calc(100vw - 20px)",
+            maxHeight: 340,
+            boxShadow: "0 12px 32px rgba(0,0,0,.35)",
+          }}
         >
           {box.items.length === 0 ? (
-            <li className="px-2.5 py-1.5 text-[11.5px]" style={{ color: "var(--ink-3)" }}>
+            <li className="px-2.5 py-1.5 text-[12px]" style={{ color: "var(--ink-3)" }}>
               Aucune suggestion — Entrée pour rechercher « {draft.trim()} »
             </li>
           ) : (
@@ -197,7 +225,7 @@ export function SearchField({
                 }}
               >
                 <span
-                  className="text-[9.5px] uppercase tracking-[0.06em] shrink-0"
+                  className="text-[12px] uppercase tracking-[0.06em] shrink-0"
                   style={{ color: "var(--accent-ink)", width: 78 }}
                 >
                   {SUGGESTION_KIND[item.kind] ?? item.kind}
@@ -205,7 +233,7 @@ export function SearchField({
                 <span className="min-w-0 flex-1">
                   <span className="block text-[12px] truncate">{item.label}</span>
                   {item.detail && (
-                    <span className="block text-[10.5px] truncate" style={{ color: "var(--ink-3)" }}>
+                    <span className="block text-[12px] truncate" style={{ color: "var(--ink-3)" }}>
                       {item.detail}
                     </span>
                   )}
@@ -250,12 +278,12 @@ export function Field({ label, hint, error, required, children, className = "" }
       </span>
       {children}
       {hint && !error && (
-        <span className="block text-[10.5px] mt-1" style={{ color: "var(--ink-3)" }}>
+        <span className="block text-[12px] mt-1" style={{ color: "var(--ink-3)" }}>
           {hint}
         </span>
       )}
       {error && (
-        <span className="block text-[10.5px] mt-1" style={{ color: "var(--sev-critical)" }}>
+        <span className="block text-[12px] mt-1" style={{ color: "var(--sev-critical)" }}>
           {error}
         </span>
       )}
@@ -311,7 +339,7 @@ export function Tabs({ tabs, value, onChange }) {
           >
             {tab.label}
             {tab.count !== undefined && (
-              <span className="num ml-1.5 text-[11px]" style={{ color: "var(--ink-3)" }}>
+              <span className="num ml-1.5 text-[12px]" style={{ color: "var(--ink-3)" }}>
                 {tab.count}
               </span>
             )}

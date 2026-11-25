@@ -11,10 +11,10 @@ Toute donnée affichée suit l'un de ces trois rythmes.
 
 | Rythme | Source | Quand la donnée change | Où elle vit |
 |---|---|---|---|
-| **① À chaque collecte** | Instantané écrit par le collecteur | Toutes les `COLLECT_INTERVAL_S` secondes (300 par défaut) | Redis, expire après 3 cycles |
+| **① À chaque collecte** | Instantané écrit par le collecteur | Toutes les `COLLECT_INTERVAL_S` secondes (60 par défaut ; iTop : 300) | Redis, expire après 3 cycles |
 | **② Une fois par jour** | Bilans journaliers `kpi_daily` | Chaque nuit à `ROLLUP_HOUR` (1 h par défaut), pour **la veille** | PostgreSQL |
 | **③ À la demande** | L'outil source (iTop, ou Zabbix/Centreon/NetXMS pour les courbes) | À l'ouverture de l'écran, puis gardée en cache (5 min pour iTop) | Cache Redis |
-| **④ Journal historique** | Périodes d'état et alertes, écrites par le collecteur | À chaque cycle, mais seulement quand un état change | PostgreSQL (`hist_state`, `hist_alert`) |
+| **④ Journal historique** | Périodes d'état et alertes, écrites par le collecteur | À chaque cycle, mais seulement quand un état change | PostgreSQL (`hist_state`, `hist_alert`, `hist_alert_event`, `hist_tool_health`) |
 
 Le navigateur relit l'API à son propre rythme (`REFRESH` dans
 `frontend/src/hooks/queries.js`) : 20 s pour les vues en direct, 60 s pour
@@ -40,7 +40,7 @@ Redis (chapitre 2, flux 1) :
 
 Si un outil ne répond pas, sa dernière collecte réussie est reprise et
 marquée « périmée » ; si le collecteur s'arrête, l'instantané expire au bout
-de 3 cycles (15 min) et les écrans affichent « collecte interrompue ».
+de 3 cycles (3 min) et les écrans affichent « collecte interrompue ».
 
 ### ② Une fois par jour
 
@@ -159,6 +159,7 @@ d'acquittement) tel qu'il était au dernier cycle.
 |---|---|
 | Respect des SLA, évolution par semaine, délais de résolution, par localité, par gravité | ③ |
 | Incidents à risque | ① |
+| MTTA des alertes | ④ — acquittements des 30 derniers jours, alertes closes comprises ; ① (alertes actives) tant que le journal n'en a aucun |
 | Contrat iTop (SLT) | ③ |
 | Objectifs du NOC | Base du NOC, modifiés à la main |
 
@@ -168,13 +169,14 @@ d'acquittement) tel qu'il était au dernier cycle.
 |---|---|
 | Historique sur 12 mois, disponibilité et sites du rapport | ② |
 | Incidents, délais, causes et dépassements du rapport | ③ — tickets iTop du mois |
+| Rapports figés | Base du NOC : enregistrés une fois, ne changent plus |
 
 ### Autres écrans
 
 | Écran | Rythme |
 |---|---|
 | Maintenances, Interventions | ① (changements et ordres de travail iTop, maintenances Zabbix) |
-| Collecte ETL | ① ; la courbe de couverture vient de l'historique court |
+| Collecte ETL | ① ; disponibilité des outils : ④ ; la courbe de couverture vient de l'historique court |
 | Mur d'écrans (`/mur`) | ① |
 | Utilisateurs, Journal d'audit | Base du NOC, à chaque action |
 
@@ -184,30 +186,64 @@ d'acquittement) tel qu'il était au dernier cycle.
 
 | Indicateur | Formule | Code |
 |---|---|---|
-| **Disponibilité instantanée** | équipements « en service » ÷ (équipements − équipements en maintenance) | `live_service.fleet_summary` |
+| **Parc en service** (instantané, KPI-02) | équipements « en service » ÷ équipements supervisés (en service + dégradés + en panne) | `live_service.fleet_summary` |
 | Santé du parc | équipements « en service » ÷ équipements, maintenance comprise | idem |
-| **Disponibilité journalière** | Σ des « en service » observés à chaque cycle ÷ (Σ équipements − Σ en maintenance) | `collector/rollup.py` |
-| Disponibilité du mois | moyenne des disponibilités journalières | `kpi_service.monthly_summary` |
+| **Disponibilité journalière** (KPI-01) | temps où les équipements répondent ÷ temps supervisé | `collector/rollup.py`, `collector/history.py` |
+| Disponibilité du mois | disponibilités journalières **pondérées par le temps supervisé** (`kpi_daily.supervised_s`) | `kpi_service.monthly_summary` |
 | Écart avec le mois précédent | publié seulement si le mois précédent a **au moins 15 jours** de bilans ; sinon « — » | idem |
 
-Un équipement hors service, dégradé, muet ou d'état inconnu n'est **jamais**
-compté disponible. Un équipement en maintenance planifiée sort du
-dénominateur. La disponibilité réseau est un indicateur, pas un SLA mesuré.
+**Règle de l'agence (KPI-01)** : un équipement est disponible quand il
+**répond**. Dégradé (Warning/Minor NetXMS, perte partielle Zabbix) : il répond,
+il est disponible — mais il ne compte pas dans le « parc en service ». Muet,
+inconnu, en maintenance, ou injoignable derrière une panne en amont
+(`UNREACHABLE` Centreon/Nagios) : hors du calcul. Un statut NetXMS Major ou
+Critical n'est une panne que si NetXMS dit l'équipement hors de portée (panne
+ouverte dans `downtime_log` ou `down_since`), quand il est lu par la base ;
+sinon l'équipement est dégradé.
+
+Seuils (proposés par l'agence, **à valider par la direction**) :
+
+| Indicateur | Vert | Orange | Réglage |
+|---|---|---|---|
+| Disponibilité, cœur | ≥ 99,9 % | ≥ 99 % | `AVAILABILITY_THRESHOLDS_CORE` |
+| Disponibilité, accès | ≥ 99 % | ≥ 97 % | `AVAILABILITY_THRESHOLDS_ACCESS` |
+| Parc en service | ≥ 98 % | ≥ 90 % | `FLEET_THRESHOLDS` |
+
+Cœur : équipements d'un groupe de `NOC_CORE_GROUPS` (`core` par défaut, la
+catégorie NetXMS de l'agence). Un chiffre qui mélange les deux est coloré aux
+seuils d'accès, et leurs valeurs séparées sont affichées à côté. Le score Santé
+(KPI-26) utilise la disponibilité des `HEALTH_AVAILABILITY_DAYS` derniers jours
+(1), ou le parc en service si le journal est vide ; l'infobulle le dit.
+
+### MTTA des alertes
+
+Moyenne de (premier acquittement − ouverture) pour les alertes techniques
+acquittées sur la période, closes ou non (`availability_service.alert_response`).
+Un acquittement sans date connue (`undated`) n'est pas compté ; une alerte non
+acquittée non plus. `alerts_mtta_basis` dit sur quoi repose le chiffre.
+
+### Disponibilité des outils
+
+Temps `up` ÷ temps observé (`up` + `partial` + `down`) ; le temps sans collecte
+n'entre pas (`availability_service.tools_health`). « Disponible » veut dire que
+l'outil **répond**, pas que ses données sont récentes : une base restaurée
+depuis un dump répond toujours.
 
 ### Disponibilité sur la durée (journal historique)
 
 | Indicateur | Définition |
 |---|---|
-| **Disponibilité d'un équipement ou d'un lien** | temps « en service » ÷ (temps observé − maintenance) sur la période |
-| Non observé | temps sans observation (avant la mise en service du journal, collecteur arrêté, outil muet plus de 3 cycles) : publié à part, ni pour ni contre |
-| Pannes | périodes « hors service » commencées dans la période |
-| Durée moyenne d'une panne | moyenne des périodes « hors service » closes |
-| MTBF | temps « en service » ÷ nombre de pannes |
+| **Disponibilité d'un équipement ou d'un lien** | temps où il répond ÷ temps supervisé sur la période |
+| Non observé | temps sans observation (avant la mise en service du journal, collecteur arrêté, outil muet plus de 3 cycles et d'au moins 5 min) : publié à part, ni pour ni contre |
+| Pannes | épisodes commencés dans la période ; des coupures séparées par moins de `FAILURE_MERGE_S` (15 min), ou seulement par du temps inconnu ou non observé, sont **une** panne |
+| Durée moyenne d'une panne | moyenne des épisodes clos |
+| MTBF | temps où il répond ÷ nombre de pannes |
+| Source maître (NetXMS…) | fait foi jusqu'à sa dernière donnée (`hist_source_sync.horizon_at`) ; ensuite, les observations du NOC |
 | MTTR des alertes | durée moyenne des alertes techniques closes dans la période |
 | Lien surveillé | interface activée que NetXMS attend active (NetXMS seulement) |
 
 Un changement d'état est daté du cycle où il est vu : précision de
-`COLLECT_INTERVAL_S` (5 min). L'ouverture d'une alerte est la date donnée
+`COLLECT_INTERVAL_S` (1 min). L'ouverture d'une alerte est la date donnée
 par l'outil.
 
 ### Délais et SLA (tickets iTop)

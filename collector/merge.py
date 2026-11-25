@@ -27,7 +27,7 @@ _STATE_RANK = {
 class MergedNode:
     """Un équipement du parc, tel que le NOC l'affiche."""
 
-    id: str                       # identifiant stable, dérivé de l'identité retenue
+    id: str                       # « outil:ref », puis identifiant stable (identity.py)
     name: str                     # libellé affiché
     hostname: str                 # nom technique — celui qui a servi au rapprochement
     ip: str | None
@@ -49,8 +49,16 @@ class MergedNode:
     state_conflict: dict[str, str] = field(default_factory=dict)
     last_known_states: dict[str, str] = field(default_factory=dict)
     stale_sources: list[str] = field(default_factory=list)
+    # Sources arrêtées (Node.frozen) : leur dernier état n'est pas actuel.
+    frozen_sources: list[str] = field(default_factory=list)
     # Faits propres à chaque source (Node.details), par outil.
     details: dict[str, dict] = field(default_factory=dict)
+
+    @property
+    def observed(self) -> bool:
+        """Faux si toutes ses sources de supervision sont arrêtées."""
+        tools = set(self.sources) - {"itop"}
+        return not tools or bool(tools - set(self.frozen_sources))
 
 
 @dataclass
@@ -276,6 +284,7 @@ def _fold(group_id: str, members: list[Node]) -> MergedNode:
         state_conflict=state_conflict,
         last_known_states=stale_states if not fresh_states else {},
         stale_sources=[node.tool for node in members if node.stale],
+        frozen_sources=[node.tool for node in members if node.frozen],
         details={node.tool: node.details for node in members if node.details},
     )
 
@@ -350,7 +359,7 @@ def attach_alerts(
         if node is None:
             orphans.append(alert)
             continue
-        if alert.kind == "technical":
+        if alert.kind == "technical" and not alert.frozen:
             severities[node.id].append(alert.severity)
 
     for node in merged:

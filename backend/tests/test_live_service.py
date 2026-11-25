@@ -30,10 +30,14 @@ def test_summarise_organisations_counts_current_states_and_missing_structure():
         }
         return {**base, **counts}
 
-    # Les plus touchées d'abord ; une supervision muette n'est pas « disponible »
-    # et une maintenance planifiée sort du dénominateur.
+    # Les plus touchées d'abord ; une supervision muette n'est ni en service
+    # ni en panne (non supervisée), et une maintenance planifiée sort du
+    # dénominateur : sans équipement supervisé, pas de taux (AM-29).
     assert rows == [
-        row("Ministère A", nodes=2, up=1, down=1, alerts=2, availability_pct=50.0),
-        row("Ministère B", nodes=2, up=1, maintenance=1, availability_pct=100.0),
-        row("Organisation non renseignée", nodes=1, silent=1, availability_pct=0.0),
+        row("Ministère A", nodes=2, up=1, down=1, alerts=2,
+            supervised=2, unsupervised=0, availability_pct=50.0),
+        row("Ministère B", nodes=2, up=1, maintenance=1,
+            supervised=1, unsupervised=0, availability_pct=100.0),
+        row("Organisation non renseignée", nodes=1, silent=1,
+            supervised=0, unsupervised=1, availability_pct=None),
     ]

@@ -90,13 +90,13 @@ export default function NodeStateStrip({ nodeId }) {
                   key={cell.at}
                   className="flex-1 rounded-[1px]"
                   style={{ background: colorOf(cell.value) }}
-                  title={`${new Date(cell.at).toLocaleString("fr-FR", { weekday: "short", hour: "2-digit", minute: "2-digit" })} : ${
+                  title={`${new Date(cell.at).toLocaleString("fr-FR", { timeZone: "Africa/Ouagadougou", weekday: "short", hour: "2-digit", minute: "2-digit" })} : ${
                     cell.value == null ? "pas de mesure" : `${cell.value.toFixed(0)} % disponible`
                   }`}
                 />
               ))}
             </div>
-            <div className="flex justify-between text-[10px] mt-1" style={{ color: "var(--ink-3)" }}>
+            <div className="flex justify-between text-[12px] mt-1" style={{ color: "var(--ink-3)" }}>
               <span>il y a 7 jours</span>
               <span className="flex items-center gap-2">
                 {[

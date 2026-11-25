@@ -9,18 +9,19 @@ import SlaBreakdown from "../components/domain/SlaBreakdown";
 import { complianceColor } from "../lib/itop";
 import { NodeStateBadge, SeverityBadge, ToolTag } from "../components/ui/Badge";
 import { EmptyState, QueryBoundary, SkeletonRows } from "../components/ui/States";
-import { decimal, num, pct, smartTime } from "../lib/format";
+import { decimal, num, pct, smartTime, availabilityPct } from "../lib/format";
 import { LEVEL } from "../lib/locality";
-import { availabilityColor, toolLabel } from "../lib/vocabulary";
-import { useGeoBreakdown, useGeoSite, useSlaIncidents } from "../hooks/queries";
+import { availabilityColor, classHint, fleetColor, thresholdTarget, toolLabel } from "../lib/vocabulary";
+import { useGeoBreakdown, useGeoSite, useHistoryRanking, useSlaIncidents } from "../hooks/queries";
 import { useScopeStore } from "../store/scope";
+import { useWindowStore, windowDays, windowLabel } from "../store/ui";
 
 /**
  * Territoire — la désagrégation, du pays jusqu'à l'équipement.
  *
  *   Burkina Faso › Région › Province › Site › Équipement
  *
- * Chaque niveau montre ses indicateurs (disponibilité, pannes, alertes des
+ * Chaque niveau montre ses indicateurs (disponibilité, parc en service, pannes, alertes des
  * outils, incidents iTop, SLA) et la liste de ses subdivisions : un clic sur
  * une ligne ou sur la carte descend d'un niveau, le fil d'Ariane remonte.
  * Le niveau courant EST le périmètre de la barre commune : descendre ici
@@ -63,15 +64,30 @@ function Breadcrumb({ region, province, site, setPath }) {
 }
 
 function KpiRow({ totals, level, count }) {
+  const hours = useWindowStore((s) => s.hours);
+  const history = useHistoryRanking({ kind: "node", days: windowDays(hours), limit: 1 });
   if (!totals) return null;
+  const availability = history.data?.available ? history.data.average_pct : null;
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+    <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-7 gap-2">
+      {/* INC-01 : sur la durée (KPI-01) et à l'instant (KPI-02), séparément. */}
       <Stat
         label="Disponibilité"
-        value={pct(totals.availability_pct, 1)}
-        color={availabilityColor(totals.availability_pct)}
-        target="≥ 99 %"
-        hint={`${num(totals.up)} / ${num(totals.nodes - totals.maintenance)} en service`}
+        value={availability == null ? "Non évaluable" : pct(availability, 2)}
+        color={availabilityColor(availability)}
+        target={thresholdTarget("access")}
+        hint={classHint(history.data?.classes)}
+        footer={`${windowLabel(hours)} · journal historique`}
+      />
+      <Stat
+        label="Parc en service"
+        value={availabilityPct(totals.availability_pct, 1)}
+        color={fleetColor(totals.availability_pct)}
+        target={thresholdTarget("fleet")}
+        // Base = équipements supervisés ; les non supervisés sont à part (AM-29).
+        hint={`${num(totals.up)} / ${num(totals.supervised ?? totals.up + totals.degraded + totals.down)} supervisés en service${
+          totals.unsupervised ? ` · ${num(totals.unsupervised)} non supervisé(s)` : ""
+        }`}
       />
       <Stat label="Équipements" value={num(totals.nodes)} hint={`${num(totals.maintenance)} en maintenance`} />
       <Stat
@@ -124,15 +140,15 @@ function childColumns(level) {
     { key: "nodes", header: "Équip.", width: 58, align: "right", render: (r) => num(r.nodes) },
     {
       key: "availability",
-      header: "Disponibilité",
+      header: "Parc en service",
       width: 140,
       render: (r) => (
         <div className="flex items-center gap-2">
           <div className="flex-1">
-            <Meter value={r.availability_pct} color={availabilityColor(r.availability_pct)} />
+            <Meter value={r.availability_pct} color={fleetColor(r.availability_pct)} />
           </div>
-          <span className="num text-[11.5px]" style={{ minWidth: 44, color: availabilityColor(r.availability_pct) }}>
-            {pct(r.availability_pct, 1)}
+          <span className="num text-[12px]" style={{ minWidth: 44, color: fleetColor(r.availability_pct) }}>
+            {availabilityPct(r.availability_pct, 1)}
           </span>
         </div>
       ),
@@ -180,7 +196,7 @@ const NODE_COLUMNS = [
     render: (r) => (
       <span>
         <span className="font-medium">{r.name}</span>
-        <span className="block text-[11px] num" style={{ color: "var(--ink-3)" }}>
+        <span className="block text-[12px] num" style={{ color: "var(--ink-3)" }}>
           {[r.ip, r.node_type].filter(Boolean).join(" · ")}
         </span>
       </span>
@@ -192,7 +208,7 @@ const NODE_COLUMNS = [
     width: 150,
     wrap: true,
     render: (r) => (
-      <span className="text-[11px]" style={{ color: "var(--ink-3)" }}>
+      <span className="text-[12px]" style={{ color: "var(--ink-3)" }}>
         {(r.tools ?? []).map(toolLabel).join(", ")}
       </span>
     ),
@@ -258,7 +274,7 @@ function SitePanels({ site }) {
                     <Link to={`/incidents?id=${encodeURIComponent(incident.key)}`} className="hover:underline">
                       {incident.ticket_ref ?? incident.ref} — {incident.message}
                     </Link>
-                    <span className="block text-[11px]" style={{ color: "var(--ink-3)" }}>
+                    <span className="block text-[12px]" style={{ color: "var(--ink-3)" }}>
                       {smartTime(incident.since)}
                     </span>
                   </span>
@@ -277,7 +293,7 @@ function SitePanels({ site }) {
                   <SeverityBadge severity={alert.severity} short source={alert.source_severity} tool={alert.tool} />
                   <span className="min-w-0">
                     {alert.message}
-                    <span className="block text-[11px]" style={{ color: "var(--ink-3)" }}>
+                    <span className="block text-[12px]" style={{ color: "var(--ink-3)" }}>
                       <ToolTag tool={alert.tool} /> · {alert.node_name} · {smartTime(alert.since)}
                     </span>
                   </span>
@@ -323,7 +339,7 @@ export default function TerritoryPage() {
     <div className="space-y-2">
       <div className="flex items-center gap-3 flex-wrap">
         <Breadcrumb region={region} province={province} site={site} setPath={setPath} />
-        <span className="ml-auto text-[11px]" style={{ color: "var(--ink-3)" }}>
+        <span className="ml-auto text-[12px]" style={{ color: "var(--ink-3)" }}>
           Respect SLA (30 j) :{" "}
           <strong className="num" style={{ color: complianceColor(slaTotals?.compliance_pct) }}>
             {pct(slaTotals?.compliance_pct, 1)}
@@ -338,7 +354,7 @@ export default function TerritoryPage() {
       <div className="grid grid-cols-12 gap-2 items-start">
         <Panel
           title={level === "region" ? "Carte des régions" : `Carte — ${title}`}
-          subtitle={level === "region" ? "couleur = disponibilité · clic pour descendre" : undefined}
+          subtitle={level === "region" ? "couleur = parc en service · clic pour descendre" : undefined}
           className="col-span-12 xl:col-span-7"
           flush
         >

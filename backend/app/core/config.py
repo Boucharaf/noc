@@ -71,6 +71,41 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 # la croit plus courte que le collecteur, il déclarera la collecte
 # interrompue alors qu'elle tourne.
 COLLECT_INTERVAL_S = int(os.getenv("COLLECT_INTERVAL_S", "300"))
+# Mêmes règles que collector/config.py : outils lus moins souvent, et délai
+# sans observation au-delà duquel le temps est « non observé ».
+COLLECT_SLOW_TOOLS = frozenset(_csv("COLLECT_SLOW_TOOLS", "itop"))
+COLLECT_SLOW_INTERVAL_S = max(
+    COLLECT_INTERVAL_S, int(os.getenv("COLLECT_SLOW_INTERVAL_S", "300"))
+)
+OBSERVATION_GAP_S = max(3 * COLLECT_INTERVAL_S, 300)
+# Coupures séparées par moins de ce délai = une seule panne (INC-39). Fixe, et
+# non « trois cycles » : accélérer la collecte ne doit pas changer le MTBF.
+FAILURE_MERGE_S = max(0, int(os.getenv("FAILURE_MERGE_S", "900")))
+
+
+def _threshold(name: str, default: str) -> tuple[float, float]:
+    """« vert,orange » : en dessous de l'orange, c'est rouge."""
+    for raw in (os.getenv(name, ""), default):
+        try:
+            green, orange = (float(item) for item in raw.split(","))
+        except ValueError:
+            continue
+        if 100 >= green >= orange >= 0:
+            return green, orange
+    raise ValueError(name)
+
+
+# Seuils de la feuille « KPI NOC référence » (KPI-01, KPI-02), PROPOSÉS par
+# l'agence et à valider par la direction. Cœur = équipements d'un de ces
+# groupes d'outil (casse ignorée) ; tous les autres sont d'accès.
+CORE_GROUPS = frozenset(item.lower() for item in _csv("NOC_CORE_GROUPS", "core"))
+AVAILABILITY_THRESHOLDS = {
+    "core": _threshold("AVAILABILITY_THRESHOLDS_CORE", "99.9,99"),
+    "access": _threshold("AVAILABILITY_THRESHOLDS_ACCESS", "99,97"),
+    "fleet": _threshold("FLEET_THRESHOLDS", "98,90"),
+}
+# Fenêtre de la disponibilité du score Santé réseau (KPI-26), en jours.
+HEALTH_AVAILABILITY_DAYS = max(1, int(os.getenv("HEALTH_AVAILABILITY_DAYS", "1")))
 
 # Outils du périmètre, énumérés ici plutôt que déduits des clés Redis
 # présentes : un outil configuré dont le collecteur n'a jamais joint l'API
@@ -96,8 +131,23 @@ INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
 # en http:// — sinon le navigateur refuse le cookie et la session tombe au
 # bout de trente minutes sans explication.
 REFRESH_COOKIE_SECURE = _bool("REFRESH_COOKIE_SECURE", True)
+# PIN lié à un POSTE RECONNU (INC-43) : la connexion par PIN n'est acceptée
+# que sur un navigateur où un mot de passe a déjà été saisi avec succès
+# (cookie signé « noc_device »). Désactivable, durée de validité réglable.
+PIN_REQUIRE_KNOWN_DEVICE = _bool("PIN_REQUIRE_KNOWN_DEVICE", True)
+PIN_DEVICE_DAYS = int(os.getenv("PIN_DEVICE_DAYS", "180"))
 
 CORS_ORIGINS = _csv("CORS_ORIGINS", "http://localhost,http://localhost:5173")
+# Adresse publique de l'interface, pour les liens envoyés par courriel
+# (réinitialisation du mot de passe). JAMAIS déduite de l'en-tête Host de la
+# requête : un attaquant pourrait y glisser son propre domaine et recevoir
+# le jeton. Par défaut, la première origine autorisée.
+# CORS_ORIGINS peut être vide (docker-compose le transmet vide par défaut).
+NOC_PUBLIC_URL = (
+    os.getenv("NOC_PUBLIC_URL", "").strip()
+    or next(iter(CORS_ORIGINS), "")
+    or "http://localhost"
+).rstrip("/")
 TRUSTED_PROXY_IPS = frozenset(
     _csv("TRUSTED_PROXY_IPS", "172.31.250.4")
 )
@@ -111,7 +161,7 @@ RATE_LIMIT_USER_WRITE_PER_MIN = int(os.getenv("RATE_LIMIT_USER_WRITE_PER_MIN", "
 # Verrouillage de la connexion par mot de passe après échecs répétés, sur une
 # fenêtre glissante. Voir routes/auth.py::_login_scopes pour les trois
 # compteurs et ce que chacun arrête.
-LOGIN_MAX_FAILURES_PER_USER = int(os.getenv("LOGIN_MAX_FAILURES_PER_USER", "10"))
+LOGIN_MAX_FAILURES_PER_USER = int(os.getenv("LOGIN_MAX_FAILURES_PER_USER", "5"))
 LOGIN_MAX_FAILURES_PER_IP = int(os.getenv("LOGIN_MAX_FAILURES_PER_IP", "30"))
 LOGIN_LOCK_WINDOW_SECONDS = int(os.getenv("LOGIN_LOCK_WINDOW_SECONDS", "900"))
 
@@ -225,6 +275,19 @@ VALID_ROLES = ("directeur", "chef_noc", "technicien", "agent_terrain")
 # Vocabulaire normalisé, miroir exact de integrations/models.py. Toute
 # divergence entre les deux ferait disparaître des alertes des décomptes.
 SEVERITIES = ("critical", "high", "medium", "low", "info", "unknown")
+
+# Convention de nommage des équipements (INC-23) : SITE-RÔLE-NN par défaut,
+# par exemple « PA-RTR-01 ». Expression régulière, sans tenir compte de la casse.
+# Vide (docker-compose la transmet vide par défaut) = la règle par défaut.
+# Fin de nom notée \Z plutôt que « $ », que docker-compose interpréterait.
+NODE_NAME_PATTERN = (
+    os.getenv("NODE_NAME_PATTERN", "").strip() or r"^[A-Z0-9]+-[A-Z0-9]+-\d{2}\Z"
+)
+
+# Une alerte active depuis plus longtemps sans être acquittée est « à
+# revoir » (INC-13, AM-09) : équipement retiré, jamais remis en service, ou
+# alerte oubliée. Elle reste affichée, mais signalée et comptée à part.
+ALERT_OBSOLETE_DAYS = int(os.getenv("ALERT_OBSOLETE_DAYS", "30"))
 NODE_STATES = ("down", "degraded", "silent", "maintenance", "up", "unknown")
 
 # Heures ouvrées du NOC : sert au KPI « alertes détectées hors heures ».

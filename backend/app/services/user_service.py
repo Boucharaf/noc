@@ -34,6 +34,7 @@ def _serialize(user: User) -> dict:
         "employee_code": user.employee_code,
         "team": user.team,
         "has_pin": user.pin_hash is not None,
+        "must_change_password": bool(user.must_change_password),
         "last_login_at": user.last_login_at,
     }
 
@@ -86,6 +87,7 @@ def create_user(db: Session, payload: dict) -> dict:
         employee_code=payload.get("employee_code"),
         team=payload.get("team"),
         is_active=True,
+        must_change_password=True,
     )
     _require_address_for_notifications(user)
     db.add(user)

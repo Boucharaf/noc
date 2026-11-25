@@ -64,8 +64,7 @@ ROLE_SET = (
 
 
 def _random_pin() -> str:
-    """PIN tiré au hasard. Jamais de suite prévisible (1000, 1111…) : un PIN
-    ouvre une session sans identifiant, le deviner suffit."""
+    """PIN tiré au hasard. Jamais de suite prévisible (1000, 1111…)."""
     return f"{secrets.randbelow(10**PIN_LENGTH):0{PIN_LENGTH}d}"
 
 
@@ -106,11 +105,13 @@ def _upsert(session, *, username: str, role: str, full_name: str,
             password_hash=auth_service.hash_password(password),
             pin_hash=auth_service.hash_pin(pin) if pin else None,
             is_active=True,
+            must_change_password=True,
         )
         session.add(user)
         return f"+ {username} ({role}) créé"
 
     user.password_hash = auth_service.hash_password(password)
+    user.must_change_password = True
     # Un compte désactivé dont on réinitialise le mot de passe est
     # forcément un compte qu'on veut réutiliser.
     user.is_active = True
@@ -171,7 +172,7 @@ def main() -> int:
             print("\nComptes prêts. Connexion : identifiant ci-dessus + le mot de passe saisi.")
             for username, pin in pins.items():
                 print(f"PIN de {username} (affiché une seule fois) : {pin}")
-            print("Imposer un changement de mot de passe à chacun dès la première connexion.")
+            print("Chacun devra changer ce mot de passe à sa première connexion.")
             return 0
 
         if not args.username:

@@ -93,7 +93,7 @@ export default function NodesPage() {
           }}
           onClick={() => setParam("state", null)}
         >
-          <div className="text-[10.5px] uppercase tracking-[0.07em]" style={{ color: "var(--ink-3)" }}>
+          <div className="text-[12px] uppercase tracking-[0.07em]" style={{ color: "var(--ink-3)" }}>
             Parc total
           </div>
           <div className="num font-semibold" style={{ fontSize: 20 }}>
@@ -120,7 +120,7 @@ export default function NodesPage() {
               onClick={() => setParam("state", active ? null : state)}
             >
               <div
-                className="text-[10.5px] uppercase tracking-[0.07em] flex items-center gap-1"
+                className="text-[12px] uppercase tracking-[0.07em] flex items-center gap-1"
                 style={{ color: "var(--ink-3)" }}
               >
                 <span className="dot" style={{ background: meta.color, width: 6, height: 6 }} />
@@ -141,7 +141,7 @@ export default function NodesPage() {
         <div className="p-2 border-b" style={{ borderColor: "var(--border)" }}>
           <Toolbar
             right={
-              <span className="text-[11.5px]" style={{ color: "var(--ink-3)" }}>
+              <span className="text-[12px]" style={{ color: "var(--ink-3)" }}>
                 <span className="num" style={{ color: "var(--ink-2)" }}>
                   {num(query.data?.total, "0")}
                 </span>{" "}
@@ -178,7 +178,7 @@ export default function NodesPage() {
           </Toolbar>
         </div>
 
-        <div style={{ maxHeight: "calc(100vh - 300px)", overflow: "auto" }}>
+        <div style={{ maxHeight: "calc(var(--vh) - 300px)", overflow: "auto" }}>
           <QueryBoundary
             query={query}
             skeleton={<SkeletonRows rows={10} columns={8} />}

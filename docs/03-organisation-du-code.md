@@ -20,6 +20,10 @@ noc/
 │   ├── state.py               Contrat Redis (noms de clés) — partagé avec le backend
 │   ├── rollup.py              Bilan journalier (kpi_daily)
 │   ├── history.py             Journal historique (périodes d'état, alertes) et recalcul des bilans
+│   ├── identity.py            Identité stable des équipements (registre) et ligne de commande
+│   ├── downtime.py            Pannes enregistrées par les outils (hist_downtime)
+│   ├── tool_health.py         Santé des outils dans le temps
+│   ├── retention.py           Conservation : purge (désactivée par défaut) et aperçu
 │   └── probe.py               Diagnostic d'un connecteur contre l'outil réel
 │
 ├── integrations/              BIBLIOTHÈQUE — un connecteur par outil (collecteur + backend)
@@ -57,6 +61,8 @@ noc/
 │       ├── store/             État global (session, préférences)
 │       ├── components/        Briques d'interface (layout, ui, charts, domain)
 │       └── pages/             Un fichier par écran
+│
+├── backup/noc-backup.sh       SERVICE — sauvegarde quotidienne, restaurée à blanc
 │
 ├── nginx/                     SERVICE — passerelle HTTPS
 │   ├── nginx.conf             Routage /api, /ws, /
@@ -113,6 +119,11 @@ la racine du dépôt et non le dossier de chaque service.
 | Modifier le **contenu des courriels** | `backend/app/services/notification_service.py` | [6](06-alertes-et-notifications.md) |
 | Ajouter une **variable de configuration** | `backend/app/core/config.py` (ou `collector/config.py`), `docker-compose.yml` (section `environment` du service), `.env.example` | [9](09-exploitation.md) |
 | Modifier le **rapport mensuel** | `backend/app/services/report_service.py` | [7](07-backend.md) |
+| Modifier le **figement** des rapports | `backend/app/services/report_archive_service.py` | [7](07-backend.md) |
+| Changer les règles d'**identité** des équipements | `collector/identity.py` (tests : `test_identity.py`) | [4](04-sources-de-donnees.md) |
+| Changer les règles de **conservation** | `collector/retention.py` | [9](09-exploitation.md) |
+| Changer la **sauvegarde** | `backup/noc-backup.sh` | [9](09-exploitation.md) |
+| Ajouter une **table** | `backend/sql/schema.sql`, une révision dans `backend/migrations/versions/`, `models/operations.py` | [7](07-backend.md) |
 | Changer la **cadence** de rafraîchissement d'un écran | `frontend/src/hooks/queries.js` (constantes `REFRESH`) | [8](08-frontend.md) |
 
 ## Conventions de code

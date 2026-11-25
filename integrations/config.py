@@ -67,6 +67,14 @@ class ToolConfig:
         return bool(self.url)
 
 
+def web_url(name: str) -> str:
+    """Adresse WEB de l'outil, telle que l'ouvre le navigateur d'un exploitant
+    (`<OUTIL>_WEB_URL`, facultative). Distincte de l'URL d'API, qui désigne
+    souvent un nom de conteneur ou une adresse interne. Sans elle, l'écran ne
+    propose pas de lien vers l'outil."""
+    return os.getenv(f"{name.upper()}_WEB_URL", "").strip().rstrip("/")
+
+
 def tool_config(name: str) -> ToolConfig:
     prefix = name.upper()
     return ToolConfig(

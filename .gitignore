@@ -25,10 +25,24 @@ netxmsbd07082026.sql
 *.dump
 *.backup
 database/*dump*.sql
+# Sauvegardes de la base du NOC (docs/13-mise-en-service-des-donnees.md) :
+# comptes et journal historique.
+sauvegarde_noc_*.sql
+*sauvegarde*.sql
+*sauvegarde*.sql.gz
+*.bak
+*.bak.*
+*.sql.gz
+sauvegarde/
+sauvegardes/
 
-
-
-
+# Documents bureautiques : PDF et Excel.
+*.pdf
+*.xls
+*.xlsx
+*.xlsm
+*.xlsb
+*.docx
 
 # Python
 *.py[cod]

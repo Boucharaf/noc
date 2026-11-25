@@ -4,7 +4,7 @@ import Panel from "../ui/Panel";
 import Stat from "../ui/Stat";
 import { Segmented } from "../ui/Controls";
 import { EmptyState, QueryBoundary } from "../ui/States";
-import { dateTime, duration, num, pct } from "../../lib/format";
+import { dateTime, duration, num, availabilityPct } from "../../lib/format";
 import { nodeStateMeta, thresholdColor } from "../../lib/vocabulary";
 import { useNodeHistory } from "../../hooks/queries";
 
@@ -54,13 +54,22 @@ function StateTimeline({ segments, days }) {
           );
         })}
       </div>
-      <div className="flex justify-between text-[10.5px] mt-0.5" style={{ color: "var(--ink-3)" }}>
+      <div className="flex justify-between text-[12px] mt-0.5" style={{ color: "var(--ink-3)" }}>
         <span>il y a {days} j</span>
         <span>maintenant</span>
       </div>
     </div>
   );
 }
+
+
+// Source maître des pannes d'un équipement (collector/downtime.py).
+const SOURCE_LABELS = {
+  netxms_downtime_log: "le journal de pannes NetXMS (downtime_log)",
+  centreon_host_events: "les changements d'état de l'hôte dans Centreon",
+  zabbix_trigger_events: "les événements de disponibilité de Zabbix (ICMP, agent)",
+  nagios_host_events: "les changements d'état de l'hôte dans Nagios",
+};
 
 export default function AvailabilityHistory({ nodeId }) {
   const [days, setDays] = useState(30);
@@ -93,7 +102,7 @@ export default function AvailabilityHistory({ nodeId }) {
                 <Stat
                   compact
                   label="Disponibilité"
-                  value={pct(node.availability_pct, 2)}
+                  value={availabilityPct(node.availability_pct, 2)}
                   color={thresholdColor("availability_pct", node.availability_pct) ?? undefined}
                   hint={
                     node.unobserved_minutes
@@ -117,11 +126,26 @@ export default function AvailabilityHistory({ nodeId }) {
                 />
               </div>
               <StateTimeline segments={node.segments} days={days} />
+              {SOURCE_LABELS[node.source] && (
+                // Pannes datées par l'outil source (NetXMS, Centreon) ;
+                // l'écart avec ce que le NOC observait est publié.
+                <p className="text-[12px]" style={{ color: "var(--ink-3)" }}>
+                  Pannes datées par {SOURCE_LABELS[node.source]}.
+                  {node.reconciliation &&
+                  (node.reconciliation.noc_only_down_minutes || node.reconciliation.source_only_down_minutes)
+                    ? ` Écart avec les observations du NOC : ${duration(
+                        node.reconciliation.source_only_down_minutes,
+                      )} de panne non vues par le NOC, ${duration(
+                        node.reconciliation.noc_only_down_minutes,
+                      )} vues par le NOC seul.`
+                    : ""}
+                </p>
+              )}
 
               {data.links?.length > 0 && (
                 <div>
                   <h3
-                    className="text-[10.5px] font-semibold uppercase tracking-[0.07em] mb-1"
+                    className="text-[12px] font-semibold uppercase tracking-[0.07em] mb-1"
                     style={{ color: "var(--ink-3)" }}
                   >
                     Liens surveillés ({data.links.length})
@@ -147,7 +171,7 @@ export default function AvailabilityHistory({ nodeId }) {
                               color: thresholdColor("availability_pct", link.availability_pct) ?? undefined,
                             }}
                           >
-                            {pct(link.availability_pct, 2)}
+                            {availabilityPct(link.availability_pct, 2)}
                           </td>
                           <td className="num" style={{ textAlign: "right" }}>
                             {duration(link.minutes?.down ?? 0)}

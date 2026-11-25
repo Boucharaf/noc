@@ -29,9 +29,9 @@ export const ROLE_DESCRIPTION = Object.freeze({
   directeur:
     "Vue de pilotage : disponibilité, SLA, tendances, rapports. Aucun geste d'exploitation.",
   chef_noc:
-    "Salle de supervision : affectation, escalade, maintenance, gestion des comptes.",
+    "Salle de supervision : suivi de tout le réseau, SLA, rapports, gestion des comptes. Les alertes et incidents se traitent dans les outils et dans iTop.",
   technicien:
-    "Console d'exploitation : traitement des alertes, acquittement, résolution.",
+    "Console d'exploitation : suivi et priorisation des alertes et incidents. L'acquittement et la résolution se font dans l'outil source ou dans iTop.",
   agent_terrain:
     "Terrain : interventions (ordres de travail iTop).",
 });

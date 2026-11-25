@@ -62,7 +62,7 @@ export default function AuditPage() {
       key: "at",
       header: "Date",
       width: 150,
-      render: (entry) => <span className="num text-[11.5px]">{dateTime(entry.at)}</span>,
+      render: (entry) => <span className="num text-[12px]">{dateTime(entry.at)}</span>,
     },
     {
       key: "action",
@@ -90,7 +90,7 @@ export default function AuditPage() {
       header: "Détail",
       wrap: true,
       render: (entry) => (
-        <span className="text-[11.5px]" style={{ color: "var(--ink-2)" }}>
+        <span className="text-[12px]" style={{ color: "var(--ink-2)" }}>
           {describe(entry.detail) || "—"}
         </span>
       ),
@@ -99,7 +99,7 @@ export default function AuditPage() {
       key: "ip",
       header: "Adresse",
       width: 130,
-      render: (entry) => <span className="num text-[11.5px]">{entry.ip ?? "—"}</span>,
+      render: (entry) => <span className="num text-[12px]">{entry.ip ?? "—"}</span>,
     },
   ];
 

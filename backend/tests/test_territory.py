@@ -361,3 +361,31 @@ def test_incident_kpis_do_not_report_missing_cause_field_as_zero(monkeypatch):
     kpis = asyncio.run(incident_service.incident_kpis(None))
     assert kpis["cause_available"] is False
     assert kpis["without_cause_pct"] is None
+
+
+def test_scope_filters_by_organisation_and_type_like_locality():
+    """AM-30 : la barre unique filtre aussi par organisation et par type."""
+    from app.services import geo_service
+
+    nodes = [
+        {"id": "a", "region": "Centre", "organisation": "DGI", "node_type": "router"},
+        {"id": "b", "region": "Centre", "organisation": "DGI", "node_type": "switch"},
+        {"id": "c", "region": "Centre", "organisation": "Trésor", "node_type": "router"},
+    ]
+
+    assert geo_service.scope_ids(nodes) is None
+    assert geo_service.scope_ids(nodes, organisation="DGI") == {"a", "b"}
+    assert geo_service.scope_ids(nodes, node_type="router") == {"a", "c"}
+    assert geo_service.scope_ids(nodes, organisation="DGI", node_type="router") == {"a"}
+    assert [n["id"] for n in geo_service.scope_nodes(nodes, organisation="Trésor")] == ["c"]
+
+
+def test_site_spelling_variants_are_reported():
+    """INC-35 : « Zôrgho » et « Zorgho » sont un même site écrit deux fois."""
+    from app.services.geo_service import spelling_variants
+
+    rows = spelling_variants(["Zôrgho", "Zorgho", "Zorgho", "Boussé", "Bousse", "Pâ", None, ""])
+    assert rows == [
+        {"key": "ZORGHO", "names": ["Zorgho", "Zôrgho"], "nodes": 3},
+        {"key": "BOUSSE", "names": ["Bousse", "Boussé"], "nodes": 2},
+    ]

@@ -50,6 +50,9 @@ async def network_snapshot(
         "nodes_unknown": summary["nodes_by_state"].get("unknown", 0),
         "fleet_health_pct": summary["fleet_health_pct"],
         "fleet_availability_pct": summary["fleet_availability_pct"],
+        "nodes_supervised": summary["nodes_supervised"],
+        "nodes_unsupervised": summary["nodes_unsupervised"],
+        "availability_basis": summary["availability_basis"],
         "alerts_total": summary["alerts_total"],
         "alerts_critical": summary["alerts_by_severity"].get("critical", 0),
         "tools_covering": len(
@@ -63,6 +66,17 @@ async def network_snapshot(
         "snapshot_age_s": await live_service.snapshot_age_s(),
         "stale": await live_service.is_stale(),
     }
+
+
+def percentile(values: list[float], rank: float) -> float:
+    """Percentile par interpolation linéaire (méthode « inclusive »)."""
+    ordered = sorted(values)
+    if not ordered:
+        raise ValueError("percentile d'une liste vide")
+    position = (len(ordered) - 1) * rank / 100
+    low = int(position)
+    high = min(low + 1, len(ordered) - 1)
+    return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
 
 
 def _facts(node: dict, key: str) -> list[dict]:
@@ -88,19 +102,31 @@ def link_summary(nodes: list[dict]) -> dict | None:
         "capacity_bps",
     )}
     covered = 0
+    unmeasured = 0
     for node in nodes:
         summaries = _facts(node, "interfaces")
         if not summaries:
+            continue
+        # INC-07 : l'inventaire d'interfaces d'un équipement non supervisé
+        # (état inconnu) ou dont l'outil n'a pas répondu est DÉCLARATIF — la
+        # configuration, pas l'état réel. Il n'entre pas dans les taux.
+        if node.get("state") not in ("up", "degraded", "down") or (
+            "netxms" in (node.get("stale_sources") or [])
+        ):
+            unmeasured += 1
             continue
         covered += 1
         for summary in summaries:
             for key in totals:
                 totals[key] += int(summary.get(key) or 0)
-    if not covered:
+    if not covered and not unmeasured:
         return None
     measured = totals["enabled_up"] + totals["enabled_down"]
     return {
         "nodes": covered,
+        # Équipements dont l'inventaire d'interfaces existe mais n'est pas
+        # mesuré : affichés à part (« Non mesuré »), jamais comptés.
+        "unmeasured_nodes": unmeasured,
         **totals,
         "enabled_up_pct": round(100 * totals["enabled_up"] / measured, 2) if measured else None,
         "watched_up_pct": (
@@ -228,6 +254,7 @@ async def top_nodes(limit: int, db: Session, nodes: list[dict] | None = None) ->
             "state": node.get("state"),
             "alerts": node.get("alerts", 0),
             "worst_severity": node.get("worst_severity"),
+            "node_type": node.get("node_type"),
         }
         for node in ranked[:limit]
         if node.get("alerts", 0) > 0
@@ -392,6 +419,9 @@ async def network_series(
                 "node_name": node.get("name"),
                 "site": node.get("site"),
                 "avg_value": round(sum(values) / len(values), 3),
+                # AM-17, KPI-19/22 : le p95 écarte les pics isolés que le
+                # maximum retient, sans masquer une dégradation durable.
+                "p95_value": round(percentile(values, 95), 3),
                 "max_value": round(max(values), 3),
                 "nb_points": len(values),
             }

@@ -73,6 +73,7 @@ def test_alert_kind_filter_separates_technical_alerts_from_itsm_tickets(monkeypa
         return False
 
     monkeypatch.setattr(live_service, "get_alerts", get_alerts)
+    monkeypatch.setattr(live_service, "get_all_alerts", get_alerts)
     monkeypatch.setattr(live_service, "get_nodes", get_nodes)
     monkeypatch.setattr(live_service, "snapshot_age_s", zero_age)
     monkeypatch.setattr(live_service, "is_stale", not_stale)
@@ -350,6 +351,7 @@ def test_live_kpis_separate_itop_tickets_from_technical_alerts(monkeypatch):
 
     monkeypatch.setattr(kpi_service.live_service, "get_alerts", get_alerts)
     monkeypatch.setattr(live_service, "get_alerts", get_alerts)
+    monkeypatch.setattr(live_service, "get_all_alerts", get_alerts)
 
     summary = asyncio.run(live_service.fleet_summary([]))
     by_tool = asyncio.run(kpi_service.alerts_by_tool())
@@ -361,11 +363,12 @@ def test_live_kpis_separate_itop_tickets_from_technical_alerts(monkeypatch):
     assert next(row for row in by_severity if row["severity"] == "critical")["count"] == 1
 
 
-def test_fleet_availability_counts_silent_and_unknown_as_unavailable(monkeypatch):
+def test_fleet_availability_excludes_unsupervised_from_denominator(monkeypatch):
     async def no_alerts():
         return []
 
     monkeypatch.setattr(live_service, "get_alerts", no_alerts)
+    monkeypatch.setattr(live_service, "get_all_alerts", no_alerts)
     summary = asyncio.run(
         live_service.fleet_summary(
             [
@@ -379,7 +382,28 @@ def test_fleet_availability_counts_silent_and_unknown_as_unavailable(monkeypatch
     )
 
     assert summary["fleet_health_pct"] == 20
-    assert summary["fleet_availability_pct"] == 25
+    # AM-29 : muet et inconnu ne sont ni en service ni en panne. Ils sont
+    # comptés à part et sortent du dénominateur, comme la maintenance.
+    assert summary["fleet_availability_pct"] == 50
+    assert summary["nodes_supervised"] == 2
+    assert summary["nodes_unsupervised"] == 2
+    assert summary["availability_basis"]["up"] == 1
+    assert summary["availability_basis"]["supervised"] == 2
+
+
+def test_fleet_availability_is_none_when_nothing_is_supervised(monkeypatch):
+    async def no_alerts():
+        return []
+
+    monkeypatch.setattr(live_service, "get_alerts", no_alerts)
+    monkeypatch.setattr(live_service, "get_all_alerts", no_alerts)
+    summary = asyncio.run(
+        live_service.fleet_summary([{"state": "unknown"}, {"state": "silent"}])
+    )
+
+    # INC-40 : aucun équipement supervisé → « Non supervisé », jamais 0,0 %.
+    assert summary["fleet_availability_pct"] is None
+    assert summary["nodes_unsupervised"] == 2
 
 
 def test_collector_retains_last_source_data_and_marks_it_stale(monkeypatch):
@@ -537,7 +561,7 @@ def test_network_series_averages_each_node_before_population(monkeypatch):
     ]
 
 
-def test_site_availability_excludes_maintenance_and_counts_unknown(monkeypatch):
+def test_site_availability_excludes_maintenance_and_unsupervised(monkeypatch):
     nodes = [
         {"id": "up", "site": "A", "state": "up"},
         {"id": "down", "site": "A", "state": "down"},
@@ -554,10 +578,13 @@ def test_site_availability_excludes_maintenance_and_counts_unknown(monkeypatch):
 
     monkeypatch.setattr(live_service, "get_nodes", get_nodes)
     monkeypatch.setattr(live_service, "get_alerts", get_alerts)
+    monkeypatch.setattr(live_service, "get_all_alerts", get_alerts)
 
     result = asyncio.run(live_service.sites_summary())[0]
 
-    assert result["availability_pct"] == 25.0
+    assert result["availability_pct"] == 50.0
+    assert result["supervised"] == 2
+    assert result["unsupervised"] == 2
     assert result["maintenance"] == 1
     assert result["silent"] == 1
     assert result["unknown"] == 1
@@ -593,6 +620,7 @@ def test_site_maintenance_window_overrides_measured_state(monkeypatch):
         return []
 
     monkeypatch.setattr(live_service, "get_alerts", get_alerts)
+    monkeypatch.setattr(live_service, "get_all_alerts", get_alerts)
     by_site = asyncio.run(live_service.sites_summary(result))
     assert by_site[0]["availability_pct"] == 100.0
     assert by_site[0]["maintenance"] == 1
@@ -1090,3 +1118,58 @@ def test_collector_publishes_empty_result_from_a_healthy_source(monkeypatch):
     assert store.snapshot_written
     assert store.nodes == []
     assert store.alerts == []
+
+
+def test_alert_queue_order_and_source_links(monkeypatch):
+    """AM-07 : criticité, non acquittées d'abord, puis les plus anciennes ;
+    liens vers l'outil source et vers un ticket iTop pré-rempli."""
+    from app.services import alerts_service
+
+    monkeypatch.setenv("ZABBIX_WEB_URL", "https://zabbix.example/")
+    monkeypatch.setenv("ITOP_WEB_URL", "https://itop.example")
+    links = alerts_service.source_links(
+        {"tool": "zabbix", "ref": "9", "node_ref": "101", "message": "Ping", "since": "x"}
+    )
+    assert links["acknowledge"].startswith("https://zabbix.example/zabbix.php?action=problem.view")
+    assert "hostids%5B%5D=101" in links["acknowledge"]
+    assert links["ticket"].startswith("https://itop.example/pages/UI.php?operation=new&class=Incident")
+
+    monkeypatch.delenv("ZABBIX_WEB_URL")
+    monkeypatch.delenv("ITOP_WEB_URL")
+    assert alerts_service.source_links({"tool": "zabbix"}) == {"acknowledge": None, "ticket": None}
+
+    nodes = []
+    alerts = [
+        {"tool": "zabbix", "ref": "1", "severity": "critical", "since": "2026-01-02T00:00:00+00:00",
+         "acknowledged": True},
+        {"tool": "zabbix", "ref": "2", "severity": "critical",
+         "since": "2026-01-03T00:00:00+00:00"},
+        {"tool": "zabbix", "ref": "3", "severity": "critical",
+         "since": "2026-01-01T00:00:00+00:00"},
+        {"tool": "zabbix", "ref": "4", "severity": "high", "since": "2025-01-01T00:00:00+00:00"},
+    ]
+
+    async def get_nodes():
+        return nodes
+
+    async def get_alerts():
+        return alerts
+
+    async def no_windows(*_args):
+        return []
+
+    async def none():
+        return None
+
+    async def false():
+        return False
+
+    monkeypatch.setattr(live_service, "get_nodes", get_nodes)
+    monkeypatch.setattr(live_service, "get_alerts", get_alerts)
+    monkeypatch.setattr(live_service, "get_all_alerts", get_alerts)
+    monkeypatch.setattr(live_service, "snapshot_age_s", none)
+    monkeypatch.setattr(live_service, "is_stale", false)
+    monkeypatch.setattr(alerts_service.node_service, "active_windows", no_windows)
+
+    result = asyncio.run(alerts_service.list_alerts())
+    assert [a["ref"] for a in result["alerts"]] == ["3", "2", "1", "4"]
